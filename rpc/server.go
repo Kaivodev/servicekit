@@ -35,17 +35,18 @@ type ServerOptions struct {
 }
 
 type Server struct {
-	grpc      *grpc.Server
-	listener  net.Listener
-	health    *health.Server
-	checks    map[string]Check
-	log       *slog.Logger
-	options   ServerOptions
-	started   atomic.Bool
-	draining  atomic.Bool
-	ready     atomic.Bool
-	drainOnce sync.Once
-	deadline  atomic.Pointer[time.Time]
+	grpc         *grpc.Server
+	listener     net.Listener
+	health       *health.Server
+	checks       map[string]Check
+	log          *slog.Logger
+	options      ServerOptions
+	started      atomic.Bool
+	draining     atomic.Bool
+	ready        atomic.Bool
+	drainOnce    sync.Once
+	drainStarted chan struct{}
+	deadline     atomic.Pointer[time.Time]
 }
 
 // Register is called only by a service's composition root. Handlers must still
@@ -64,7 +65,7 @@ func NewServer(options ServerOptions, material *mtls.Material, access, runtime *
 	if err != nil {
 		return nil, err
 	}
-	s := &Server{options: options, log: runtime, health: health.NewServer(), checks: make(map[string]Check)}
+	s := &Server{options: options, log: runtime, health: health.NewServer(), checks: make(map[string]Check), drainStarted: make(chan struct{})}
 	for name, check := range checks {
 		if check == nil || !config.ValidService(name) {
 			return nil, errors.New("invalid readiness check")
@@ -156,6 +157,7 @@ func (s *Server) beginDrain() {
 		s.draining.Store(true)
 		s.ready.Store(false)
 		s.health.Shutdown()
+		close(s.drainStarted)
 	})
 }
 

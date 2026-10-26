@@ -67,6 +67,21 @@ func (s *Server) streamGuard(access *slog.Logger, authenticate grpcobs.Authentic
 		if !strings.HasPrefix(info.FullMethod, "/grpc.health.v1.Health/") && !s.Ready() {
 			return status.Error(codes.Unavailable, "Service is not ready")
 		}
+		// A health watch is an open-ended control stream, not business work.
+		// Close it when draining so a well-behaved watcher cannot force every
+		// graceful shutdown to exhaust its deadline.
+		if info.FullMethod == "/grpc.health.v1.Health/Watch" {
+			watchctx, cancel := context.WithCancel(ctx)
+			defer cancel()
+			go func() {
+				select {
+				case <-s.drainStarted:
+					cancel()
+				case <-watchctx.Done():
+				}
+			}()
+			ctx = watchctx
+		}
 		ids := requestmeta.From(ctx)
 		_ = stream.SetHeader(metadata.Pairs(grpcobs.RequestIDHeader, ids.RequestID, grpcobs.TraceIDHeader, ids.TraceID))
 		return handler(server, &contextStream{ServerStream: stream, ctx: ctx})

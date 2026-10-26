@@ -50,3 +50,40 @@ func TestPlaintextAndMissingClientCertificateRejected(t *testing.T) {
 		t.Fatal("weak TLS defaults")
 	}
 }
+
+func TestHealthWatchDoesNotConsumeDrainBudget(t *testing.T) {
+	certs := materials(t, "iam", "backend")
+	server, err := NewServer(serverOptions(), certs["iam"], logging.New(io.Discard, slog.LevelInfo), logging.New(io.Discard, slog.LevelInfo), nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- server.Run(ctx) }()
+	conn, err := connect(t, server, certs["backend"], "iam", "iam")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	waitReady(t, server, true)
+	watchctx, stop := context.WithTimeout(context.Background(), time.Second)
+	defer stop()
+	watch, err := healthpb.NewHealthClient(conn).Watch(watchctx, &healthpb.HealthCheckRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = watch.Recv(); err != nil {
+		t.Fatal(err)
+	}
+	// The client keeps its long-lived watch open while the server stops.
+	cancel()
+	select {
+	case err = <-done:
+		if err != nil {
+			t.Fatal("health watch forced an otherwise idle server to time out:", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("shutdown hung")
+	}
+}
