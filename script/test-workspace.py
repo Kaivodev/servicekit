@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build/run four sibling services against freshly initialized, loopback-only stores.
+"""Build/run five sibling services against freshly initialized, loopback-only stores.
 Requires native PostgreSQL (initdb/pg_ctl/psql) and Redis binaries; never uses a
 configured business database. All databases, certificates and logs are temporary.
 """
@@ -14,7 +14,7 @@ import subprocess
 import tempfile
 import time
 
-SERVICES = ('iam', 'ledger', 'settlement', 'reconciliation')
+SERVICES = ('iam', 'payment', 'ledger', 'settlement', 'reconciliation')
 p = argparse.ArgumentParser(description=__doc__)
 p.add_argument('--workspace', type=Path, default=Path(__file__).resolve().parents[2])
 p.add_argument('--use-workspace', action='store_true', help='use local sibling modules instead of published versions')
@@ -173,7 +173,7 @@ with tempfile.TemporaryDirectory(prefix='aipay-runtime-test-') as temp:
                 json.loads(line)
                 if 'postgres://' in line:
                     raise RuntimeError('database URL leaked into logs')
-        print('four-process isolation, startup failure cleanup, schema/Redis/PostgreSQL readiness, unavailable collector and SIGTERM passed', flush=True)
+        print('five-process isolation, startup failure cleanup, schema/Redis/PostgreSQL readiness, unavailable collector and SIGTERM passed', flush=True)
     finally:
         for process in processes.values():
             if process.poll() is None:

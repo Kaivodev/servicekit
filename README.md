@@ -21,11 +21,11 @@
 make fmt check
 # 仅对隔离的测试实例执行
 AIPAY_TEST_DATABASE_URL=... AIPAY_TEST_REDIS_URL=... make test-integration
-# 同级工作区四服务的完整进程验证；只创建并销毁自己的临时数据库实例
+# 同级工作区五服务的完整进程验证；只创建并销毁自己的临时数据库实例
 python3 script/test-workspace.py --workspace .. --postgres-bin /path/to/postgresql/bin
 ```
 
-真实 TCP 测试覆盖 TLS、服务名单、错误 CA/主机名、无客户端证书、明文拒绝、关联 ID、健康 Watch、依赖故障、消息限制、取消、正常排空及超时退出。存储测试覆盖迁移锁、属主、回滚、dirty/schema 版本和关闭期限。工作区脚本另外启动四个真实服务，检查错误配置、依赖中断、恢复、日志和 SIGTERM。
+真实 TCP 测试覆盖 TLS、服务名单、错误 CA/主机名、无客户端证书、明文拒绝、关联 ID、健康 Watch、依赖故障、消息限制、取消、正常排空及超时退出。存储测试覆盖迁移锁、属主、回滚、dirty/schema 版本和关闭期限。工作区脚本另外启动五个真实服务，检查错误配置、依赖中断、恢复、日志和 SIGTERM。
 
 开发证书仅用于本机，默认 7 天；输出目录必须不存在，证书和私钥权限为 0600：
 

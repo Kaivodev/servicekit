@@ -7,6 +7,7 @@ services:
       POSTGRES_DB: postgres
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?run dev/prepare.py}
       IAM_DB_PASSWORD: ${IAM_DB_PASSWORD}
+      PAYMENT_DB_PASSWORD: ${PAYMENT_DB_PASSWORD:?run dev/prepare.py --add-missing-credentials for an existing stack}
       LEDGER_DB_PASSWORD: ${LEDGER_DB_PASSWORD}
       SETTLEMENT_DB_PASSWORD: ${SETTLEMENT_DB_PASSWORD}
       RECONCILIATION_DB_PASSWORD: ${RECONCILIATION_DB_PASSWORD}
@@ -33,7 +34,7 @@ services:
   queue-redis:
     image: redis:8
     environment:
-      REDIS_PASSWORD: ${QUEUE_REDIS_PASSWORD:?run dev/prepare.py --add-queue-credentials for an existing stack}
+      REDIS_PASSWORD: ${QUEUE_REDIS_PASSWORD:?run dev/prepare.py --add-missing-credentials for an existing stack}
     command: [sh, -c, 'exec redis-server --appendonly yes --appendfsync everysec --maxmemory-policy noeviction --requirepass "$$REDIS_PASSWORD"']
     volumes: [queue-redis:/data]
     healthcheck:
@@ -105,6 +106,58 @@ services:
     ports: ['127.0.0.1:9101:9101']
     depends_on:
       iam-migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    networks: [private]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    stop_grace_period: 20s
+  payment-migrate:
+    image: aipay-local/payment:dev
+    build:
+      context: ../../payment
+      secrets: [aipay_modules_token]
+    user: '${AIPAY_DEV_UID}:${AIPAY_DEV_GID}'
+    environment: &payment-environment
+      AIPAY_GRPC_ADDR: 0.0.0.0:9105
+      AIPAY_GRPC_SERVER_NAME: payment
+      AIPAY_RPC_ALLOWED_PEERS: backend,probe,payment
+      AIPAY_TLS_TRUST_DOMAIN: aipay.test
+      AIPAY_TLS_CA_FILE: /run/aipay/ca.crt
+      AIPAY_TLS_CERT_FILE: /run/aipay/service/tls.crt
+      AIPAY_TLS_KEY_FILE: /run/aipay/service/tls.key
+      AIPAY_DATABASE_URL: postgres://payment:${PAYMENT_DB_PASSWORD}@postgres:5432/aipay_payment?sslmode=disable
+      AIPAY_REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/5
+      AIPAY_LOG_DIR: /app/logs
+      AIPAY_TRACE_ENDPOINT: http://collector:4317
+      AIPAY_TRACE_ALLOW_INSECURE: "true"
+      AIPAY_TRACE_ENVIRONMENT: local
+    volumes: &payment-volumes
+      - ${AIPAY_DEV_DIR}/certs/ca.crt:/run/aipay/ca.crt:ro
+      - ${AIPAY_DEV_DIR}/certs/payment:/run/aipay/service:ro
+      - ${AIPAY_DEV_DIR}/logs/payment:/app/logs
+    command: [migrate, up]
+    healthcheck:
+      disable: true
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [private]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+  payment:
+    image: aipay-local/payment:dev
+    user: '${AIPAY_DEV_UID}:${AIPAY_DEV_GID}'
+    environment: *payment-environment
+    volumes: *payment-volumes
+    ports: ['127.0.0.1:9105:9105']
+    depends_on:
+      payment-migrate:
         condition: service_completed_successfully
       redis:
         condition: service_healthy
