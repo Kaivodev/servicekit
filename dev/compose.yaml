@@ -30,6 +30,38 @@ services:
       timeout: 2s
       retries: 30
     networks: [private]
+  queue-redis:
+    image: redis:8
+    environment:
+      REDIS_PASSWORD: ${QUEUE_REDIS_PASSWORD:?run dev/prepare.py --add-queue-credentials for an existing stack}
+    command: [sh, -c, 'exec redis-server --appendonly yes --appendfsync everysec --maxmemory-policy noeviction --requirepass "$$REDIS_PASSWORD"']
+    volumes: [queue-redis:/data]
+    healthcheck:
+      test: [CMD-SHELL, 'REDISCLI_AUTH="$$REDIS_PASSWORD" redis-cli ping | grep -q PONG']
+      interval: 2s
+      timeout: 2s
+      retries: 30
+    networks: [private]
+  jaeger:
+    image: jaegertracing/jaeger:2.22.0
+    command: [--config, /etc/aipay/jaeger.yaml]
+    environment:
+      AIPAY_JAEGER_QUERY_ADDR: 0.0.0.0:16686
+      AIPAY_JAEGER_QUERY_GRPC_ADDR: 0.0.0.0:16685
+      AIPAY_JAEGER_OTLP_ADDR: 0.0.0.0:4317
+    volumes: [./jaeger.yaml:/etc/aipay/jaeger.yaml:ro]
+    ports: ['127.0.0.1:16686:16686']
+    networks: [private]
+  collector:
+    image: otel/opentelemetry-collector-contrib:0.163.2
+    command: [--config, /etc/aipay/collector.yaml]
+    environment:
+      AIPAY_COLLECTOR_ADDR: 0.0.0.0:4317
+      AIPAY_JAEGER_OTLP_ADDR: jaeger:4317
+    volumes: [./collector.yaml:/etc/aipay/collector.yaml:ro]
+    ports: ['127.0.0.1:4317:4317']
+    depends_on: [jaeger]
+    networks: [private]
   iam-migrate:
     image: aipay-local/iam:dev
     build:
@@ -47,6 +79,9 @@ services:
       AIPAY_DATABASE_URL: postgres://iam:${IAM_DB_PASSWORD}@postgres:5432/aipay_iam?sslmode=disable
       AIPAY_REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/1
       AIPAY_LOG_DIR: /app/logs
+      AIPAY_TRACE_ENDPOINT: http://collector:4317
+      AIPAY_TRACE_ALLOW_INSECURE: "true"
+      AIPAY_TRACE_ENVIRONMENT: local
     volumes: &iam-volumes
       - ${AIPAY_DEV_DIR}/certs/ca.crt:/run/aipay/ca.crt:ro
       - ${AIPAY_DEV_DIR}/certs/iam:/run/aipay/service:ro
@@ -96,6 +131,9 @@ services:
       AIPAY_DATABASE_URL: postgres://ledger:${LEDGER_DB_PASSWORD}@postgres:5432/aipay_ledger?sslmode=disable
       AIPAY_REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/2
       AIPAY_LOG_DIR: /app/logs
+      AIPAY_TRACE_ENDPOINT: http://collector:4317
+      AIPAY_TRACE_ALLOW_INSECURE: "true"
+      AIPAY_TRACE_ENVIRONMENT: local
     volumes: &ledger-volumes
       - ${AIPAY_DEV_DIR}/certs/ca.crt:/run/aipay/ca.crt:ro
       - ${AIPAY_DEV_DIR}/certs/ledger:/run/aipay/service:ro
@@ -145,6 +183,9 @@ services:
       AIPAY_DATABASE_URL: postgres://settlement:${SETTLEMENT_DB_PASSWORD}@postgres:5432/aipay_settlement?sslmode=disable
       AIPAY_REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/3
       AIPAY_LOG_DIR: /app/logs
+      AIPAY_TRACE_ENDPOINT: http://collector:4317
+      AIPAY_TRACE_ALLOW_INSECURE: "true"
+      AIPAY_TRACE_ENVIRONMENT: local
     volumes: &settlement-volumes
       - ${AIPAY_DEV_DIR}/certs/ca.crt:/run/aipay/ca.crt:ro
       - ${AIPAY_DEV_DIR}/certs/settlement:/run/aipay/service:ro
@@ -194,6 +235,9 @@ services:
       AIPAY_DATABASE_URL: postgres://reconciliation:${RECONCILIATION_DB_PASSWORD}@postgres:5432/aipay_reconciliation?sslmode=disable
       AIPAY_REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/4
       AIPAY_LOG_DIR: /app/logs
+      AIPAY_TRACE_ENDPOINT: http://collector:4317
+      AIPAY_TRACE_ALLOW_INSECURE: "true"
+      AIPAY_TRACE_ENVIRONMENT: local
     volumes: &reconciliation-volumes
       - ${AIPAY_DEV_DIR}/certs/ca.crt:/run/aipay/ca.crt:ro
       - ${AIPAY_DEV_DIR}/certs/reconciliation:/run/aipay/service:ro
@@ -231,6 +275,7 @@ networks:
     internal: true
 volumes:
   postgres:
+  queue-redis:
 secrets:
   aipay_modules_token:
     environment: AIPAY_MODULES_TOKEN

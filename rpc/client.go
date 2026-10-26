@@ -9,6 +9,9 @@ import (
 	"github.com/aipay-dev/observability/requestmeta"
 	"github.com/aipay-dev/servicekit/config"
 	"github.com/aipay-dev/servicekit/mtls"
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials"
@@ -16,6 +19,7 @@ import (
 )
 
 type ClientOptions struct {
+	TracerProvider  trace.TracerProvider
 	Address         string
 	ServerName      string
 	ExpectedService string
@@ -39,12 +43,16 @@ func Connect(ctx context.Context, material *mtls.Material, options ClientOptions
 	if err != nil {
 		return nil, err
 	}
-	connection, err := grpc.NewClient("passthrough:///"+options.Address,
+	dialOptions := []grpc.DialOption{
 		grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig)), grpc.WithDisableRetry(),
 		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(options.MaxMessageBytes), grpc.MaxCallSendMsgSize(options.MaxMessageBytes)),
 		grpc.WithChainUnaryInterceptor(clientDeadline(options.CallTimeout), grpcobs.UnaryClient()),
 		grpc.WithStreamInterceptor(streamClientCorrelation()),
-	)
+	}
+	if options.TracerProvider != nil {
+		dialOptions = append(dialOptions, grpc.WithStatsHandler(otelgrpc.NewClientHandler(otelgrpc.WithTracerProvider(options.TracerProvider), otelgrpc.WithPropagators(propagation.TraceContext{}))))
+	}
+	connection, err := grpc.NewClient("passthrough:///"+options.Address, dialOptions...)
 	if err != nil {
 		return nil, errors.New("create RPC connection failed")
 	}

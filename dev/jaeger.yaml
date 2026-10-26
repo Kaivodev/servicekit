@@ -1,0 +1,36 @@
+# Local verification only. In-memory traces disappear on restart.
+service:
+  extensions: [jaeger_storage, jaeger_query]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [jaeger_storage_exporter]
+  telemetry:
+    metrics:
+      level: none
+extensions:
+  jaeger_storage:
+    backends:
+      memory:
+        memory:
+          max_traces: 10000
+  jaeger_query:
+    storage:
+      traces: memory
+    http:
+      endpoint: ${env:AIPAY_JAEGER_QUERY_ADDR}
+    grpc:
+      endpoint: ${env:AIPAY_JAEGER_QUERY_GRPC_ADDR}
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: ${env:AIPAY_JAEGER_OTLP_ADDR}
+processors:
+  batch:
+    timeout: 100ms
+    send_batch_size: 128
+exporters:
+  jaeger_storage_exporter:
+    trace_storage: memory

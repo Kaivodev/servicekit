@@ -15,6 +15,9 @@ import (
 	"github.com/aipay-dev/observability/grpcobs"
 	"github.com/aipay-dev/servicekit/config"
 	"github.com/aipay-dev/servicekit/mtls"
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
@@ -28,6 +31,7 @@ var ErrShutdownTimeout = errors.New("RPC shutdown exceeded drain deadline")
 type Check func(context.Context) error
 
 type ServerOptions struct {
+	TracerProvider  trace.TracerProvider
 	RPC             config.RPC
 	HealthTimeout   time.Duration
 	HealthInterval  time.Duration
@@ -73,10 +77,14 @@ func NewServer(options ServerOptions, material *mtls.Material, access, runtime *
 		s.checks[name] = check
 	}
 	s.health.SetServingStatus("", healthpb.HealthCheckResponse_NOT_SERVING)
-	s.grpc = grpc.NewServer(grpc.Creds(credentials.NewTLS(tlsConfig)),
+	grpcOptions := []grpc.ServerOption{grpc.Creds(credentials.NewTLS(tlsConfig)),
 		grpc.ConnectionTimeout(options.RPC.CallTimeout), grpc.MaxRecvMsgSize(options.RPC.MaxMessageBytes), grpc.MaxSendMsgSize(options.RPC.MaxMessageBytes), grpc.MaxConcurrentStreams(options.RPC.MaxConcurrentStreams),
 		grpc.ChainUnaryInterceptor(observer.Unary(), s.unaryGuard()), grpc.StreamInterceptor(s.streamGuard(access, material.Peer)),
-	)
+	}
+	if options.TracerProvider != nil {
+		grpcOptions = append(grpcOptions, grpc.StatsHandler(otelgrpc.NewServerHandler(otelgrpc.WithTracerProvider(options.TracerProvider), otelgrpc.WithPropagators(propagation.TraceContext{}))))
+	}
+	s.grpc = grpc.NewServer(grpcOptions...)
 	healthpb.RegisterHealthServer(s.grpc, s.health)
 	if register != nil {
 		register(s.grpc)

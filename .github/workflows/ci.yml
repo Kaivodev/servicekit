@@ -36,7 +36,7 @@ jobs:
         run: ./script/with-private-modules.sh make check
         env:
           AIPAY_MODULES_TOKEN: ${{ secrets.AIPAY_MODULES_TOKEN }}
-      - name: Storage integration
+      - name: Storage, tracing and queue integration
         run: ./script/with-private-modules.sh make test-integration
         env:
           AIPAY_MODULES_TOKEN: ${{ secrets.AIPAY_MODULES_TOKEN }}

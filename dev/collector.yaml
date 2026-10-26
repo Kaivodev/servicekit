@@ -1,0 +1,35 @@
+# Local collector: bounded memory/queue, no persistent storage of payloads.
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: ${env:AIPAY_COLLECTOR_ADDR}
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 128
+    spike_limit_mib: 32
+  batch:
+    timeout: 100ms
+    send_batch_size: 128
+exporters:
+  otlp/jaeger:
+    endpoint: ${env:AIPAY_JAEGER_OTLP_ADDR}
+    tls:
+      insecure: true
+    sending_queue:
+      queue_size: 1024
+      num_consumers: 2
+    retry_on_failure:
+      initial_interval: 1s
+      max_interval: 5s
+      max_elapsed_time: 30s
+service:
+  telemetry:
+    metrics:
+      level: none
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlp/jaeger]

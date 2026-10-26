@@ -13,11 +13,13 @@ import (
 	"time"
 
 	"github.com/aipay-dev/observability/logging"
+	"github.com/aipay-dev/observability/tracing"
 )
 
 type Config struct {
 	Service         string
 	Logging         logging.Options
+	Tracing         tracing.Config
 	LogLevel        slog.Level
 	RPC             RPC
 	TLS             TLS
@@ -94,8 +96,10 @@ func Load(service, defaultAddress string, get func(string) string) (Config, erro
 	}
 	logs, level, logErr := logging.Load(service, get)
 	problems = append(problems, logErr)
+	traceConfig, traceErr := tracing.Load(get)
+	problems = append(problems, traceErr)
 	c := Config{
-		Service: service, Logging: logs, LogLevel: level,
+		Service: service, Logging: logs, LogLevel: level, Tracing: traceConfig,
 		RPC: RPC{
 			Address: value("GRPC_ADDR", defaultAddress), ServerName: value("GRPC_SERVER_NAME", service),
 			CallTimeout:          duration("RPC_CALL_TIMEOUT", "5s"),

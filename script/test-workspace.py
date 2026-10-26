@@ -17,6 +17,7 @@ import time
 SERVICES = ('iam', 'ledger', 'settlement', 'reconciliation')
 p = argparse.ArgumentParser(description=__doc__)
 p.add_argument('--workspace', type=Path, default=Path(__file__).resolve().parents[2])
+p.add_argument('--use-workspace', action='store_true', help='use local sibling modules instead of published versions')
 p.add_argument('--postgres-bin', type=Path, default=Path(os.environ.get('AIPAY_POSTGRES_BIN', '/opt/homebrew/opt/postgresql@18/bin')))
 a = p.parse_args()
 workspace = a.workspace.resolve()
@@ -76,7 +77,7 @@ with tempfile.TemporaryDirectory(prefix='aipay-runtime-test-') as temp:
     for key in list(env):
         if key.startswith('AIPAY_'):
             del env[key]
-    env['GOWORK'] = str(workspace / 'go.work')
+    env['GOWORK'] = str(workspace / 'go.work') if a.use_workspace else 'off'
     pg = a.postgres_bin
     def psql(sql, database='postgres'):
         return run([pg/'psql', '-X', '-v', 'ON_ERROR_STOP=1', '-h', '127.0.0.1', '-p', str(pg_port), '-U', 'postgres', '-d', database, '-Atc', sql])
@@ -125,6 +126,10 @@ with tempfile.TemporaryDirectory(prefix='aipay-runtime-test-') as temp:
                 'AIPAY_TLS_CA_FILE':str(root/'certs'/'ca.crt'),
                 'AIPAY_TLS_TRUST_DOMAIN':'aipay.test',
                 'AIPAY_LOG_DIR':str(root/'logs'/name),
+                # Deliberately unavailable collector must not affect startup/readiness.
+                'AIPAY_TRACE_ENDPOINT':f'http://127.0.0.1:{port()}',
+                'AIPAY_TRACE_EXPORT_TIMEOUT':'100ms', 'AIPAY_TRACE_BATCH_INTERVAL':'10ms',
+                'AIPAY_TRACE_SHUTDOWN_TIMEOUT':'100ms',
                 'AIPAY_HEALTH_INTERVAL':'100ms', 'AIPAY_HEALTH_TIMEOUT':'250ms',
                 'AIPAY_RPC_CALL_TIMEOUT':'500ms', 'AIPAY_STARTUP_TIMEOUT':'2s', 'AIPAY_SHUTDOWN_TIMEOUT':'2s',
             }
@@ -168,7 +173,7 @@ with tempfile.TemporaryDirectory(prefix='aipay-runtime-test-') as temp:
                 json.loads(line)
                 if 'postgres://' in line:
                     raise RuntimeError('database URL leaked into logs')
-        print('four-process isolation, startup failure cleanup, schema/Redis/PostgreSQL readiness and SIGTERM passed', flush=True)
+        print('four-process isolation, startup failure cleanup, schema/Redis/PostgreSQL readiness, unavailable collector and SIGTERM passed', flush=True)
     finally:
         for process in processes.values():
             if process.poll() is None:
