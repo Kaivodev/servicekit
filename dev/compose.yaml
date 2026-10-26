@@ -1,0 +1,236 @@
+name: aipay-local
+services:
+  postgres:
+    image: postgres:18
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_DB: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?run dev/prepare.py}
+      IAM_DB_PASSWORD: ${IAM_DB_PASSWORD}
+      LEDGER_DB_PASSWORD: ${LEDGER_DB_PASSWORD}
+      SETTLEMENT_DB_PASSWORD: ${SETTLEMENT_DB_PASSWORD}
+      RECONCILIATION_DB_PASSWORD: ${RECONCILIATION_DB_PASSWORD}
+    volumes:
+      - postgres:/var/lib/postgresql
+      - ./init-databases.sh:/docker-entrypoint-initdb.d/10-aipay.sh:ro
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U postgres -d postgres']
+      interval: 2s
+      timeout: 2s
+      retries: 30
+    networks: [private]
+  redis:
+    image: redis:8
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?run dev/prepare.py}
+    command: [sh, -c, 'exec redis-server --save "" --appendonly no --requirepass "$$REDIS_PASSWORD"']
+    healthcheck:
+      test: [CMD-SHELL, 'REDISCLI_AUTH="$$REDIS_PASSWORD" redis-cli ping | grep -q PONG']
+      interval: 2s
+      timeout: 2s
+      retries: 30
+    networks: [private]
+  iam-migrate:
+    image: aipay-local/iam:dev
+    build:
+      context: ../../iam
+      secrets: [aipay_modules_token]
+    user: '${AIPAY_DEV_UID}:${AIPAY_DEV_GID}'
+    environment: &iam-environment
+      AIPAY_GRPC_ADDR: 0.0.0.0:9101
+      AIPAY_GRPC_SERVER_NAME: iam
+      AIPAY_RPC_ALLOWED_PEERS: backend,probe,iam
+      AIPAY_TLS_TRUST_DOMAIN: aipay.test
+      AIPAY_TLS_CA_FILE: /run/aipay/ca.crt
+      AIPAY_TLS_CERT_FILE: /run/aipay/service/tls.crt
+      AIPAY_TLS_KEY_FILE: /run/aipay/service/tls.key
+      AIPAY_DATABASE_URL: postgres://iam:${IAM_DB_PASSWORD}@postgres:5432/aipay_iam?sslmode=disable
+      AIPAY_REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/1
+      AIPAY_LOG_DIR: /app/logs
+    volumes: &iam-volumes
+      - ${AIPAY_DEV_DIR}/certs/ca.crt:/run/aipay/ca.crt:ro
+      - ${AIPAY_DEV_DIR}/certs/iam:/run/aipay/service:ro
+      - ${AIPAY_DEV_DIR}/logs/iam:/app/logs
+    command: [migrate, up]
+    healthcheck:
+      disable: true
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [private]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+  iam:
+    image: aipay-local/iam:dev
+    user: '${AIPAY_DEV_UID}:${AIPAY_DEV_GID}'
+    environment: *iam-environment
+    volumes: *iam-volumes
+    ports: ['127.0.0.1:9101:9101']
+    depends_on:
+      iam-migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    networks: [private]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    stop_grace_period: 20s
+  ledger-migrate:
+    image: aipay-local/ledger:dev
+    build:
+      context: ../../ledger
+      secrets: [aipay_modules_token]
+    user: '${AIPAY_DEV_UID}:${AIPAY_DEV_GID}'
+    environment: &ledger-environment
+      AIPAY_GRPC_ADDR: 0.0.0.0:9102
+      AIPAY_GRPC_SERVER_NAME: ledger
+      AIPAY_RPC_ALLOWED_PEERS: backend,probe,ledger
+      AIPAY_TLS_TRUST_DOMAIN: aipay.test
+      AIPAY_TLS_CA_FILE: /run/aipay/ca.crt
+      AIPAY_TLS_CERT_FILE: /run/aipay/service/tls.crt
+      AIPAY_TLS_KEY_FILE: /run/aipay/service/tls.key
+      AIPAY_DATABASE_URL: postgres://ledger:${LEDGER_DB_PASSWORD}@postgres:5432/aipay_ledger?sslmode=disable
+      AIPAY_REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/2
+      AIPAY_LOG_DIR: /app/logs
+    volumes: &ledger-volumes
+      - ${AIPAY_DEV_DIR}/certs/ca.crt:/run/aipay/ca.crt:ro
+      - ${AIPAY_DEV_DIR}/certs/ledger:/run/aipay/service:ro
+      - ${AIPAY_DEV_DIR}/logs/ledger:/app/logs
+    command: [migrate, up]
+    healthcheck:
+      disable: true
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [private]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+  ledger:
+    image: aipay-local/ledger:dev
+    user: '${AIPAY_DEV_UID}:${AIPAY_DEV_GID}'
+    environment: *ledger-environment
+    volumes: *ledger-volumes
+    ports: ['127.0.0.1:9102:9102']
+    depends_on:
+      ledger-migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    networks: [private]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    stop_grace_period: 20s
+  settlement-migrate:
+    image: aipay-local/settlement:dev
+    build:
+      context: ../../settlement
+      secrets: [aipay_modules_token]
+    user: '${AIPAY_DEV_UID}:${AIPAY_DEV_GID}'
+    environment: &settlement-environment
+      AIPAY_GRPC_ADDR: 0.0.0.0:9103
+      AIPAY_GRPC_SERVER_NAME: settlement
+      AIPAY_RPC_ALLOWED_PEERS: backend,probe,settlement
+      AIPAY_TLS_TRUST_DOMAIN: aipay.test
+      AIPAY_TLS_CA_FILE: /run/aipay/ca.crt
+      AIPAY_TLS_CERT_FILE: /run/aipay/service/tls.crt
+      AIPAY_TLS_KEY_FILE: /run/aipay/service/tls.key
+      AIPAY_DATABASE_URL: postgres://settlement:${SETTLEMENT_DB_PASSWORD}@postgres:5432/aipay_settlement?sslmode=disable
+      AIPAY_REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/3
+      AIPAY_LOG_DIR: /app/logs
+    volumes: &settlement-volumes
+      - ${AIPAY_DEV_DIR}/certs/ca.crt:/run/aipay/ca.crt:ro
+      - ${AIPAY_DEV_DIR}/certs/settlement:/run/aipay/service:ro
+      - ${AIPAY_DEV_DIR}/logs/settlement:/app/logs
+    command: [migrate, up]
+    healthcheck:
+      disable: true
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [private]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+  settlement:
+    image: aipay-local/settlement:dev
+    user: '${AIPAY_DEV_UID}:${AIPAY_DEV_GID}'
+    environment: *settlement-environment
+    volumes: *settlement-volumes
+    ports: ['127.0.0.1:9103:9103']
+    depends_on:
+      settlement-migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    networks: [private]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    stop_grace_period: 20s
+  reconciliation-migrate:
+    image: aipay-local/reconciliation:dev
+    build:
+      context: ../../reconciliation
+      secrets: [aipay_modules_token]
+    user: '${AIPAY_DEV_UID}:${AIPAY_DEV_GID}'
+    environment: &reconciliation-environment
+      AIPAY_GRPC_ADDR: 0.0.0.0:9104
+      AIPAY_GRPC_SERVER_NAME: reconciliation
+      AIPAY_RPC_ALLOWED_PEERS: backend,probe,reconciliation
+      AIPAY_TLS_TRUST_DOMAIN: aipay.test
+      AIPAY_TLS_CA_FILE: /run/aipay/ca.crt
+      AIPAY_TLS_CERT_FILE: /run/aipay/service/tls.crt
+      AIPAY_TLS_KEY_FILE: /run/aipay/service/tls.key
+      AIPAY_DATABASE_URL: postgres://reconciliation:${RECONCILIATION_DB_PASSWORD}@postgres:5432/aipay_reconciliation?sslmode=disable
+      AIPAY_REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/4
+      AIPAY_LOG_DIR: /app/logs
+    volumes: &reconciliation-volumes
+      - ${AIPAY_DEV_DIR}/certs/ca.crt:/run/aipay/ca.crt:ro
+      - ${AIPAY_DEV_DIR}/certs/reconciliation:/run/aipay/service:ro
+      - ${AIPAY_DEV_DIR}/logs/reconciliation:/app/logs
+    command: [migrate, up]
+    healthcheck:
+      disable: true
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [private]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+  reconciliation:
+    image: aipay-local/reconciliation:dev
+    user: '${AIPAY_DEV_UID}:${AIPAY_DEV_GID}'
+    environment: *reconciliation-environment
+    volumes: *reconciliation-volumes
+    ports: ['127.0.0.1:9104:9104']
+    depends_on:
+      reconciliation-migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    networks: [private]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    stop_grace_period: 20s
+networks:
+  private:
+    internal: true
+volumes:
+  postgres:
+secrets:
+  aipay_modules_token:
+    environment: AIPAY_MODULES_TOKEN
