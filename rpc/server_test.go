@@ -14,6 +14,8 @@ import (
 
 	"github.com/aipay-dev/observability/logging"
 	"github.com/aipay-dev/observability/requestmeta"
+	"github.com/aipay-dev/servicekit/authz"
+	"github.com/aipay-dev/servicekit/authz/authztest"
 	"github.com/aipay-dev/servicekit/config"
 	"github.com/aipay-dev/servicekit/devcert"
 	"github.com/aipay-dev/servicekit/mtls"
@@ -21,6 +23,7 @@ import (
 	"google.golang.org/grpc/codes"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/descriptorpb"
 	"google.golang.org/protobuf/types/known/emptypb"
 )
 
@@ -164,6 +167,30 @@ type handlerFunc func(context.Context, *emptypb.Empty) (*emptypb.Empty, error)
 func (f handlerFunc) Call(ctx context.Context, request *emptypb.Empty) (*emptypb.Empty, error) {
 	return f(ctx, request)
 }
+
+// runtimePolicy admits backend to the test-only /test.Runtime/Call as a
+// service call; without it the server denies the undeclared method.
+func runtimePolicy(t *testing.T, options ServerOptions, material *mtls.Material) ServerOptions {
+	t.Helper()
+	schema, err := authztest.NewSchema()
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := schema.Service("test.Runtime", map[string]*descriptorpb.MethodOptions{"Call": schema.Options(authztest.Rule{Callers: []string{"backend"}, Requirement: authztest.NotRequired})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	policies, err := authz.LoadPolicies(schema.Extension, service)
+	if err != nil {
+		t.Fatal(err)
+	}
+	options.Authorizer, err = authz.New(authz.Options{Service: options.RPC.ServerName, Policies: policies, Peer: material.Peer, Log: logging.New(io.Discard, slog.LevelInfo)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return options
+}
+
 func registerTest(handler testHandler) Register {
 	return func(registrar grpc.ServiceRegistrar) {
 		registrar.RegisterService(&grpc.ServiceDesc{
@@ -192,7 +219,7 @@ func TestUnaryDeadlineAndBoundedForcedShutdown(t *testing.T) {
 	started := make(chan struct{}, 1)
 	release := make(chan struct{})
 	defer close(release)
-	server, err := NewServer(serverOptions(), certs["iam"], logging.New(io.Discard, slog.LevelInfo), logging.New(io.Discard, slog.LevelInfo), nil, registerTest(handlerFunc(func(ctx context.Context, _ *emptypb.Empty) (*emptypb.Empty, error) {
+	server, err := NewServer(runtimePolicy(t, serverOptions(), certs["iam"]), certs["iam"], logging.New(io.Discard, slog.LevelInfo), logging.New(io.Discard, slog.LevelInfo), nil, registerTest(handlerFunc(func(ctx context.Context, _ *emptypb.Empty) (*emptypb.Empty, error) {
 		started <- struct{}{}
 		if ignoreCancel.Load() {
 			<-release
@@ -240,7 +267,7 @@ func TestMessageLimitsCancellationAndGracefulDrain(t *testing.T) {
 	started := make(chan context.Context, 4)
 	release := make(chan struct{})
 	var mode atomic.Int32
-	server, err := NewServer(serverOptions(), certs["iam"], logging.New(io.Discard, slog.LevelInfo), logging.New(io.Discard, slog.LevelInfo), nil, registerTest(handlerFunc(func(ctx context.Context, _ *emptypb.Empty) (*emptypb.Empty, error) {
+	server, err := NewServer(runtimePolicy(t, serverOptions(), certs["iam"]), certs["iam"], logging.New(io.Discard, slog.LevelInfo), logging.New(io.Discard, slog.LevelInfo), nil, registerTest(handlerFunc(func(ctx context.Context, _ *emptypb.Empty) (*emptypb.Empty, error) {
 		switch mode.Load() {
 		case 1:
 			message := &emptypb.Empty{}

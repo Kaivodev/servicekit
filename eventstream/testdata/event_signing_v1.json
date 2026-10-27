@@ -1,0 +1,222 @@
+{
+  "spec": "AIPAY-EVENT-V1",
+  "description": "Signed event envelopes (docs design/contracts.md). signing_input = \"AIPAY-EVENT-V1\" (no length prefix) || str producer || str stream || u64 sequence || str event_id || str event_type || u64 schema_version || i64 occurred_at_unix_nanos || bytes payload_digest || bytes prev_digest; str/bytes carry a u32 big-endian length; integers are 8-byte big-endian. event_digest = SHA-256(signing_input); signature is ASN.1 DER ECDSA P-256 over SHA-256(signing_input). Integers are decimal strings; bytes are lowercase hex. Every invalid case must stop the stream.",
+  "producer": "payment",
+  "stream": "payment.orders",
+  "public_keys": [
+    {
+      "jwk": {
+        "alg": "ES256",
+        "crv": "P-256",
+        "kty": "EC",
+        "x": "lp24_Ttu0HW8ciJpmC11N1f9sAGe4NsL8UAGTo5gt7Q",
+        "y": "zD9AsuSit37COlRuf5gx5AO3GZWrowjvTOoJuJcfl1w"
+      },
+      "key_id": "payment-events-vector-1",
+      "spki_der": "3059301306072a8648ce3d020106082a8648ce3d03010703420004969db8fd3b6ed075bc722269982d753757fdb0019ee0db0bf140064e8e60b7b4cc3f40b2e4a2b77ec23a546e7f9831e403b71995aba308ef4cea09b8971f975c"
+    }
+  ],
+  "events": [
+    {
+      "envelope": {
+        "event_id": "019a1f40-8b00-7000-8000-0000000000e1",
+        "producer": "payment",
+        "stream": "payment.orders",
+        "sequence": "1",
+        "event_type": "OrderPaid",
+        "schema_version": "1",
+        "occurred_at_unix_nanos": "1761465600123456000",
+        "recorded_at_unix_nanos": "1761465600200000000",
+        "payload": "0a2430313961316634302d303030302d373030302d383030302d30303030303030303030613110904e",
+        "payload_digest": "bb3ed8f9c2531d5bd5f49c9abb37f27b61aefe2159e14213304a85805e11729f",
+        "prev_digest": "0000000000000000000000000000000000000000000000000000000000000000",
+        "key_id": "payment-events-vector-1",
+        "signature": "304502206bde4a3c57c25ee5a6292dc2c6f0750e2ea211b2a31131ab3b27f492563dc79d022100c8b30191029a05e2177bd7a30fd78f794d20555396dbcd02eacbc8c2b12b2c4b"
+      },
+      "event_digest": "af8dbdcc06b84952033774456dae1011808bbf13c4e386ad9c4fc6672a172942",
+      "signing_input": "41495041592d4556454e542d5631000000077061796d656e740000000e7061796d656e742e6f726465727300000000000000010000002430313961316634302d386230302d373030302d383030302d303030303030303030306531000000094f726465725061696400000000000000011871fba1736dca0000000020bb3ed8f9c2531d5bd5f49c9abb37f27b61aefe2159e14213304a85805e11729f000000200000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "envelope": {
+        "event_id": "019a1f40-9000-7000-8000-0000000000e2",
+        "producer": "payment",
+        "stream": "payment.orders",
+        "sequence": "2",
+        "event_type": "RefundSucceeded",
+        "schema_version": "2",
+        "occurred_at_unix_nanos": "1761465700000001000",
+        "recorded_at_unix_nanos": "1761465700000002000",
+        "payload": "",
+        "payload_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "prev_digest": "af8dbdcc06b84952033774456dae1011808bbf13c4e386ad9c4fc6672a172942",
+        "key_id": "payment-events-vector-1",
+        "signature": "3045022100fc23bc062941313845f0a73d6ccfc1698d9a3ceea64c1b76fcc91bfdc5fdc21b02201aa9c04ffcccd3d88b28619e6874aeae7a6168aa7be5d97053c6ffd5b2b38af3"
+      },
+      "event_digest": "273b9a278f811d8229a6fd3f053ecb74a3f083c49700722bf0fd0f10466f8652",
+      "signing_input": "41495041592d4556454e542d5631000000077061796d656e740000000e7061796d656e742e6f726465727300000000000000020000002430313961316634302d393030302d373030302d383030302d3030303030303030303065320000000f526566756e6453756363656564656400000000000000021871fbb8b488ebe800000020e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b85500000020af8dbdcc06b84952033774456dae1011808bbf13c4e386ad9c4fc6672a172942"
+    }
+  ],
+  "invalid": [
+    {
+      "cursor": {
+        "event_digest": "af8dbdcc06b84952033774456dae1011808bbf13c4e386ad9c4fc6672a172942",
+        "sequence": "1"
+      },
+      "description": "payload changed after signing; payload_digest no longer matches",
+      "envelope": {
+        "event_id": "019a1f40-9000-7000-8000-0000000000e2",
+        "producer": "payment",
+        "stream": "payment.orders",
+        "sequence": "2",
+        "event_type": "RefundSucceeded",
+        "schema_version": "2",
+        "occurred_at_unix_nanos": "1761465700000001000",
+        "recorded_at_unix_nanos": "1761465700000002000",
+        "payload": "00",
+        "payload_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "prev_digest": "af8dbdcc06b84952033774456dae1011808bbf13c4e386ad9c4fc6672a172942",
+        "key_id": "payment-events-vector-1",
+        "signature": "3045022100fc23bc062941313845f0a73d6ccfc1698d9a3ceea64c1b76fcc91bfdc5fdc21b02201aa9c04ffcccd3d88b28619e6874aeae7a6168aa7be5d97053c6ffd5b2b38af3"
+      },
+      "name": "payload_tampered"
+    },
+    {
+      "cursor": {
+        "event_digest": "af8dbdcc06b84952033774456dae1011808bbf13c4e386ad9c4fc6672a172942",
+        "sequence": "1"
+      },
+      "description": "last signature byte flipped",
+      "envelope": {
+        "event_id": "019a1f40-9000-7000-8000-0000000000e2",
+        "producer": "payment",
+        "stream": "payment.orders",
+        "sequence": "2",
+        "event_type": "RefundSucceeded",
+        "schema_version": "2",
+        "occurred_at_unix_nanos": "1761465700000001000",
+        "recorded_at_unix_nanos": "1761465700000002000",
+        "payload": "",
+        "payload_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "prev_digest": "af8dbdcc06b84952033774456dae1011808bbf13c4e386ad9c4fc6672a172942",
+        "key_id": "payment-events-vector-1",
+        "signature": "3045022100fc23bc062941313845f0a73d6ccfc1698d9a3ceea64c1b76fcc91bfdc5fdc21b02201aa9c04ffcccd3d88b28619e6874aeae7a6168aa7be5d97053c6ffd5b2b38af2"
+      },
+      "name": "signature_tampered"
+    },
+    {
+      "cursor": {
+        "event_digest": "af8dbdcc06b84952033774456dae1011808bbf13c4e386ad9c4fc6672a172942",
+        "sequence": "1"
+      },
+      "description": "validly signed, but prev_digest does not continue the cursor",
+      "envelope": {
+        "event_id": "019a1f40-9000-7000-8000-0000000000e2",
+        "producer": "payment",
+        "stream": "payment.orders",
+        "sequence": "2",
+        "event_type": "RefundSucceeded",
+        "schema_version": "2",
+        "occurred_at_unix_nanos": "1761465700000001000",
+        "recorded_at_unix_nanos": "1761465700000002000",
+        "payload": "",
+        "payload_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "prev_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+        "key_id": "payment-events-vector-1",
+        "signature": "3046022100e2921943f1cccb9f77d27bd7f2bd71015fbf0b006473f26106158e23999aa593022100ef834dec2a192a4d9c95b0afdcdd6dbdfcc9c4999e9b33f814a63bf1c8001035"
+      },
+      "name": "prev_digest_broken"
+    },
+    {
+      "cursor": {
+        "event_digest": "af8dbdcc06b84952033774456dae1011808bbf13c4e386ad9c4fc6672a172942",
+        "sequence": "1"
+      },
+      "description": "validly signed sequence 3 directly after sequence 1",
+      "envelope": {
+        "event_id": "019a1f40-9000-7000-8000-0000000000e3",
+        "producer": "payment",
+        "stream": "payment.orders",
+        "sequence": "3",
+        "event_type": "RefundSucceeded",
+        "schema_version": "2",
+        "occurred_at_unix_nanos": "1761465700000001000",
+        "recorded_at_unix_nanos": "1761465700000002000",
+        "payload": "",
+        "payload_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "prev_digest": "af8dbdcc06b84952033774456dae1011808bbf13c4e386ad9c4fc6672a172942",
+        "key_id": "payment-events-vector-1",
+        "signature": "30440220365cdf10e76e4df6c92a5dfcbf8f2b3996983a135cc41e792633d9a64273ff7c02206e2b48ae35a8b87b14f4464e102e2d2330c5f7400948d35353bca8f666774b56"
+      },
+      "name": "sequence_gap"
+    },
+    {
+      "cursor": {
+        "event_digest": "af8dbdcc06b84952033774456dae1011808bbf13c4e386ad9c4fc6672a172942",
+        "sequence": "1"
+      },
+      "description": "signed by a key that is not registered under key_id",
+      "envelope": {
+        "event_id": "019a1f40-9000-7000-8000-0000000000e2",
+        "producer": "payment",
+        "stream": "payment.orders",
+        "sequence": "2",
+        "event_type": "RefundSucceeded",
+        "schema_version": "2",
+        "occurred_at_unix_nanos": "1761465700000001000",
+        "recorded_at_unix_nanos": "1761465700000002000",
+        "payload": "",
+        "payload_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "prev_digest": "af8dbdcc06b84952033774456dae1011808bbf13c4e386ad9c4fc6672a172942",
+        "key_id": "payment-events-vector-1",
+        "signature": "3046022100f9ceb6a5430dba4e3b6b115b31e7a711f67e4746c7a1ecd7328e57b73435661d022100f36b9722503b3a5decfd84c7f3a60f971703e3d0c24e22cb1e222b0ba3c2dbae"
+      },
+      "name": "wrong_signing_key"
+    },
+    {
+      "cursor": {
+        "event_digest": "af8dbdcc06b84952033774456dae1011808bbf13c4e386ad9c4fc6672a172942",
+        "sequence": "1"
+      },
+      "description": "key_id is absent from the receiver's registry",
+      "envelope": {
+        "event_id": "019a1f40-9000-7000-8000-0000000000e2",
+        "producer": "payment",
+        "stream": "payment.orders",
+        "sequence": "2",
+        "event_type": "RefundSucceeded",
+        "schema_version": "2",
+        "occurred_at_unix_nanos": "1761465700000001000",
+        "recorded_at_unix_nanos": "1761465700000002000",
+        "payload": "",
+        "payload_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "prev_digest": "af8dbdcc06b84952033774456dae1011808bbf13c4e386ad9c4fc6672a172942",
+        "key_id": "payment-events-unregistered",
+        "signature": "3046022100d63d7be21e82f5ec8517f832b6849a6058aae90d22c47bfc2da944ff5a741009022100b8e4fd268ceb90b14ceaaa93df614f50f4facb7a253c61086a7dde7f32a7eb00"
+      },
+      "name": "unregistered_key_id"
+    },
+    {
+      "cursor": {
+        "event_digest": "af8dbdcc06b84952033774456dae1011808bbf13c4e386ad9c4fc6672a172942",
+        "sequence": "1"
+      },
+      "description": "validly signed by the registered key but names producer ledger on a payment stream",
+      "envelope": {
+        "event_id": "019a1f40-9000-7000-8000-0000000000e2",
+        "producer": "ledger",
+        "stream": "payment.orders",
+        "sequence": "2",
+        "event_type": "RefundSucceeded",
+        "schema_version": "2",
+        "occurred_at_unix_nanos": "1761465700000001000",
+        "recorded_at_unix_nanos": "1761465700000002000",
+        "payload": "",
+        "payload_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "prev_digest": "af8dbdcc06b84952033774456dae1011808bbf13c4e386ad9c4fc6672a172942",
+        "key_id": "payment-events-vector-1",
+        "signature": "30460221008b07f5abbf4396d4bb79c7e5926a43ef73cf55725049e873eca5d7d48c4fcd77022100bdc4998b54e74e9862953fdd216bd85b3c6e2043b76c714943cd234a43935ca6"
+      },
+      "name": "producer_mismatch"
+    }
+  ]
+}

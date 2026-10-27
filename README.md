@@ -1,13 +1,19 @@
 # AI Pay 微服务运行库
 
-`github.com/aipay-dev/servicekit` 提供各私有服务共用的运行基础，采用官方 grpc-go。业务处理、用户认证、RBAC、资金模型和数据库 SQL 仍由服务仓库维护。
+`github.com/aipay-dev/servicekit` 提供各私有服务共用的运行基础，采用官方 grpc-go。业务处理、用户认证、RBAC、资金模型、业务表结构与迁移仍由服务仓库维护；签名事件与已用认证证明的辅助只操作服务传入的表。
 
-- `config`：集中校验 `AIPAY_*` 配置；必须提供 PostgreSQL、TLS 和明确的调用方名单。Redis 可选。
+- `config`：集中校验 `AIPAY_*` 配置；必须提供 PostgreSQL、TLS 和明确的调用方名单。Redis 可选。`AIPAY_ENVIRONMENT` 取 `production`、`staging` 或 `development`，未设置按 `production` 处理，只有 `development` 能启用开发专用组件。
 - `mtls` / `rpc`：TLS 1.3、双向证书链校验、DNS 校验与 `spiffe://<trust-domain>/service/<name>` 身份绑定；连接复用、unary 超时、调用取消、报文大小限制、关联 ID 和访问日志。
 - `postgres` / `redis`：连接池和有界关闭；schema 版本、dirty 标记和服务属主校验。
 - `migration`：显式执行服务自身内嵌迁移；数据库级锁串行验证属主与执行迁移，拒绝跨服务和无属主的既有迁移历史。
 - `queue`：专用 Redis 的显式 Asynq producer/worker、重试策略、就绪和有界排空；handler 与 outbox 由业务属主提供。
 - `cli`：`serve`、`version`、`healthcheck`、`migrate up|down|version`。`down` 只回滚最近一次迁移，可能删除数据。
+- `authz`：服务端方法级授权。`LoadPolicies` 从生成 SDK 的服务描述读取 `(aipay.authz.v1.policy)`，任何方法缺少合法策略即启动失败；拦截器按已验证的 mTLS 身份匹配调用方规则，按要求核验 IAM 认证证明（紧凑 JWS ES256、`kid` 查本服务配置的 JWKS 公钥登记表、签发方、60 秒有效期、受众、权限、`amr` 含 `mfa` 与 `auth_time` 时限），单次使用的方法在调用业务前经 `ReplayGuard` 记录 `jti`（提供 PostgreSQL 实现）。核验结果以只读 `authz.Call` 交给业务，原始证明从 metadata 中移除；拒绝只记录稳定原因，不记录证明内容。`rpc.ServerOptions.Authorizer` 为空时，除健康检查外的方法一律拒绝。
+- `signing`：业务签名器（ECDSA P-256、SHA-256、DER）。生产使用 `KMSKey` 适配的不可导出密钥，签名后本地复核；内存签名器只能经 `signing.Open` 在 `AIPAY_ENVIRONMENT=development` 下取得，未设置环境即按生产拒绝。`PublicKeys` 读取 JWKS，拒绝含私钥成员的文件。
+- `eventstream`：签名事件。产生端排序器在一个事务内锁流头、按 outbox 顺序分配连续序号、串接 `prev_digest`、签名并一次写入；`Reader` 按流清单限定接收方提供 `ListEvents`/`GetStreamHead`；接收端 `Puller` 校验序号、链、载荷摘要、签名与已知类型，校验通过的信封与游标同事务写入 inbox，任何失败都保存已验证前缀并把流置为停止，`CheckHead` 发现产生方历史回退或分叉同样停止；`Inbox` 在业务事务中一次性记录处理结果。表名由服务提供，列遵循数据库设计的共用模板。
+- `approval`：审批摘要 `SHA-256("AIPAY-APPROVAL-V1" || 规范请求)` 与 WebAuthn 断言校验（`webauthn.get`、`challenge`、来源、RP ID、UP/UV 标志、签名计数、COSE ES256 公钥、过期、自批与重复审批人）。签名计数恒为 0 的同步型 passkey 在已记录计数也为 0 时接受；计数一旦不为 0 就必须严格递增，回到 0 视为回退。
+
+protobuf 尚未发布带标签的 SDK，servicekit 不直接依赖生成代码：策略选项按名称经 protoreflect 读取（`authz/authztest` 为本库测试构造同名描述），事件信封使用 `eventstream.Envelope`，由各服务在 gRPC 边界与生成消息互转。签名事件、审批的测试向量复制自 protobuf 的 `testvectors`。
 
 组装根显式构造资源并注册业务 RPC；框架不自动发现业务。当前各私有服务仅注册标准 gRPC Health，空服务名表示进程及依赖就绪；不存在的业务服务返回 `NOT_FOUND`，不会报告业务可用。调用方身份仅证明服务身份，不能替代用户权限或资源范围检查。
 
@@ -34,7 +40,7 @@ mkdir -p ../.local
 go run ./cmd/devcert --out ../.local/certs
 ```
 
-部署时提供本服务证书、私钥及 CA 信任链，不能分发开发 CA 私钥。证书更换后重启服务；本库未实现证书自动签发、热轮换、撤销查询或服务发现。生产监听地址必须配合私网、防火墙和最小调用方名单。每个进程独立日志目录，敏感信息不得拼入自由文本。
+部署时提供本服务证书、私钥及 CA 信任链，不能分发开发 CA 私钥。组装根运行 `material.Watch(ctx, cfg.TLS.ReloadInterval, log)`（`AIPAY_TLS_RELOAD_INTERVAL`，默认 30 秒）即可热加载：文件变化且新材料有效（服务身份一致、链可信、不少于原有的密钥用途）时原子替换，此后的握手使用新证书与信任链，已建立的连接保持原身份，直到服务端按 `AIPAY_RPC_MAX_CONNECTION_AGE`（默认 54 分钟，上限 1 小时）发出 GOAWAY，再经 `AIPAY_RPC_MAX_CONNECTION_AGE_GRACE`（默认 30 秒）让进行中的调用结束；客户端随后重新握手。grpc-go 会给时长加 ±10% 抖动，默认值加上宽限后每条连接仍不超过 1 小时。健康 Watch 这类长流也会在此时结束，调用方需重新建立。无效或写到一半的文件不会替换当前材料。`material.Check` 可加入就绪检查，证书过期即不就绪。本库未实现证书签发、撤销查询或服务发现。生产监听地址必须配合私网、防火墙和最小调用方名单。每个进程独立日志目录，敏感信息不得拼入自由文本。
 
 ## 追踪与任务
 

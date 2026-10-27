@@ -1,4 +1,5 @@
-// Package rpc owns authenticated grpc-go transport lifecycles, not business authorization.
+// Package rpc owns authenticated grpc-go transport lifecycles. Method-level
+// authorization is enforced by an authz.Authorizer; business rules stay in handlers.
 package rpc
 
 import (
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/aipay-dev/observability/grpcobs"
+	"github.com/aipay-dev/servicekit/authz"
 	"github.com/aipay-dev/servicekit/config"
 	"github.com/aipay-dev/servicekit/mtls"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
@@ -23,15 +25,26 @@ import (
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/health"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/status"
 )
 
 var ErrShutdownTimeout = errors.New("RPC shutdown exceeded drain deadline")
 
+// With grpc-go's ±10% jitter on the age, 54m + 30s keeps connections under
+// one hour.
+const (
+	DefaultMaxConnectionAge      = 54 * time.Minute
+	DefaultMaxConnectionAgeGrace = 30 * time.Second
+)
+
 type Check func(context.Context) error
 
 type ServerOptions struct {
-	TracerProvider  trace.TracerProvider
+	TracerProvider trace.TracerProvider
+	// Authorizer enforces each method's (aipay.authz.v1.policy). Without one,
+	// every method except the health service is denied.
+	Authorizer      *authz.Authorizer
 	RPC             config.RPC
 	HealthTimeout   time.Duration
 	HealthInterval  time.Duration
@@ -53,13 +66,25 @@ type Server struct {
 	deadline     atomic.Pointer[time.Time]
 }
 
-// Register is called only by a service's composition root. Handlers must still
-// enforce application permissions and data ownership; peer identity is not RBAC.
+// Register is called only by a service's composition root. The authorizer
+// checks callers and identity assertions per method; handlers must still
+// enforce resource ownership and business state.
 type Register func(grpc.ServiceRegistrar)
 
 func NewServer(options ServerOptions, material *mtls.Material, access, runtime *slog.Logger, checks map[string]Check, register Register) (*Server, error) {
 	if access == nil || runtime == nil || options.RPC.CallTimeout <= 0 || options.RPC.MaxMessageBytes < 1 || options.RPC.MaxConcurrentStreams < 1 || options.HealthTimeout <= 0 || options.HealthInterval <= 0 || options.ShutdownTimeout <= 0 {
 		return nil, errors.New("invalid RPC server options")
+	}
+	// Unset values take the defaults rather than disabling the limit.
+	maxAge, grace := options.RPC.MaxConnectionAge, options.RPC.MaxConnectionAgeGrace
+	if maxAge == 0 {
+		maxAge = DefaultMaxConnectionAge
+	}
+	if grace == 0 {
+		grace = min(DefaultMaxConnectionAgeGrace, maxAge)
+	}
+	if maxAge < 0 || maxAge > config.MaxConnectionAgeLimit || grace < 0 || grace > maxAge {
+		return nil, errors.New("invalid RPC connection age")
 	}
 	tlsConfig, err := material.Server(options.RPC.AllowedPeers)
 	if err != nil {
@@ -77,9 +102,16 @@ func NewServer(options ServerOptions, material *mtls.Material, access, runtime *
 		s.checks[name] = check
 	}
 	s.health.SetServingStatus("", healthpb.HealthCheckResponse_NOT_SERVING)
+	unaryAuthz, streamAuthz := authz.DenyUndeclared()
+	if options.Authorizer != nil {
+		unaryAuthz, streamAuthz = options.Authorizer.Unary(), options.Authorizer.Stream()
+	}
 	grpcOptions := []grpc.ServerOption{grpc.Creds(credentials.NewTLS(tlsConfig)),
 		grpc.ConnectionTimeout(options.RPC.CallTimeout), grpc.MaxRecvMsgSize(options.RPC.MaxMessageBytes), grpc.MaxSendMsgSize(options.RPC.MaxMessageBytes), grpc.MaxConcurrentStreams(options.RPC.MaxConcurrentStreams),
-		grpc.ChainUnaryInterceptor(observer.Unary(), s.unaryGuard()), grpc.StreamInterceptor(s.streamGuard(access, material.Peer)),
+		grpc.ChainUnaryInterceptor(observer.Unary(), s.unaryGuard(), unaryAuthz), grpc.ChainStreamInterceptor(s.streamGuard(access, material.Peer), streamAuthz),
+		// Bounded connection lifetime: clients reconnect and present, and verify,
+		// the current short-lived certificates instead of the handshake-time ones.
+		grpc.KeepaliveParams(keepalive.ServerParameters{MaxConnectionAge: maxAge, MaxConnectionAgeGrace: grace}),
 	}
 	if options.TracerProvider != nil {
 		grpcOptions = append(grpcOptions, grpc.StatsHandler(otelgrpc.NewServerHandler(otelgrpc.WithTracerProvider(options.TracerProvider), otelgrpc.WithPropagators(propagation.TraceContext{}))))

@@ -14,7 +14,6 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/connectivity"
-	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/metadata"
 )
 
@@ -39,12 +38,13 @@ func Connect(ctx context.Context, material *mtls.Material, options ClientOptions
 	if _, ok := ctx.Deadline(); !ok {
 		return nil, errors.New("RPC connection requires a startup deadline")
 	}
-	tlsConfig, err := material.Client(options.ServerName, options.ExpectedService)
+	// Reconnects handshake with the latest reloaded certificate and trust bundle.
+	transport, err := material.ClientCredentials(options.ServerName, options.ExpectedService)
 	if err != nil {
 		return nil, err
 	}
 	dialOptions := []grpc.DialOption{
-		grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig)), grpc.WithDisableRetry(),
+		grpc.WithTransportCredentials(transport), grpc.WithDisableRetry(),
 		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(options.MaxMessageBytes), grpc.MaxCallSendMsgSize(options.MaxMessageBytes)),
 		grpc.WithChainUnaryInterceptor(clientDeadline(options.CallTimeout), grpcobs.UnaryClient()),
 		grpc.WithStreamInterceptor(streamClientCorrelation()),

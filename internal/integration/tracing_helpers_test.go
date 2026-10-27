@@ -16,6 +16,8 @@ import (
 
 	"github.com/aipay-dev/observability/logging"
 	"github.com/aipay-dev/observability/tracing"
+	"github.com/aipay-dev/servicekit/authz"
+	"github.com/aipay-dev/servicekit/authz/authztest"
 	"github.com/aipay-dev/servicekit/config"
 	"github.com/aipay-dev/servicekit/devcert"
 	"github.com/aipay-dev/servicekit/mtls"
@@ -25,6 +27,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/descriptorpb"
 	"google.golang.org/protobuf/types/known/emptypb"
 )
 
@@ -137,7 +140,24 @@ func fixtureRegister(f fixtureCall) rpc.Register {
 func startFixtureRPC(t *testing.T, name, peer string, material *mtls.Material, rt *tracing.Runtime, logs *traceBuffer, handler fixtureCall) *rpc.Server {
 	t.Helper()
 	log := logging.New(logs, slog.LevelInfo)
-	server, err := rpc.NewServer(rpc.ServerOptions{RPC: config.RPC{Address: "127.0.0.1:0", ServerName: name, AllowedPeers: []string{peer}, CallTimeout: 3 * time.Second, MaxMessageBytes: 4096, MaxConcurrentStreams: 16}, HealthTimeout: time.Second, HealthInterval: 20 * time.Millisecond, ShutdownTimeout: 2 * time.Second, TracerProvider: rt.Provider()}, material, log, log, nil, fixtureRegister(handler))
+	// The test-only RPC declares its policy like any business method.
+	schema, err := authztest.NewSchema()
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := schema.Service("test.Trace", map[string]*descriptorpb.MethodOptions{"Call": schema.Options(authztest.Rule{Callers: []string{peer}, Requirement: authztest.NotRequired})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	policies, err := authz.LoadPolicies(schema.Extension, service)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authorizer, err := authz.New(authz.Options{Service: name, Policies: policies, Peer: material.Peer, Log: log})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, err := rpc.NewServer(rpc.ServerOptions{RPC: config.RPC{Address: "127.0.0.1:0", ServerName: name, AllowedPeers: []string{peer}, CallTimeout: 3 * time.Second, MaxMessageBytes: 4096, MaxConcurrentStreams: 16}, HealthTimeout: time.Second, HealthInterval: 20 * time.Millisecond, ShutdownTimeout: 2 * time.Second, TracerProvider: rt.Provider(), Authorizer: authorizer}, material, log, log, nil, fixtureRegister(handler))
 	if err != nil {
 		t.Fatal(err)
 	}

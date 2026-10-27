@@ -21,7 +21,7 @@ func TestAuthenticatedGRPCSpansPreserveParentAndLogContext(t *testing.T) {
 	serverProvider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
 	defer serverProvider.Shutdown(context.Background())
 	certs := materials(t, "iam", "backend")
-	options := serverOptions()
+	options := runtimePolicy(t, serverOptions(), certs["iam"])
 	options.TracerProvider = serverProvider
 	var access synchronizedBuffer
 	server, err := NewServer(options, certs["iam"], logging.New(&access, slog.LevelInfo), logging.New(io.Discard, slog.LevelInfo), nil, registerTest(handlerFunc(func(ctx context.Context, _ *emptypb.Empty) (*emptypb.Empty, error) {

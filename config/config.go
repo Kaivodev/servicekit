@@ -18,6 +18,7 @@ import (
 
 type Config struct {
 	Service         string
+	Environment     Environment
 	Logging         logging.Options
 	Tracing         tracing.Config
 	LogLevel        slog.Level
@@ -38,13 +39,24 @@ type RPC struct {
 	CallTimeout          time.Duration
 	MaxMessageBytes      int
 	MaxConcurrentStreams uint32
+	// MaxConnectionAge closes server connections so clients handshake again
+	// with current certificates; MaxConnectionAgeGrace lets in-flight RPCs
+	// finish first. grpc-go adds ±10% jitter to the age, so the 54m default
+	// plus the 30s grace keeps every connection under one hour.
+	MaxConnectionAge      time.Duration
+	MaxConnectionAgeGrace time.Duration
 }
+
+// MaxConnectionAgeLimit is the longest connection lifetime a server accepts.
+const MaxConnectionAgeLimit = time.Hour
 
 type TLS struct {
 	CAFile      string
 	CertFile    string
 	KeyFile     string
 	TrustDomain string
+	// ReloadInterval is how often mtls.Material.Watch re-reads the files.
+	ReloadInterval time.Duration
 }
 
 type Database struct {
@@ -98,15 +110,19 @@ func Load(service, defaultAddress string, get func(string) string) (Config, erro
 	problems = append(problems, logErr)
 	traceConfig, traceErr := tracing.Load(get)
 	problems = append(problems, traceErr)
+	environment, envErr := LoadEnvironment(get)
+	problems = append(problems, envErr)
 	c := Config{
-		Service: service, Logging: logs, LogLevel: level, Tracing: traceConfig,
+		Service: service, Environment: environment, Logging: logs, LogLevel: level, Tracing: traceConfig,
 		RPC: RPC{
 			Address: value("GRPC_ADDR", defaultAddress), ServerName: value("GRPC_SERVER_NAME", service),
-			CallTimeout:          duration("RPC_CALL_TIMEOUT", "5s"),
-			MaxMessageBytes:      int(integer("RPC_MAX_MESSAGE_BYTES", "1048576", 1024, 16<<20)),
-			MaxConcurrentStreams: uint32(integer("RPC_MAX_CONCURRENT_STREAMS", "128", 1, 10000)),
+			CallTimeout:           duration("RPC_CALL_TIMEOUT", "5s"),
+			MaxMessageBytes:       int(integer("RPC_MAX_MESSAGE_BYTES", "1048576", 1024, 16<<20)),
+			MaxConcurrentStreams:  uint32(integer("RPC_MAX_CONCURRENT_STREAMS", "128", 1, 10000)),
+			MaxConnectionAge:      duration("RPC_MAX_CONNECTION_AGE", "54m"),
+			MaxConnectionAgeGrace: duration("RPC_MAX_CONNECTION_AGE_GRACE", "30s"),
 		},
-		TLS:            TLS{CAFile: get("AIPAY_TLS_CA_FILE"), CertFile: get("AIPAY_TLS_CERT_FILE"), KeyFile: get("AIPAY_TLS_KEY_FILE"), TrustDomain: value("TLS_TRUST_DOMAIN", "aipay.internal")},
+		TLS:            TLS{CAFile: get("AIPAY_TLS_CA_FILE"), CertFile: get("AIPAY_TLS_CERT_FILE"), KeyFile: get("AIPAY_TLS_KEY_FILE"), TrustDomain: value("TLS_TRUST_DOMAIN", "aipay.internal"), ReloadInterval: duration("TLS_RELOAD_INTERVAL", "30s")},
 		Database:       Database{URL: get("AIPAY_DATABASE_URL"), MaxConns: int32(integer("DATABASE_MAX_CONNS", "20", 1, 10000)), MinConns: int32(integer("DATABASE_MIN_CONNS", "2", 0, 10000)), MaxConnLifetime: duration("DATABASE_MAX_CONN_LIFETIME", "30m")},
 		Redis:          Redis{URL: get("AIPAY_REDIS_URL"), PoolSize: int(integer("REDIS_POOL_SIZE", "10", 1, 10000)), Timeout: duration("REDIS_TIMEOUT", "3s")},
 		StartupTimeout: duration("STARTUP_TIMEOUT", "10s"), ShutdownTimeout: duration("SHUTDOWN_TIMEOUT", "15s"), HealthTimeout: duration("HEALTH_TIMEOUT", "2s"), HealthInterval: duration("HEALTH_INTERVAL", "3s"),
@@ -141,6 +157,9 @@ func Load(service, defaultAddress string, get func(string) string) (Config, erro
 	}
 	if c.Redis.URL != "" && !validURL(c.Redis.URL, "redis", "rediss") {
 		problems = append(problems, errors.New("AIPAY_REDIS_URL must be a redis:// or rediss:// URL with a host"))
+	}
+	if c.RPC.MaxConnectionAge > MaxConnectionAgeLimit || c.RPC.MaxConnectionAgeGrace > c.RPC.MaxConnectionAge {
+		problems = append(problems, errors.New("AIPAY_RPC_MAX_CONNECTION_AGE must be at most 1h and not shorter than its grace period"))
 	}
 	if c.HealthTimeout > c.StartupTimeout {
 		problems = append(problems, errors.New("health timeout must not exceed startup timeout"))
