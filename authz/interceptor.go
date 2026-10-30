@@ -98,6 +98,42 @@ func (c Call) Requirement() Requirement { return c.requirement }
 // never from request fields.
 func (c Call) Assertion() (*Assertion, bool) { return c.assertion, c.assertion != nil }
 
+// Scope returns the verified acting scope; absent for service calls.
+func (c Call) Scope() (Scope, bool) {
+	if c.assertion == nil {
+		return Scope{}, false
+	}
+	return c.assertion.ActingScope(), true
+}
+
+// Account returns the trusted funds account of the call: the account of an
+// account, business or application scope, or the one target account IAM
+// bound a platform call to. Use it to filter account resources; methods that
+// act on account-wide funds must also RequireScope(ScopeAccount).
+func (c Call) Account() (Account, bool) {
+	scope, ok := c.Scope()
+	if !ok {
+		return Account{}, false
+	}
+	return scope.Account()
+}
+
+// RequireScope returns the acting scope when its type is one of types and a
+// PermissionDenied error otherwise, including for service calls. Balances,
+// address books and withdrawals require ScopeAccount, so a business or
+// application role never reaches account-wide funds through a shared account.
+func (c Call) RequireScope(types ...string) (Scope, error) {
+	scope, ok := c.Scope()
+	if ok {
+		for _, allowed := range types {
+			if scope.Type == allowed {
+				return scope, nil
+			}
+		}
+	}
+	return Scope{}, status.Error(codes.PermissionDenied, "Acting scope is not accepted by this method")
+}
+
 // FromContext returns the Call stored by the interceptor.
 func FromContext(ctx context.Context) (Call, bool) {
 	call, ok := ctx.Value(contextKey{}).(Call)

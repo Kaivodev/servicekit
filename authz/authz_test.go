@@ -69,7 +69,7 @@ func devSigner(t *testing.T, id string) signing.Signer {
 func validClaims() Claims {
 	fingerprint := sha256.Sum256([]byte("POST /api/withdrawals"))
 	return Claims{Issuer: "iam", Subject: "0199f000-0000-7000-8000-00000000c0de", PrincipalType: PrincipalUser,
-		ActingScope: Scope{Type: ScopeBusiness, OrganizationID: "0199f000-0000-7000-8000-0000000000a1", BusinessID: "0199f000-0000-7000-8000-0000000000b1"},
+		ActingScope: Scope{Type: ScopeAccount, AccountID: "0199f000-0000-7000-8000-0000000000a1", AccountType: AccountPersonal},
 		Audience:    Audience{"payment", "settlement"}, Permission: "settlement.withdrawal.create",
 		RequestFingerprint: base64.RawURLEncoding.EncodeToString(fingerprint[:]), AMR: []string{"pwd", "hwk", AMRMultiFactor},
 		AuthTime: now.Add(-2 * time.Minute).Unix(), IssuedAt: now.Add(-10 * time.Second).Unix(), ExpiresAt: now.Add(50 * time.Second).Unix(),
@@ -233,7 +233,7 @@ func TestAssertionClaims(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertion, ok := call.Assertion()
-	if !ok || assertion.Subject() != validClaims().Subject || assertion.ActingScope().BusinessID != validClaims().ActingScope.BusinessID || len(assertion.RequestFingerprint()) != 32 {
+	if !ok || assertion.Subject() != validClaims().Subject || assertion.ActingScope() != validClaims().ActingScope || len(assertion.RequestFingerprint()) != 32 {
 		t.Fatalf("unexpected assertion %+v", assertion)
 	}
 	if len(md.Get(MetadataKey)) != 0 || len(md.Get("x-request-id")) != 1 {
@@ -271,19 +271,22 @@ func TestAssertionClaims(t *testing.T) {
 		"issued in the future": {"Read", f.token(t, func(c *Claims) {
 			c.IssuedAt, c.ExpiresAt = now.Add(time.Minute).Unix(), now.Add(time.Minute+30*time.Second).Unix()
 		}), codes.Unauthenticated},
-		"other key":          {"Recent", forged, codes.Unauthenticated},
-		"unregistered key":   {"Recent", unregistered, codes.Unauthenticated},
-		"tampered claims":    {"Read", parts[0] + "." + base64.RawURLEncoding.EncodeToString(tampered) + "." + parts[2], codes.Unauthenticated},
-		"alg none":           {"Recent", reencode(`{"alg":"none","kid":"iam-2026-10","typ":"aipay-assertion+jwt"}`), codes.Unauthenticated},
-		"embedded key":       {"Recent", reencode(`{"alg":"ES256","kid":"iam-2026-10","typ":"aipay-assertion+jwt","jku":"https://attacker.test"}`), codes.Unauthenticated},
-		"wrong type":         {"Recent", reencode(`{"alg":"ES256","kid":"iam-2026-10","typ":"JWT"}`), codes.Unauthenticated},
-		"duplicate header":   {"Recent", reencode(`{"alg":"ES256","kid":"iam-2026-10","typ":"aipay-assertion+jwt","alg":"ES256"}`), codes.Unauthenticated},
-		"truncated":          {"Recent", parts[0] + "." + parts[1], codes.Unauthenticated},
-		"garbage":            {"Recent", "not-a-token", codes.Unauthenticated},
-		"no mfa":             {"Recent", f.token(t, func(c *Claims) { c.AMR = []string{"pwd", "otp"} }), codes.PermissionDenied},
-		"stale auth":         {"Recent", f.token(t, func(c *Claims) { c.AuthTime = now.Add(-6 * time.Minute).Unix() }), codes.PermissionDenied},
-		"no auth_time":       {"Recent", f.token(t, func(c *Claims) { c.AuthTime = 0 }), codes.PermissionDenied},
-		"merchant signature": {"Recent", f.token(t, func(c *Claims) { c.PrincipalType = PrincipalMerchantApplication; c.AMR = []string{"epay_v2_sign"} }), codes.PermissionDenied},
+		"other key":        {"Recent", forged, codes.Unauthenticated},
+		"unregistered key": {"Recent", unregistered, codes.Unauthenticated},
+		"tampered claims":  {"Read", parts[0] + "." + base64.RawURLEncoding.EncodeToString(tampered) + "." + parts[2], codes.Unauthenticated},
+		"alg none":         {"Recent", reencode(`{"alg":"none","kid":"iam-2026-10","typ":"aipay-assertion+jwt"}`), codes.Unauthenticated},
+		"embedded key":     {"Recent", reencode(`{"alg":"ES256","kid":"iam-2026-10","typ":"aipay-assertion+jwt","jku":"https://attacker.test"}`), codes.Unauthenticated},
+		"wrong type":       {"Recent", reencode(`{"alg":"ES256","kid":"iam-2026-10","typ":"JWT"}`), codes.Unauthenticated},
+		"duplicate header": {"Recent", reencode(`{"alg":"ES256","kid":"iam-2026-10","typ":"aipay-assertion+jwt","alg":"ES256"}`), codes.Unauthenticated},
+		"truncated":        {"Recent", parts[0] + "." + parts[1], codes.Unauthenticated},
+		"garbage":          {"Recent", "not-a-token", codes.Unauthenticated},
+		"no mfa":           {"Recent", f.token(t, func(c *Claims) { c.AMR = []string{"pwd", "otp"} }), codes.PermissionDenied},
+		"stale auth":       {"Recent", f.token(t, func(c *Claims) { c.AuthTime = now.Add(-6 * time.Minute).Unix() }), codes.PermissionDenied},
+		"no auth_time":     {"Recent", f.token(t, func(c *Claims) { c.AuthTime = 0 }), codes.PermissionDenied},
+		"merchant signature": {"Recent", f.token(t, func(c *Claims) {
+			c.PrincipalType, c.AMR = PrincipalMerchantApplication, []string{"epay_v2_sign"}
+			c.ActingScope = Scope{Type: ScopeApplication, AccountID: "a1", AccountType: AccountPersonal, BusinessID: "b1", ApplicationID: "app1"}
+		}), codes.PermissionDenied},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -460,5 +463,135 @@ func TestGeneratedContractPolicies(t *testing.T) {
 		if _, admitted := list.Rule(receiver); !admitted {
 			t.Fatalf("ListEvents does not admit %s", receiver)
 		}
+	}
+}
+
+func TestActingScopeShapes(t *testing.T) {
+	const account, org, business, app = "account-1", "org-1", "business-1", "app-1"
+	personal := func(s Scope) Scope { s.AccountID, s.AccountType = account, AccountPersonal; return s }
+	organization := func(s Scope) Scope { s.AccountID, s.AccountType, s.OrgID = account, AccountOrganization, org; return s }
+	valid := map[string]Scope{
+		"platform":                    {Type: ScopePlatform},
+		"platform bound to account":   personal(Scope{Type: ScopePlatform}),
+		"personal account":            personal(Scope{Type: ScopeAccount}),
+		"organization account":        organization(Scope{Type: ScopeAccount}),
+		"organization without org_id": {Type: ScopeAccount, AccountID: account, AccountType: AccountOrganization},
+		"business":                    personal(Scope{Type: ScopeBusiness, BusinessID: business}),
+		"application":                 organization(Scope{Type: ScopeApplication, BusinessID: business, ApplicationID: app}),
+	}
+	for name, scope := range valid {
+		if !scope.valid() {
+			t.Errorf("%s rejected: %+v", name, scope)
+		}
+	}
+	invalid := map[string]Scope{
+		"unknown type":                 {Type: "organization", AccountID: account, AccountType: AccountOrganization},
+		"no type":                      personal(Scope{}),
+		"account without id":           {Type: ScopeAccount, AccountType: AccountPersonal},
+		"account without type":         {Type: ScopeAccount, AccountID: account},
+		"unknown account type":         {Type: ScopeAccount, AccountID: account, AccountType: "team"},
+		"personal with org":            {Type: ScopeAccount, AccountID: account, AccountType: AccountPersonal, OrgID: org},
+		"account with business":        personal(Scope{Type: ScopeAccount, BusinessID: business}),
+		"business without id":          personal(Scope{Type: ScopeBusiness}),
+		"business without account":     {Type: ScopeBusiness, BusinessID: business},
+		"business with application":    personal(Scope{Type: ScopeBusiness, BusinessID: business, ApplicationID: app}),
+		"application without id":       personal(Scope{Type: ScopeApplication, BusinessID: business}),
+		"application without business": personal(Scope{Type: ScopeApplication, ApplicationID: app}),
+		"platform with business":       {Type: ScopePlatform, BusinessID: business},
+		"platform with org only":       {Type: ScopePlatform, OrgID: org},
+		"platform personal with org":   {Type: ScopePlatform, AccountID: account, AccountType: AccountPersonal, OrgID: org},
+	}
+	for name, scope := range invalid {
+		if scope.valid() {
+			t.Errorf("%s accepted: %+v", name, scope)
+		}
+	}
+}
+
+// signRaw signs arbitrary claim JSON as IAM would, bypassing SignAssertion's
+// own validation, to prove the verifier rejects what a faulty issuer emits.
+func signRaw(t *testing.T, signer interface {
+	Sign(context.Context, []byte) ([]byte, error)
+}, claims string) string {
+	t.Helper()
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"ES256","kid":"iam-2026-10","typ":"aipay-assertion+jwt"}`))
+	input := header + "." + base64.RawURLEncoding.EncodeToString([]byte(claims))
+	der, err := signer.Sign(context.Background(), []byte(input))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return input + "." + base64.RawURLEncoding.EncodeToString(derToRaw(t, der))
+}
+
+func TestActingScopeVerification(t *testing.T) {
+	f := newFixture(t)
+	encode := func(scope string, edit func(map[string]any)) string {
+		claims := validClaims()
+		body, _ := json.Marshal(claims)
+		var fields map[string]any
+		_ = json.Unmarshal(body, &fields)
+		var parsed any
+		_ = json.Unmarshal([]byte(scope), &parsed)
+		fields["acting_scope"] = parsed
+		if edit != nil {
+			edit(fields)
+		}
+		out, _ := json.Marshal(fields)
+		return string(out)
+	}
+	if _, _, err := f.call("Recent", "backend", signRaw(t, f.iam, encode(`{"type":"account","account_id":"a1","account_type":"personal"}`, nil))); err != nil {
+		t.Fatal("valid raw assertion rejected:", err)
+	}
+	for name, claims := range map[string]string{
+		"superseded organization scope": encode(`{"type":"organization","organization_id":"o1"}`, nil),
+		"superseded member":             encode(`{"type":"account","account_id":"a1","account_type":"organization","organization_id":"o1"}`, nil),
+		"personal account with org":     encode(`{"type":"account","account_id":"a1","account_type":"personal","org_id":"o1"}`, nil),
+		"business without business_id":  encode(`{"type":"business","account_id":"a1","account_type":"personal"}`, nil),
+		"unknown scope type":            encode(`{"type":"tenant","account_id":"a1","account_type":"personal"}`, nil),
+		"missing acting_scope":          encode(`null`, func(m map[string]any) { delete(m, "acting_scope") }),
+		"merchant application at business scope": encode(`{"type":"business","account_id":"a1","account_type":"personal","business_id":"b1"}`, func(m map[string]any) {
+			m["principal_type"] = PrincipalMerchantApplication
+		}),
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, _, err := f.call("Recent", "backend", signRaw(t, f.iam, claims))
+			expect(t, err, codes.Unauthenticated)
+		})
+	}
+	if _, err := SignAssertion(context.Background(), f.iam, func() Claims {
+		c := validClaims()
+		c.ActingScope = Scope{Type: ScopeAccount, AccountID: "a1", AccountType: AccountPersonal, OrgID: "o1"}
+		return c
+	}()); err == nil {
+		t.Fatal("issued a personal-account assertion with an organization")
+	}
+}
+
+func TestCallScopeAccess(t *testing.T) {
+	f := newFixture(t)
+	business := Scope{Type: ScopeBusiness, AccountID: "account-1", AccountType: AccountOrganization, OrgID: "org-1", BusinessID: "business-1"}
+	call, _, err := f.call("Read", "backend", f.token(t, func(c *Claims) { c.ActingScope = business; c.Permission = "settlement.record.read" }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	account, ok := call.Account()
+	if !ok || account != (Account{ID: "account-1", Type: AccountOrganization, OrgID: "org-1"}) {
+		t.Fatalf("account=%+v ok=%v", account, ok)
+	}
+	if _, err = call.RequireScope(ScopeAccount); status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("business scope passed an account-wide requirement: %v", err)
+	}
+	if scope, err := call.RequireScope(ScopeAccount, ScopeBusiness); err != nil || scope.BusinessID != "business-1" {
+		t.Fatalf("scope=%+v err=%v", scope, err)
+	}
+	service, _, err := f.call("Read", "ledger")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := service.Account(); ok {
+		t.Fatal("service call reported an account")
+	}
+	if _, err = service.RequireScope(ScopePlatform, ScopeAccount, ScopeBusiness, ScopeApplication); status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("service call passed a scope requirement: %v", err)
 	}
 }

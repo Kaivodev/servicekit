@@ -45,7 +45,8 @@ func (u *usedIDs) Consume(_ context.Context, use authz.Use) error {
 }
 
 // register serves every method of service with a handler that reports the
-// verified business ID back through a header.
+// verified funds account back through a header. CreateWithdrawal acts on
+// account-wide funds, so like a real handler it requires the account scope.
 func register(service string, methods ...string) rpc.Register {
 	return func(registrar grpc.ServiceRegistrar) {
 		desc := &grpc.ServiceDesc{ServiceName: service, HandlerType: (*any)(nil)}
@@ -61,8 +62,13 @@ func register(service string, methods ...string) rpc.Register {
 					if !ok {
 						return nil, status.Error(codes.Internal, "no authorization context")
 					}
-					if assertion, ok := call.Assertion(); ok {
-						_ = grpc.SetHeader(ctx, metadata.Pairs("x-test-business", assertion.ActingScope().BusinessID))
+					if method == "CreateWithdrawal" {
+						if _, err := call.RequireScope(authz.ScopeAccount); err != nil {
+							return nil, err
+						}
+					}
+					if account, ok := call.Account(); ok {
+						_ = grpc.SetHeader(ctx, metadata.Pairs("x-test-account", account.ID))
 					}
 					return &emptypb.Empty{}, nil
 				})
@@ -160,7 +166,7 @@ func TestAuthorizationOverMutualTLS(t *testing.T) {
 		now := time.Now()
 		issued++
 		claims := authz.Claims{Issuer: "iam", Subject: "user-1", PrincipalType: authz.PrincipalUser,
-			ActingScope: authz.Scope{Type: authz.ScopeBusiness, OrganizationID: "org-1", BusinessID: "business-1"}, Audience: authz.Audience{"settlement"},
+			ActingScope: authz.Scope{Type: authz.ScopeAccount, AccountID: "account-1", AccountType: authz.AccountOrganization, OrgID: "org-1"}, Audience: authz.Audience{"settlement"},
 			Permission: "settlement.withdrawal.create", RequestFingerprint: base64.RawURLEncoding.EncodeToString(fingerprint[:]), AMR: []string{"pwd", "hwk", "mfa"},
 			AuthTime: now.Add(-time.Minute).Unix(), IssuedAt: now.Unix(), ExpiresAt: now.Add(time.Minute).Unix(), ID: fmt.Sprintf("assertion-%08d", issued)}
 		if edit != nil {
@@ -179,11 +185,11 @@ func TestAuthorizationOverMutualTLS(t *testing.T) {
 		}
 		var header metadata.MD
 		err := conn.Invoke(callCtx, "/"+name+"/"+method, &emptypb.Empty{}, &emptypb.Empty{}, grpc.Header(&header))
-		business := header.Get("x-test-business")
-		if len(business) == 0 {
+		account := header.Get("x-test-account")
+		if len(account) == 0 {
 			return "", err
 		}
-		return business[0], err
+		return account[0], err
 	}
 	expect := func(label string, err error, code codes.Code) {
 		t.Helper()
@@ -192,9 +198,17 @@ func TestAuthorizationOverMutualTLS(t *testing.T) {
 		}
 	}
 	token := issue(nil)
-	business, err := invoke(backend, "CreateWithdrawal", token)
-	if err != nil || business != "business-1" {
-		t.Fatalf("business=%q err=%v", business, err)
+	account, err := invoke(backend, "CreateWithdrawal", token)
+	if err != nil || account != "account-1" {
+		t.Fatalf("account=%q err=%v", account, err)
+	}
+	// A business role of the same account cannot reach account-wide funds.
+	businessScope := authz.Scope{Type: authz.ScopeBusiness, AccountID: "account-1", AccountType: authz.AccountOrganization, BusinessID: "business-1"}
+	_, err = invoke(backend, "CreateWithdrawal", issue(func(c *authz.Claims) { c.ActingScope = businessScope }))
+	expect("business scope on account funds", err, codes.PermissionDenied)
+	account, err = invoke(backend, "GetWithdrawal", issue(func(c *authz.Claims) { c.ActingScope = businessScope; c.Permission = "settlement.record.read" }))
+	if err != nil || account != "account-1" {
+		t.Fatalf("business-scoped read: account=%q err=%v", account, err)
 	}
 	_, err = invoke(backend, "CreateWithdrawal", token)
 	expect("replayed assertion", err, codes.Unauthenticated)

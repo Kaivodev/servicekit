@@ -43,19 +43,6 @@ const (
 	PrincipalService             = "service"
 )
 
-// Scope types carried in acting_scope.type.
-const (
-	ScopePlatform     = "platform"
-	ScopeOrganization = "organization"
-	ScopeBusiness     = "business"
-)
-
-type Scope struct {
-	Type           string `json:"type"`
-	OrganizationID string `json:"organization_id,omitempty"`
-	BusinessID     string `json:"business_id,omitempty"`
-}
-
 // Claims is the JSON claim set. Times are NumericDate seconds; aud is always
 // written as an array and read as a string or an array.
 type Claims struct {
@@ -98,18 +85,6 @@ var (
 	errMalformed = errors.New("malformed identity assertion")
 )
 
-func validScope(s Scope) bool {
-	switch s.Type {
-	case ScopePlatform:
-		return s.OrganizationID == "" && s.BusinessID == ""
-	case ScopeOrganization:
-		return idPattern.MatchString(s.OrganizationID) && s.BusinessID == ""
-	case ScopeBusiness:
-		return idPattern.MatchString(s.OrganizationID) && idPattern.MatchString(s.BusinessID)
-	}
-	return false
-}
-
 // validate checks the claim shapes independent of the clock and receiver.
 func (c Claims) validate() error {
 	fingerprint, err := base64.RawURLEncoding.Strict().DecodeString(c.RequestFingerprint)
@@ -118,7 +93,10 @@ func (c Claims) validate() error {
 		return errMalformed
 	case c.PrincipalType != PrincipalUser && c.PrincipalType != PrincipalMerchantApplication && c.PrincipalType != PrincipalService:
 		return errMalformed
-	case !validScope(c.ActingScope) || !permissionPattern.MatchString(c.Permission):
+	case !c.ActingScope.valid() || !permissionPattern.MatchString(c.Permission):
+		return errMalformed
+	case c.PrincipalType == PrincipalMerchantApplication && c.ActingScope.Type != ScopeApplication:
+		// Application credentials always act in their application scope.
 		return errMalformed
 	case err != nil || len(fingerprint) != sha256.Size:
 		return errMalformed
