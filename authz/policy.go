@@ -11,14 +11,11 @@ import (
 	"regexp"
 	"time"
 
+	authzv1 "github.com/aipay-dev/protobuf/gen/go/aipay/authz/v1"
 	"github.com/aipay-dev/servicekit/config"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 )
-
-// PolicyExtension is the full name of the method option defined in
-// github.com/aipay-dev/protobuf (aipay/authz/v1/policy.proto).
-const PolicyExtension = "aipay.authz.v1.policy"
 
 // MaxRecentAuth bounds a rule's recent authentication window.
 const MaxRecentAuth = time.Hour
@@ -72,17 +69,19 @@ type Policies struct{ byMethod map[string]Policy }
 
 var permissionPattern = regexp.MustCompile(`^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$`)
 
-// enum numbers of aipay.authz.v1.AssertionRequirement
-var requirements = map[protoreflect.EnumNumber]Requirement{1: NotRequired, 2: Required, 3: MFARecent, 4: SingleUse}
+var requirements = map[authzv1.AssertionRequirement]Requirement{
+	authzv1.AssertionRequirement_ASSERTION_REQUIREMENT_NOT_REQUIRED: NotRequired,
+	authzv1.AssertionRequirement_ASSERTION_REQUIREMENT_REQUIRED:     Required,
+	authzv1.AssertionRequirement_ASSERTION_REQUIREMENT_MFA_RECENT:   MFARecent,
+	authzv1.AssertionRequirement_ASSERTION_REQUIREMENT_SINGLE_USE:   SingleUse,
+}
 
-// LoadPolicies reads the policy option of every method of services. extension
-// must be the generated aipay.authz.v1 E_Policy type; passing it explicitly
-// keeps registration visible in the composition root. Any method without a
-// valid policy is an error, so a server never starts with an undeclared method.
-func LoadPolicies(extension protoreflect.ExtensionType, services ...protoreflect.ServiceDescriptor) (Policies, error) {
-	if extension == nil || extension.TypeDescriptor().FullName() != PolicyExtension || extension.TypeDescriptor().Message() == nil {
-		return Policies{}, errors.New("authorization policies require the " + PolicyExtension + " extension type")
-	}
+// LoadPolicies reads the (aipay.authz.v1.policy) option of every method of
+// services, typically taken from the generated SDK, e.g.
+// eventsv1.File_aipay_events_v1_event_stream_proto.Services().ByName(...).
+// Any method without a valid policy is an error, so a server never starts
+// with an undeclared method.
+func LoadPolicies(services ...protoreflect.ServiceDescriptor) (Policies, error) {
 	if len(services) == 0 {
 		return Policies{}, errors.New("authorization policies require at least one service")
 	}
@@ -95,7 +94,7 @@ func LoadPolicies(extension protoreflect.ExtensionType, services ...protoreflect
 			if _, exists := result.byMethod[name]; exists {
 				return Policies{}, fmt.Errorf("%s: service listed twice", name)
 			}
-			policy, err := parsePolicy(extension, method)
+			policy, err := parsePolicy(method)
 			if err != nil {
 				return Policies{}, fmt.Errorf("%s: %w", name, err)
 			}
@@ -137,13 +136,13 @@ func (p Policy) Rule(caller string) (Rule, bool) {
 	return Rule{}, false
 }
 
+// Fields this version enforces. A newer SDK may add policy fields; a policy
+// that populates one fails to load rather than being enforced partially.
 var (
 	policyFields = map[protoreflect.Name]bool{"rules": true}
 	ruleFields   = map[protoreflect.Name]bool{"callers": true, "assertion": true, "permissions": true, "recent_auth_max_age_seconds": true}
 )
 
-// onlyKnownFields fails closed when a newer contract populates a field this
-// version cannot enforce.
 func onlyKnownFields(m protoreflect.Message, known map[protoreflect.Name]bool) error {
 	var unknown error
 	m.Range(func(field protoreflect.FieldDescriptor, _ protoreflect.Value) bool {
@@ -159,52 +158,25 @@ func onlyKnownFields(m protoreflect.Message, known map[protoreflect.Name]bool) e
 	return unknown
 }
 
-func field(m protoreflect.Message, name protoreflect.Name, kind protoreflect.Kind, list bool) (protoreflect.FieldDescriptor, error) {
-	fd := m.Descriptor().Fields().ByName(name)
-	if fd == nil || fd.Kind() != kind || fd.IsList() != list {
-		return nil, fmt.Errorf("policy schema lacks %s", name)
-	}
-	return fd, nil
-}
-
-func stringList(m protoreflect.Message, name protoreflect.Name) ([]string, error) {
-	fd, err := field(m, name, protoreflect.StringKind, true)
-	if err != nil {
-		return nil, err
-	}
-	list := m.Get(fd).List()
-	values := make([]string, list.Len())
-	for i := range values {
-		values[i] = list.Get(i).String()
-	}
-	return values, nil
-}
-
-func parsePolicy(extension protoreflect.ExtensionType, method protoreflect.MethodDescriptor) (Policy, error) {
+func parsePolicy(method protoreflect.MethodDescriptor) (Policy, error) {
 	options := method.Options()
-	if options == nil || !proto.HasExtension(options, extension) {
-		return Policy{}, errors.New("no " + PolicyExtension + " declared")
+	if options == nil || !proto.HasExtension(options, authzv1.E_Policy) {
+		return Policy{}, errors.New("no (aipay.authz.v1.policy) declared")
 	}
-	value, ok := proto.GetExtension(options, extension).(proto.Message)
-	if !ok {
+	message, ok := proto.GetExtension(options, authzv1.E_Policy).(*authzv1.MethodPolicy)
+	if !ok || message == nil {
 		return Policy{}, errors.New("unreadable policy option")
 	}
-	message := value.ProtoReflect()
-	if err := onlyKnownFields(message, policyFields); err != nil {
+	if err := onlyKnownFields(message.ProtoReflect(), policyFields); err != nil {
 		return Policy{}, err
 	}
-	rulesField, err := field(message, "rules", protoreflect.MessageKind, true)
-	if err != nil {
-		return Policy{}, err
-	}
-	list := message.Get(rulesField).List()
-	if list.Len() == 0 {
+	if len(message.GetRules()) == 0 {
 		return Policy{}, errors.New("policy has no caller rules")
 	}
 	var policy Policy
 	seen := map[string]bool{}
-	for i := 0; i < list.Len(); i++ {
-		rule, err := parseRule(list.Get(i).Message(), seen)
+	for i, declared := range message.GetRules() {
+		rule, err := parseRule(declared, seen)
 		if err != nil {
 			return Policy{}, fmt.Errorf("rule %d: %w", i+1, err)
 		}
@@ -213,32 +185,16 @@ func parsePolicy(extension protoreflect.ExtensionType, method protoreflect.Metho
 	return policy, nil
 }
 
-func parseRule(m protoreflect.Message, seen map[string]bool) (Rule, error) {
-	if err := onlyKnownFields(m, ruleFields); err != nil {
+func parseRule(declared *authzv1.CallerRule, seen map[string]bool) (Rule, error) {
+	if err := onlyKnownFields(declared.ProtoReflect(), ruleFields); err != nil {
 		return Rule{}, err
 	}
-	var rule Rule
-	var err error
-	if rule.Callers, err = stringList(m, "callers"); err != nil {
-		return Rule{}, err
-	}
-	if rule.Permissions, err = stringList(m, "permissions"); err != nil {
-		return Rule{}, err
-	}
-	assertion, err := field(m, "assertion", protoreflect.EnumKind, false)
-	if err != nil {
-		return Rule{}, err
-	}
-	maxAge, err := field(m, "recent_auth_max_age_seconds", protoreflect.Uint32Kind, false)
-	if err != nil {
-		return Rule{}, err
-	}
-	requirement, ok := requirements[m.Get(assertion).Enum()]
+	requirement, ok := requirements[declared.GetAssertion()]
 	if !ok {
 		return Rule{}, errors.New("assertion requirement must be declared")
 	}
-	rule.Requirement = requirement
-	rule.RecentAuthMaxAge = time.Duration(m.Get(maxAge).Uint()) * time.Second
+	rule := Rule{Callers: append([]string(nil), declared.GetCallers()...), Requirement: requirement,
+		Permissions: append([]string(nil), declared.GetPermissions()...), RecentAuthMaxAge: time.Duration(declared.GetRecentAuthMaxAgeSeconds()) * time.Second}
 	if len(rule.Callers) == 0 {
 		return Rule{}, errors.New("no callers")
 	}

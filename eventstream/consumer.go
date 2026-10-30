@@ -5,17 +5,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
+	eventsv1 "github.com/aipay-dev/protobuf/gen/go/aipay/events/v1"
 	"github.com/jackc/pgx/v5"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
-
-// Source is a producer's EventStreamService as seen by a receiver; services
-// adapt the generated gRPC client to it. Transport errors are returned as is
-// and never stop the stream.
-type Source interface {
-	ListEvents(ctx context.Context, stream string, afterSequence uint64, limit uint32) ([]Envelope, error)
-	GetStreamHead(ctx context.Context, stream string) (Head, error)
-}
 
 var (
 	// ErrStopped means the stream cursor is stopped. Resuming it needs a person
@@ -32,7 +27,7 @@ var (
 // the stream with its reason.
 type Puller struct {
 	db           Pool
-	source       Source
+	source       eventsv1.EventStreamServiceClient
 	verifier     Verifier
 	limit        uint32
 	readCursor   string
@@ -43,7 +38,10 @@ type Puller struct {
 	updateCursor string
 }
 
-func NewPuller(db Pool, source Source, verifier Verifier, tables ReceiverTables, limit uint32) (*Puller, error) {
+// NewPuller reads through source, the generated client of the producer's
+// EventStreamService. Transport errors are returned as is and never stop the
+// stream.
+func NewPuller(db Pool, source eventsv1.EventStreamServiceClient, verifier Verifier, tables ReceiverTables, limit uint32) (*Puller, error) {
 	cursors, inbox, err := tables.sanitize()
 	if err != nil || db == nil || source == nil || verifier.check() != nil || limit < 1 || limit > MaxBatch {
 		return nil, errors.New("invalid event puller configuration")
@@ -100,17 +98,18 @@ func (p *Puller) Pull(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	events, err := p.source.ListEvents(ctx, p.verifier.Stream, start.Sequence, p.limit)
+	response, err := p.source.ListEvents(ctx, &eventsv1.ListEventsRequest{Stream: p.verifier.Stream, AfterSequence: start.Sequence, Limit: p.limit})
 	if err != nil {
 		return 0, fmt.Errorf("list events: %w", err)
 	}
+	events := response.GetEvents()
 	var stop *StopError
 	if uint32(len(events)) > p.limit {
 		stop = &StopError{Reason: ReasonBatchTooLarge, Sequence: start.Sequence + 1}
 		events = nil
 	}
 	type verified struct {
-		envelope Envelope
+		envelope *eventsv1.SignedEvent
 		digest   [32]byte
 	}
 	var valid []verified
@@ -143,13 +142,13 @@ func (p *Puller) Pull(ctx context.Context) (int, error) {
 	}
 	for _, v := range valid {
 		e := v.envelope
-		_, err = tx.Exec(ctx, p.insertInbox, e.Stream, int64(e.Sequence), e.EventID, e.Producer, e.EventType, int32(e.SchemaVersion),
-			e.OccurredAt, e.RecordedAt, e.Payload, e.PayloadDigest, e.PrevDigest, v.digest[:], e.KeyID, e.Signature)
+		_, err = tx.Exec(ctx, p.insertInbox, e.GetStream(), int64(e.GetSequence()), e.GetEventId(), e.GetProducer(), e.GetEventType(), int32(e.GetSchemaVersion()),
+			e.GetOccurredAt().AsTime(), e.GetRecordedAt().AsTime(), e.GetPayload(), e.GetPayloadDigest(), e.GetPrevDigest(), v.digest[:], e.GetKeyId(), e.GetSignature())
 		if uniqueViolation(err) {
 			// The same event_id at another position means the producer reused an
 			// identity: an integrity failure, not a harmless duplicate.
 			rollback(ctx, tx)
-			return 0, p.stopAfter(ctx, start, &StopError{Reason: ReasonDuplicateEvent, Sequence: e.Sequence})
+			return 0, p.stopAfter(ctx, start, &StopError{Reason: ReasonDuplicateEvent, Sequence: e.GetSequence()})
 		}
 		if err != nil {
 			return 0, errors.New("insert inbox envelope failed")
@@ -209,19 +208,20 @@ func (p *Puller) CheckHead(ctx context.Context) (uint64, error) {
 	if err != nil {
 		return 0, err
 	}
-	head, err := p.source.GetStreamHead(ctx, p.verifier.Stream)
+	response, err := p.source.GetStreamHead(ctx, &eventsv1.GetStreamHeadRequest{Stream: p.verifier.Stream})
 	if err != nil {
 		return 0, fmt.Errorf("get stream head: %w", err)
 	}
+	head := response.GetHead()
 	switch {
-	case head.Stream != p.verifier.Stream || len(head.EventDigest) != 32:
+	case head.GetStream() != p.verifier.Stream || len(head.GetEventDigest()) != 32:
 		return 0, p.stopAfter(ctx, cursor, &StopError{Reason: ReasonMalformed, Sequence: cursor.Sequence})
-	case head.Sequence < cursor.Sequence:
-		return 0, p.stopAfter(ctx, cursor, &StopError{Reason: ReasonHeadRegressed, Sequence: head.Sequence})
-	case head.Sequence == cursor.Sequence && !bytes.Equal(head.EventDigest, cursor.Digest[:]):
-		return 0, p.stopAfter(ctx, cursor, &StopError{Reason: ReasonHeadForked, Sequence: head.Sequence})
+	case head.GetSequence() < cursor.Sequence:
+		return 0, p.stopAfter(ctx, cursor, &StopError{Reason: ReasonHeadRegressed, Sequence: head.GetSequence()})
+	case head.GetSequence() == cursor.Sequence && !bytes.Equal(head.GetEventDigest(), cursor.Digest[:]):
+		return 0, p.stopAfter(ctx, cursor, &StopError{Reason: ReasonHeadForked, Sequence: head.GetSequence()})
 	}
-	return head.Sequence - cursor.Sequence, nil
+	return head.GetSequence() - cursor.Sequence, nil
 }
 
 // Outcome is the one-time processing result of an inbox envelope.
@@ -257,7 +257,7 @@ func NewInbox(tables ReceiverTables, stream string) (*Inbox, error) {
 }
 
 // Pending returns up to limit pending envelopes in sequence order.
-func (i *Inbox) Pending(ctx context.Context, db DB, limit int) ([]Envelope, error) {
+func (i *Inbox) Pending(ctx context.Context, db DB, limit int) ([]*eventsv1.SignedEvent, error) {
 	if limit < 1 || limit > i.maxPerQuery {
 		return nil, errors.New("invalid inbox read limit")
 	}
@@ -266,16 +266,16 @@ func (i *Inbox) Pending(ctx context.Context, db DB, limit int) ([]Envelope, erro
 		return nil, errors.New("read inbox failed")
 	}
 	defer rows.Close()
-	var result []Envelope
+	var result []*eventsv1.SignedEvent
 	for rows.Next() {
-		e := Envelope{Stream: i.stream}
+		e := &eventsv1.SignedEvent{Stream: i.stream}
 		var sequence int64
 		var version int32
-		if err = rows.Scan(&e.EventID, &e.Producer, &sequence, &e.EventType, &version, &e.OccurredAt, &e.RecordedAt, &e.Payload, &e.PayloadDigest, &e.PrevDigest, &e.KeyID, &e.Signature); err != nil {
+		var occurred, recorded time.Time
+		if err = rows.Scan(&e.EventId, &e.Producer, &sequence, &e.EventType, &version, &occurred, &recorded, &e.Payload, &e.PayloadDigest, &e.PrevDigest, &e.KeyId, &e.Signature); err != nil {
 			return nil, errors.New("read inbox envelope failed")
 		}
-		e.Sequence, e.SchemaVersion = uint64(sequence), uint32(version)
-		e.OccurredAt, e.RecordedAt = e.OccurredAt.UTC(), e.RecordedAt.UTC()
+		e.Sequence, e.SchemaVersion, e.OccurredAt, e.RecordedAt = uint64(sequence), uint32(version), timestamppb.New(occurred), timestamppb.New(recorded)
 		result = append(result, e)
 	}
 	if rows.Err() != nil {

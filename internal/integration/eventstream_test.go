@@ -7,21 +7,30 @@ import (
 	"crypto/ecdsa"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/aipay-dev/observability/logging"
+	eventsv1 "github.com/aipay-dev/protobuf/gen/go/aipay/events/v1"
 	"github.com/aipay-dev/servicekit/authz"
 	"github.com/aipay-dev/servicekit/config"
+	"github.com/aipay-dev/servicekit/devcert"
 	"github.com/aipay-dev/servicekit/eventstream"
+	"github.com/aipay-dev/servicekit/mtls"
+	"github.com/aipay-dev/servicekit/rpc"
 	"github.com/aipay-dev/servicekit/signing"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -176,16 +185,55 @@ func isolatedPool(t *testing.T, ctx context.Context, admin *pgx.Conn, raw, prefi
 	return pool
 }
 
-type readerSource struct {
-	reader *eventstream.Reader
-	caller string
-}
-
-func (s readerSource) ListEvents(ctx context.Context, stream string, after uint64, limit uint32) ([]eventstream.Envelope, error) {
-	return s.reader.ListEvents(ctx, s.caller, stream, after, limit)
-}
-func (s readerSource) GetStreamHead(ctx context.Context, stream string) (eventstream.Head, error) {
-	return s.reader.Head(ctx, s.caller, stream)
+// serveEvents serves reader as payment's EventStreamService over mutual TLS,
+// authorized by the published method policy, and returns generated clients
+// for the receivers ledger and settlement.
+func serveEvents(t *testing.T, reader *eventstream.Reader) map[string]eventsv1.EventStreamServiceClient {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), "certs")
+	if err := devcert.Generate(dir, "aipay.test", []string{"payment", "ledger", "settlement"}, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	material := map[string]*mtls.Material{}
+	for _, name := range []string{"payment", "ledger", "settlement"} {
+		m, err := mtls.Load(config.TLS{CAFile: filepath.Join(dir, "ca.crt"), CertFile: filepath.Join(dir, name, "tls.crt"), KeyFile: filepath.Join(dir, name, "tls.key"), TrustDomain: "aipay.test"}, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		material[name] = m
+	}
+	log := logging.New(io.Discard, slog.LevelInfo)
+	policies, err := authz.LoadPolicies(eventsv1.File_aipay_events_v1_event_stream_proto.Services().ByName("EventStreamService"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	authorizer, err := authz.New(authz.Options{Service: "payment", Policies: policies, Peer: material["payment"].Peer, Log: log})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, err := rpc.NewServer(rpc.ServerOptions{RPC: config.RPC{Address: "127.0.0.1:0", ServerName: "payment", AllowedPeers: []string{"ledger", "settlement"}, CallTimeout: 5 * time.Second, MaxMessageBytes: 1 << 20, MaxConcurrentStreams: 16},
+		HealthTimeout: time.Second, HealthInterval: 20 * time.Millisecond, ShutdownTimeout: 2 * time.Second, Authorizer: authorizer}, material["payment"], log, log, nil,
+		func(r grpc.ServiceRegistrar) { eventsv1.RegisterEventStreamServiceServer(r, reader) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- server.Run(ctx) }()
+	t.Cleanup(func() { cancel(); <-done })
+	eventually(t, 3*time.Second, "event server readiness", func() bool { return server.Ready() })
+	clients := map[string]eventsv1.EventStreamServiceClient{}
+	for _, receiver := range []string{"ledger", "settlement"} {
+		connectCtx, stop := context.WithTimeout(context.Background(), 3*time.Second)
+		conn, err := rpc.Connect(connectCtx, material[receiver], rpc.ClientOptions{Address: server.Address(), ServerName: "payment", ExpectedService: "payment", CallTimeout: 5 * time.Second, MaxMessageBytes: 1 << 20})
+		stop()
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = conn.Close() })
+		clients[receiver] = eventsv1.NewEventStreamServiceClient(conn)
+	}
+	return clients
 }
 
 func insertEvents(ctx context.Context, pool *pgxpool.Pool, stream, eventType string, n int) error {
@@ -314,13 +362,14 @@ func TestSignedEventPipelineOnPostgres(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = reader.ListEvents(ctx, "settlement", "payment.orders", 0, 10); status.Code(err) != codes.PermissionDenied {
+	clients := serveEvents(t, reader)
+	if _, err = clients["settlement"].ListEvents(ctx, &eventsv1.ListEventsRequest{Stream: "payment.orders", Limit: 10}); status.Code(err) != codes.PermissionDenied {
 		t.Fatalf("unlisted receiver: %v", err)
 	}
-	if _, err = reader.ListEvents(ctx, "ledger", "payment.withdrawals", 0, 10); status.Code(err) != codes.PermissionDenied {
+	if _, err = clients["ledger"].ListEvents(ctx, &eventsv1.ListEventsRequest{Stream: "payment.withdrawals", Limit: 10}); status.Code(err) != codes.PermissionDenied {
 		t.Fatalf("unknown stream: %v", err)
 	}
-	if _, err = reader.ListEvents(ctx, "ledger", "payment.orders", 0, 501); status.Code(err) != codes.InvalidArgument {
+	if _, err = clients["ledger"].ListEvents(ctx, &eventsv1.ListEventsRequest{Stream: "payment.orders", Limit: 501}); status.Code(err) != codes.InvalidArgument {
 		t.Fatalf("oversized limit: %v", err)
 	}
 
@@ -330,7 +379,7 @@ func TestSignedEventPipelineOnPostgres(t *testing.T) {
 	}
 	known := func(eventType string, version uint32) bool { return eventType == "OrderPaid" && version == 1 }
 	receiverTables := eventstream.ReceiverTables{Cursors: "ledger_stream_cursors", Inbox: "ledger_inbox"}
-	puller, err := eventstream.NewPuller(receiver, readerSource{reader, "ledger"}, eventstream.Verifier{Producer: "payment", Stream: "payment.orders", Keys: keys, Known: known}, receiverTables, 30)
+	puller, err := eventstream.NewPuller(receiver, clients["ledger"], eventstream.Verifier{Producer: "payment", Stream: "payment.orders", Keys: keys, Known: known}, receiverTables, 30)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -351,7 +400,7 @@ func TestSignedEventPipelineOnPostgres(t *testing.T) {
 		t.Fatal(err)
 	}
 	pending, err := inbox.Pending(ctx, tx, 3)
-	if err != nil || len(pending) != 3 || pending[0].Sequence != 1 || pending[2].Sequence != 3 {
+	if err != nil || len(pending) != 3 || pending[0].GetSequence() != 1 || pending[2].GetSequence() != 3 {
 		t.Fatalf("pending=%d err=%v", len(pending), err)
 	}
 	if err = inbox.Resolve(ctx, tx, 1, eventstream.Applied, ""); err != nil {
@@ -404,7 +453,7 @@ func TestSignedEventPipelineOnPostgres(t *testing.T) {
 	}
 
 	// Rewriting history the receiver already verified is detected from the head.
-	pricing, err := eventstream.NewPuller(receiver, readerSource{reader, "ledger"}, eventstream.Verifier{Producer: "payment", Stream: "payment.pricing", Keys: keys,
+	pricing, err := eventstream.NewPuller(receiver, clients["ledger"], eventstream.Verifier{Producer: "payment", Stream: "payment.pricing", Keys: keys,
 		Known: func(eventType string, version uint32) bool {
 			return eventType == "PricingVersionApproved" && version == 1
 		}}, receiverTables, 10)
@@ -461,8 +510,9 @@ func TestUnknownEventTypeStopsStream(t *testing.T) {
 		t.Fatal(err)
 	}
 	reader, _ := eventstream.NewReader(producer, "payment", tables, map[string][]string{"payment.orders": {"ledger"}})
+	clients := serveEvents(t, reader)
 	keys, _ := signing.NewPublicKeys(map[string]*ecdsa.PublicKey{"payment-dev-1": signer.PublicKey()})
-	puller, err := eventstream.NewPuller(receiver, readerSource{reader, "ledger"}, eventstream.Verifier{Producer: "payment", Stream: "payment.orders", Keys: keys,
+	puller, err := eventstream.NewPuller(receiver, clients["ledger"], eventstream.Verifier{Producer: "payment", Stream: "payment.orders", Keys: keys,
 		Known: func(eventType string, version uint32) bool { return eventType == "OrderPaid" && version == 1 }}, eventstream.ReceiverTables{Cursors: "ledger_stream_cursors", Inbox: "ledger_inbox"}, 10)
 	if err != nil {
 		t.Fatal(err)

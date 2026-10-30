@@ -15,6 +15,8 @@ import (
 	"testing"
 	"time"
 
+	eventsv1 "github.com/aipay-dev/protobuf/gen/go/aipay/events/v1"
+	iamv1 "github.com/aipay-dev/protobuf/gen/go/aipay/iam/v1"
 	"github.com/aipay-dev/servicekit/authz/authztest"
 	"github.com/aipay-dev/servicekit/config"
 	"github.com/aipay-dev/servicekit/signing"
@@ -22,7 +24,6 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
-	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/types/descriptorpb"
 	"google.golang.org/protobuf/types/known/emptypb"
@@ -37,24 +38,17 @@ const (
 
 type ruleSpec = authztest.Rule
 
-type testSchema struct{ *authztest.Schema }
+type testSchema struct{}
 
-func newSchema(t *testing.T) testSchema {
-	t.Helper()
-	schema, err := authztest.NewSchema()
-	if err != nil {
-		t.Fatal(err)
-	}
-	return testSchema{schema}
+func newSchema(*testing.T) testSchema { return testSchema{} }
+
+func (testSchema) options(rules ...ruleSpec) *descriptorpb.MethodOptions {
+	return authztest.Options(rules...)
 }
 
-func (s testSchema) options(rules ...ruleSpec) *descriptorpb.MethodOptions {
-	return s.Options(rules...)
-}
-
-func (s testSchema) service(t *testing.T, name string, methods map[string]*descriptorpb.MethodOptions) protoreflect.ServiceDescriptor {
+func (testSchema) service(t *testing.T, name string, methods map[string]*descriptorpb.MethodOptions) protoreflect.ServiceDescriptor {
 	t.Helper()
-	service, err := s.Service("aipay.test.v1."+name, methods)
+	service, err := authztest.Service("aipay.test.v1."+name, methods)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,7 +124,7 @@ func newFixture(t *testing.T) fixture {
 		"Recent":   schema.options(ruleSpec{Callers: []string{"backend"}, Requirement: mfaRecent, Permissions: withdraw, MaxAgeSeconds: 300}),
 		"Withdraw": schema.options(ruleSpec{Callers: []string{"backend"}, Requirement: singleUse, Permissions: withdraw, MaxAgeSeconds: 300}),
 	})
-	policies, err := LoadPolicies(schema.Extension, service)
+	policies, err := LoadPolicies(service)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -410,7 +404,7 @@ func TestLoadPoliciesFailsClosed(t *testing.T) {
 	for name, options := range cases {
 		t.Run(name, func(t *testing.T) {
 			service := schema.service(t, "S", map[string]*descriptorpb.MethodOptions{"Fine": ok, "Bad": options})
-			if _, err := LoadPolicies(schema.Extension, service); err == nil {
+			if _, err := LoadPolicies(service); err == nil {
 				t.Fatal("invalid policy loaded")
 			}
 		})
@@ -418,13 +412,10 @@ func TestLoadPoliciesFailsClosed(t *testing.T) {
 	// A future contract field this version cannot enforce must not be ignored.
 	rule := extendedRule(t, schema)
 	service := schema.service(t, "S", map[string]*descriptorpb.MethodOptions{"Fine": rule})
-	if _, err := LoadPolicies(schema.Extension, service); err == nil {
+	if _, err := LoadPolicies(service); err == nil {
 		t.Fatal("unknown policy field ignored")
 	}
-	if _, err := LoadPolicies(nil, schema.service(t, "S", map[string]*descriptorpb.MethodOptions{"Fine": ok})); err == nil {
-		t.Fatal("policies loaded without the extension type")
-	}
-	policies, err := LoadPolicies(schema.Extension, schema.service(t, "S", map[string]*descriptorpb.MethodOptions{"Fine": ok}))
+	policies, err := LoadPolicies(schema.service(t, "S", map[string]*descriptorpb.MethodOptions{"Fine": ok}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -433,7 +424,7 @@ func TestLoadPoliciesFailsClosed(t *testing.T) {
 	}
 	// New refuses rules it cannot enforce.
 	single := schema.service(t, "S", map[string]*descriptorpb.MethodOptions{"W": schema.options(ruleSpec{Callers: []string{"backend"}, Requirement: singleUse, Permissions: []string{"a.b"}, MaxAgeSeconds: 60})})
-	policies, _ = LoadPolicies(schema.Extension, single)
+	policies, _ = LoadPolicies(single)
 	if _, err = New(Options{Service: "settlement", Policies: policies, Peer: testPeer, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}); err == nil {
 		t.Fatal("authorizer without assertion verifier accepted")
 	}
@@ -443,10 +434,31 @@ func TestLoadPoliciesFailsClosed(t *testing.T) {
 // contract version adding a constraint would.
 func extendedRule(t *testing.T, schema testSchema) *descriptorpb.MethodOptions {
 	t.Helper()
-	policy := schema.Policy(ruleSpec{Callers: []string{"ledger"}, Requirement: notRequired})
-	rule := policy.Get(policy.Descriptor().Fields().ByName("rules")).List().Get(0).Message()
-	rule.SetUnknown(protoreflect.RawFields{0x7a, 0x01, 0x78}) // field 15, bytes "x"
-	options := &descriptorpb.MethodOptions{}
-	proto.SetExtension(options, schema.Extension, policy.Interface())
-	return options
+	policy := authztest.Policy(ruleSpec{Callers: []string{"ledger"}, Requirement: notRequired})
+	policy.GetRules()[0].ProtoReflect().SetUnknown(protoreflect.RawFields{0x7a, 0x01, 0x78}) // field 15, bytes "x"
+	return authztest.WithPolicy(policy)
+}
+
+// The published contracts load as declared: every IAM and event stream method
+// has a policy the interceptor understands.
+func TestGeneratedContractPolicies(t *testing.T) {
+	policies, err := LoadPolicies(
+		iamv1.File_aipay_iam_v1_authorization_proto.Services().ByName("AuthorizationService"),
+		eventsv1.File_aipay_events_v1_event_stream_proto.Services().ByName("EventStreamService"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	authorize, ok := policies.Lookup("/aipay.iam.v1.AuthorizationService/Authorize")
+	if rule, admitted := authorize.Rule("backend"); !ok || !admitted || rule.Requirement != NotRequired {
+		t.Fatalf("Authorize policy %+v", authorize)
+	}
+	list, ok := policies.Lookup("/aipay.events.v1.EventStreamService/ListEvents")
+	if _, admitted := list.Rule("payment"); !ok || admitted {
+		t.Fatal("ListEvents admits a non-receiver")
+	}
+	for _, receiver := range []string{"ledger", "reconciliation", "settlement"} {
+		if _, admitted := list.Rule(receiver); !admitted {
+			t.Fatalf("ListEvents does not admit %s", receiver)
+		}
+	}
 }

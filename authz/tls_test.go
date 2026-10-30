@@ -85,30 +85,26 @@ func TestAuthorizationOverMutualTLS(t *testing.T) {
 		}
 		material[name] = m
 	}
-	schema, err := authztest.NewSchema()
-	if err != nil {
-		t.Fatal(err)
-	}
 	const name = "aipay.settlement.v1.WithdrawalService"
-	service, err := schema.Service(name, map[string]*descriptorpb.MethodOptions{
-		"CreateWithdrawal": schema.Options(authztest.Rule{Callers: []string{"backend"}, Requirement: authztest.SingleUse, Permissions: []string{"settlement.withdrawal.create"}, MaxAgeSeconds: 300}),
-		"GetWithdrawal":    schema.Options(authztest.Rule{Callers: []string{"backend"}, Requirement: authztest.Required, Permissions: []string{"settlement.withdrawal.read", "settlement.record.read"}}, authztest.Rule{Callers: []string{"ledger"}, Requirement: authztest.NotRequired}),
+	service, err := authztest.Service(name, map[string]*descriptorpb.MethodOptions{
+		"CreateWithdrawal": authztest.Options(authztest.Rule{Callers: []string{"backend"}, Requirement: authztest.SingleUse, Permissions: []string{"settlement.withdrawal.create"}, MaxAgeSeconds: 300}),
+		"GetWithdrawal":    authztest.Options(authztest.Rule{Callers: []string{"backend"}, Requirement: authztest.Required, Permissions: []string{"settlement.withdrawal.read", "settlement.record.read"}}, authztest.Rule{Callers: []string{"ledger"}, Requirement: authztest.NotRequired}),
 		"Undeclared":       nil,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = authz.LoadPolicies(schema.Extension, service); err == nil {
+	if _, err = authz.LoadPolicies(service); err == nil {
 		t.Fatal("a service with an undeclared method loaded")
 	}
-	declared, err := schema.Service(name, map[string]*descriptorpb.MethodOptions{
-		"CreateWithdrawal": schema.Options(authztest.Rule{Callers: []string{"backend"}, Requirement: authztest.SingleUse, Permissions: []string{"settlement.withdrawal.create"}, MaxAgeSeconds: 300}),
-		"GetWithdrawal":    schema.Options(authztest.Rule{Callers: []string{"backend"}, Requirement: authztest.Required, Permissions: []string{"settlement.withdrawal.read", "settlement.record.read"}}, authztest.Rule{Callers: []string{"ledger"}, Requirement: authztest.NotRequired}),
+	declared, err := authztest.Service(name, map[string]*descriptorpb.MethodOptions{
+		"CreateWithdrawal": authztest.Options(authztest.Rule{Callers: []string{"backend"}, Requirement: authztest.SingleUse, Permissions: []string{"settlement.withdrawal.create"}, MaxAgeSeconds: 300}),
+		"GetWithdrawal":    authztest.Options(authztest.Rule{Callers: []string{"backend"}, Requirement: authztest.Required, Permissions: []string{"settlement.withdrawal.read", "settlement.record.read"}}, authztest.Rule{Callers: []string{"ledger"}, Requirement: authztest.NotRequired}),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	policies, err := authz.LoadPolicies(schema.Extension, declared)
+	policies, err := authz.LoadPolicies(declared)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -11,9 +11,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"testing"
 	"time"
+
+	approvalv1 "github.com/aipay-dev/protobuf/gen/go/aipay/approval/v1"
+	"github.com/aipay-dev/protobuf/testvectors"
+	"google.golang.org/protobuf/proto"
 )
 
 type vectorAssertion struct {
@@ -51,20 +54,16 @@ func unhex(t *testing.T, s string) []byte {
 
 func loadVectors(t *testing.T) vectors {
 	t.Helper()
-	raw, err := os.ReadFile("testdata/approval_v1.json")
-	if err != nil {
-		t.Fatal(err)
-	}
 	var v vectors
-	if err = json.Unmarshal(raw, &v); err != nil {
+	if err := json.Unmarshal(testvectors.ApprovalV1(), &v); err != nil {
 		t.Fatal(err)
 	}
 	return v
 }
 
-func (v vectors) assertion(t *testing.T, a vectorAssertion) Assertion {
-	return Assertion{CredentialID: unhex(t, a.Assertion.CredentialID), AuthenticatorData: unhex(t, a.Assertion.AuthenticatorData),
-		ClientDataJSON: unhex(t, a.Assertion.ClientDataJSON), Signature: unhex(t, a.Assertion.Signature)}
+func (v vectors) assertion(t *testing.T, a vectorAssertion) *approvalv1.WebAuthnAssertion {
+	return &approvalv1.WebAuthnAssertion{CredentialId: unhex(t, a.Assertion.CredentialID), AuthenticatorData: unhex(t, a.Assertion.AuthenticatorData),
+		ClientDataJson: unhex(t, a.Assertion.ClientDataJSON), Signature: unhex(t, a.Assertion.Signature)}
 }
 
 var now = time.Date(2026, 10, 26, 8, 0, 0, 0, time.UTC)
@@ -120,30 +119,31 @@ func TestRequestAndRegistryChecks(t *testing.T) {
 	digest := Digest(unhex(t, v.RequestBytes))
 	base := func() (Request, Key) {
 		return Request{Digest: digest, RequestedBy: "requester", ExpiresAt: now.Add(time.Hour)},
-			Key{ApproverID: "approver-1", IAMUserID: "approver-user", CredentialID: valid.CredentialID, PublicKey: unhex(t, v.Credential.COSEPublicKey), RPID: v.RPID, SignCount: 41}
+			Key{ApproverID: "approver-1", IAMUserID: "approver-user", CredentialID: valid.GetCredentialId(), PublicKey: unhex(t, v.Credential.COSEPublicKey), RPID: v.RPID, SignCount: 41}
 	}
-	cases := map[string]func(*Request, *Key, *Assertion){
-		"request_expired":     func(r *Request, _ *Key, _ *Assertion) { r.ExpiresAt = now },
-		"self_approval":       func(r *Request, k *Key, _ *Assertion) { r.RequestedBy = k.IAMUserID },
-		"duplicate_approver":  func(r *Request, k *Key, _ *Assertion) { r.Approvers = []string{k.ApproverID} },
-		"key_revoked":         func(_ *Request, k *Key, _ *Assertion) { k.Revoked = true },
-		"key_rp_id":           func(_ *Request, k *Key, _ *Assertion) { k.RPID = "aipay.example" },
-		"credential_mismatch": func(_ *Request, _ *Key, a *Assertion) { a.CredentialID = []byte("other") },
-		"challenge_mismatch":  func(r *Request, _ *Key, _ *Assertion) { r.Digest = Digest([]byte("another request")) },
-		"signature_invalid": func(_ *Request, _ *Key, a *Assertion) {
+	cases := map[string]func(*Request, *Key, *approvalv1.WebAuthnAssertion){
+		"request_expired":     func(r *Request, _ *Key, _ *approvalv1.WebAuthnAssertion) { r.ExpiresAt = now },
+		"self_approval":       func(r *Request, k *Key, _ *approvalv1.WebAuthnAssertion) { r.RequestedBy = k.IAMUserID },
+		"duplicate_approver":  func(r *Request, k *Key, _ *approvalv1.WebAuthnAssertion) { r.Approvers = []string{k.ApproverID} },
+		"key_revoked":         func(_ *Request, k *Key, _ *approvalv1.WebAuthnAssertion) { k.Revoked = true },
+		"key_rp_id":           func(_ *Request, k *Key, _ *approvalv1.WebAuthnAssertion) { k.RPID = "aipay.example" },
+		"credential_mismatch": func(_ *Request, _ *Key, a *approvalv1.WebAuthnAssertion) { a.CredentialId = []byte("other") },
+		"challenge_mismatch": func(r *Request, _ *Key, _ *approvalv1.WebAuthnAssertion) {
+			r.Digest = Digest([]byte("another request"))
+		},
+		"signature_invalid": func(_ *Request, _ *Key, a *approvalv1.WebAuthnAssertion) {
 			a.Signature = append([]byte{}, a.Signature[:len(a.Signature)-1]...)
 		},
-		"key_malformed": func(_ *Request, k *Key, _ *Assertion) { k.PublicKey = k.PublicKey[:20] },
-		"authenticator_data_malformed": func(_ *Request, _ *Key, a *Assertion) {
+		"key_malformed": func(_ *Request, k *Key, _ *approvalv1.WebAuthnAssertion) { k.PublicKey = k.PublicKey[:20] },
+		"authenticator_data_malformed": func(_ *Request, _ *Key, a *approvalv1.WebAuthnAssertion) {
 			a.AuthenticatorData = append(append([]byte{}, a.AuthenticatorData...), 0xa0)
 		},
 	}
 	for reason, edit := range cases {
 		t.Run(reason, func(t *testing.T) {
 			request, key := base()
-			assertion := valid
-			assertion.Signature = append([]byte{}, valid.Signature...)
-			edit(&request, &key, &assertion)
+			assertion := proto.Clone(valid).(*approvalv1.WebAuthnAssertion)
+			edit(&request, &key, assertion)
 			_, err := verifier.Verify(request, key, assertion)
 			expectReason(t, err, reason)
 		})
@@ -178,7 +178,7 @@ func newSoftwareKey(t *testing.T) softwareKey {
 	return softwareKey{key: key, cose: append(append(cose, 0x22, 0x58, 0x20), raw[33:]...)}
 }
 
-func (k softwareKey) assert(t *testing.T, digest [32]byte, counter uint32) Assertion {
+func (k softwareKey) assert(t *testing.T, digest [32]byte, counter uint32) *approvalv1.WebAuthnAssertion {
 	t.Helper()
 	rp := sha256.Sum256([]byte("admin.aipay.example"))
 	data := binary.BigEndian.AppendUint32(append(rp[:], 0x05), counter)
@@ -189,7 +189,7 @@ func (k softwareKey) assert(t *testing.T, digest [32]byte, counter uint32) Asser
 	if err != nil {
 		t.Fatal(err)
 	}
-	return Assertion{CredentialID: []byte("cred"), AuthenticatorData: data, ClientDataJSON: client, Signature: signature}
+	return &approvalv1.WebAuthnAssertion{CredentialId: []byte("cred"), AuthenticatorData: data, ClientDataJson: client, Signature: signature}
 }
 
 // approve runs one approval per counter, recording the returned counter as an
@@ -243,14 +243,14 @@ func TestExtensionDataAndKeyEncoding(t *testing.T) {
 	cose = append(cose, 0x03, 0x26, 0x01, 0x02, 0x20, 0x01)
 	digest := Digest([]byte("request"))
 	rp := sha256.Sum256([]byte("admin.aipay.example"))
-	sign := func(flags byte, tail []byte) Assertion {
+	sign := func(flags byte, tail []byte) *approvalv1.WebAuthnAssertion {
 		data := binary.BigEndian.AppendUint32(append(rp[:], flags), 7)
 		data = append(data, tail...)
 		client := []byte(`{"type":"webauthn.get","challenge":"` + base64.RawURLEncoding.EncodeToString(digest[:]) + `","origin":"https://admin.aipay.example"}`)
 		clientHash := sha256.Sum256(client)
 		signed := sha256.Sum256(append(append([]byte{}, data...), clientHash[:]...))
 		signature, _ := ecdsa.SignASN1(rand.Reader, key, signed[:])
-		return Assertion{CredentialID: []byte("cred"), AuthenticatorData: data, ClientDataJSON: client, Signature: signature}
+		return &approvalv1.WebAuthnAssertion{CredentialId: []byte("cred"), AuthenticatorData: data, ClientDataJson: client, Signature: signature}
 	}
 	verifier, _ := NewVerifier("admin.aipay.example", []string{"https://admin.aipay.example"}, func() time.Time { return now })
 	request := Request{Digest: digest, RequestedBy: "requester", ExpiresAt: now.Add(time.Minute)}

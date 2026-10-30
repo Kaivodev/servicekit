@@ -9,13 +9,18 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"os"
 	"strconv"
 	"testing"
 	"time"
 
+	eventsv1 "github.com/aipay-dev/protobuf/gen/go/aipay/events/v1"
+	"github.com/aipay-dev/protobuf/testvectors"
 	"github.com/aipay-dev/servicekit/config"
 	"github.com/aipay-dev/servicekit/signing"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 type vectorEnvelope struct {
@@ -34,7 +39,7 @@ type vectorEnvelope struct {
 	Signature     string `json:"signature"`
 }
 
-func (v vectorEnvelope) envelope(t *testing.T) Envelope {
+func (v vectorEnvelope) envelope(t *testing.T) *eventsv1.SignedEvent {
 	t.Helper()
 	number := func(s string) uint64 {
 		n, err := strconv.ParseUint(s, 10, 64)
@@ -50,19 +55,15 @@ func (v vectorEnvelope) envelope(t *testing.T) Envelope {
 		}
 		return b
 	}
-	return Envelope{EventID: v.EventID, Producer: v.Producer, Stream: v.Stream, Sequence: number(v.Sequence), EventType: v.EventType,
-		SchemaVersion: uint32(number(v.SchemaVersion)), OccurredAt: time.Unix(0, int64(number(v.OccurredAt))).UTC(), RecordedAt: time.Unix(0, int64(number(v.RecordedAt))).UTC(),
-		Payload: raw(v.Payload), PayloadDigest: raw(v.PayloadDigest), PrevDigest: raw(v.PrevDigest), KeyID: v.KeyID, Signature: raw(v.Signature)}
+	return &eventsv1.SignedEvent{EventId: v.EventID, Producer: v.Producer, Stream: v.Stream, Sequence: number(v.Sequence), EventType: v.EventType,
+		SchemaVersion: uint32(number(v.SchemaVersion)), OccurredAt: timestamppb.New(time.Unix(0, int64(number(v.OccurredAt)))), RecordedAt: timestamppb.New(time.Unix(0, int64(number(v.RecordedAt)))),
+		Payload: raw(v.Payload), PayloadDigest: raw(v.PayloadDigest), PrevDigest: raw(v.PrevDigest), KeyId: v.KeyID, Signature: raw(v.Signature)}
 }
 
 func anyEvent(string, uint32) bool { return true }
 
-// The contract vectors, published by the protobuf repository.
+// The contract vectors published with the protobuf SDK.
 func TestContractVectors(t *testing.T) {
-	raw, err := os.ReadFile("testdata/event_signing_v1.json")
-	if err != nil {
-		t.Fatal(err)
-	}
 	var doc struct {
 		Producer   string `json:"producer"`
 		Stream     string `json:"stream"`
@@ -84,7 +85,7 @@ func TestContractVectors(t *testing.T) {
 			Envelope vectorEnvelope `json:"envelope"`
 		} `json:"invalid"`
 	}
-	if err = json.Unmarshal(raw, &doc); err != nil {
+	if err := json.Unmarshal(testvectors.EventSigningV1(), &doc); err != nil {
 		t.Fatal(err)
 	}
 	keys := map[string]*ecdsa.PublicKey{}
@@ -141,15 +142,15 @@ func developmentSigner(t *testing.T, id string) signing.Signer {
 	return signer
 }
 
-func sealedChain(t *testing.T, signer signing.Signer, n int) []Envelope {
+func sealedChain(t *testing.T, signer signing.Signer, n int) []*eventsv1.SignedEvent {
 	t.Helper()
 	prev := ZeroDigest
-	var events []Envelope
+	var events []*eventsv1.SignedEvent
 	base := time.Date(2026, 10, 26, 8, 0, 0, 123456000, time.UTC)
 	for i := 1; i <= n; i++ {
-		e, digest, err := Seal(context.Background(), signer, Envelope{
-			EventID: "019a1f40-8b00-7000-8000-00000000000" + strconv.Itoa(i), Producer: "payment", Stream: "payment.orders", Sequence: uint64(i),
-			EventType: "OrderPaid", SchemaVersion: 1, OccurredAt: base.Add(time.Duration(i) * time.Second), RecordedAt: base.Add(time.Minute),
+		e, digest, err := Seal(context.Background(), signer, &eventsv1.SignedEvent{
+			EventId: "019a1f40-8b00-7000-8000-00000000000" + strconv.Itoa(i), Producer: "payment", Stream: "payment.orders", Sequence: uint64(i),
+			EventType: "OrderPaid", SchemaVersion: 1, OccurredAt: timestamppb.New(base.Add(time.Duration(i) * time.Second)), RecordedAt: timestamppb.New(base.Add(time.Minute)),
 			Payload: []byte{byte(i)}, PrevDigest: bytes.Clone(prev[:]),
 		})
 		if err != nil {
@@ -180,34 +181,63 @@ func TestChainVerificationStopsOnEveryBreak(t *testing.T) {
 	first, _ := verifier.Next(Cursor{}, events[0])
 	other := developmentSigner(t, "payment-dev")
 	resigned, _, _ := Seal(context.Background(), other, events[1])
+	shift := func(ts *timestamppb.Timestamp, d time.Duration) *timestamppb.Timestamp {
+		return timestamppb.New(ts.AsTime().Add(d))
+	}
 	cases := map[string]struct {
 		cursor Cursor
-		edit   func(*Envelope)
+		edit   func(*eventsv1.SignedEvent) *eventsv1.SignedEvent
 		want   string
 	}{
-		"gap":              {first, func(e *Envelope) { *e = events[2] }, ReasonSequenceGap},
-		"replay":           {cursor, func(e *Envelope) { *e = events[2] }, ReasonSequenceGap},
-		"fork":             {first, func(e *Envelope) { e.PrevDigest = bytes.Repeat([]byte{1}, 32) }, ReasonPrevDigest},
-		"payload":          {first, func(e *Envelope) { e.Payload = []byte("forged") }, ReasonPayloadDigest},
-		"recomputed hash":  {first, func(e *Envelope) { e.Payload = []byte("forged"); d := sha256.Sum256(e.Payload); e.PayloadDigest = d[:] }, ReasonBadSignature},
-		"occurred_at":      {first, func(e *Envelope) { e.OccurredAt = e.OccurredAt.Add(time.Microsecond) }, ReasonBadSignature},
-		"event type":       {first, func(e *Envelope) { e.EventType = "OrderReversed" }, ReasonBadSignature},
-		"other key":        {first, func(e *Envelope) { *e = resigned }, ReasonBadSignature},
-		"unknown key":      {first, func(e *Envelope) { e.KeyID = "payment-old" }, ReasonUnknownKey},
-		"stream":           {first, func(e *Envelope) { e.Stream = "payment.pricing" }, ReasonStreamMismatch},
-		"uppercase id":     {first, func(e *Envelope) { e.EventID = "019A1F40-8B00-7000-8000-000000000002" }, ReasonMalformed},
-		"uuid v4":          {first, func(e *Envelope) { e.EventID = "019a1f40-8b00-4000-8000-000000000002" }, ReasonMalformed},
-		"nanoseconds":      {first, func(e *Envelope) { e.OccurredAt = e.OccurredAt.Add(time.Nanosecond) }, ReasonMalformed},
-		"missing sig":      {first, func(e *Envelope) { e.Signature = nil }, ReasonMalformed},
-		"unknown version":  {first, func(e *Envelope) { *e = mustSeal(t, signer, *e, func(x *Envelope) { x.SchemaVersion = 2 }) }, ReasonUnknownEvent},
-		"unknown event":    {first, func(e *Envelope) { *e = mustSeal(t, signer, *e, func(x *Envelope) { x.EventType = "OrderVanished" }) }, ReasonUnknownEvent},
-		"producer differs": {first, func(e *Envelope) { *e = mustSeal(t, signer, *e, func(x *Envelope) { x.Producer = "ledger" }) }, ReasonProducerMismatch},
+		"gap":    {first, func(*eventsv1.SignedEvent) *eventsv1.SignedEvent { return events[2] }, ReasonSequenceGap},
+		"replay": {cursor, func(*eventsv1.SignedEvent) *eventsv1.SignedEvent { return events[2] }, ReasonSequenceGap},
+		"fork": {first, func(e *eventsv1.SignedEvent) *eventsv1.SignedEvent {
+			e.PrevDigest = bytes.Repeat([]byte{1}, 32)
+			return e
+		}, ReasonPrevDigest},
+		"payload": {first, func(e *eventsv1.SignedEvent) *eventsv1.SignedEvent { e.Payload = []byte("forged"); return e }, ReasonPayloadDigest},
+		"recomputed hash": {first, func(e *eventsv1.SignedEvent) *eventsv1.SignedEvent {
+			e.Payload = []byte("forged")
+			d := sha256.Sum256(e.Payload)
+			e.PayloadDigest = d[:]
+			return e
+		}, ReasonBadSignature},
+		"occurred_at": {first, func(e *eventsv1.SignedEvent) *eventsv1.SignedEvent {
+			e.OccurredAt = shift(e.OccurredAt, time.Microsecond)
+			return e
+		}, ReasonBadSignature},
+		"event type":  {first, func(e *eventsv1.SignedEvent) *eventsv1.SignedEvent { e.EventType = "OrderReversed"; return e }, ReasonBadSignature},
+		"other key":   {first, func(*eventsv1.SignedEvent) *eventsv1.SignedEvent { return resigned }, ReasonBadSignature},
+		"unknown key": {first, func(e *eventsv1.SignedEvent) *eventsv1.SignedEvent { e.KeyId = "payment-old"; return e }, ReasonUnknownKey},
+		"stream":      {first, func(e *eventsv1.SignedEvent) *eventsv1.SignedEvent { e.Stream = "payment.pricing"; return e }, ReasonStreamMismatch},
+		"uppercase id": {first, func(e *eventsv1.SignedEvent) *eventsv1.SignedEvent {
+			e.EventId = "019A1F40-8B00-7000-8000-000000000002"
+			return e
+		}, ReasonMalformed},
+		"uuid v4": {first, func(e *eventsv1.SignedEvent) *eventsv1.SignedEvent {
+			e.EventId = "019a1f40-8b00-4000-8000-000000000002"
+			return e
+		}, ReasonMalformed},
+		"nanoseconds": {first, func(e *eventsv1.SignedEvent) *eventsv1.SignedEvent {
+			e.OccurredAt = shift(e.OccurredAt, time.Nanosecond)
+			return e
+		}, ReasonMalformed},
+		"no occurred_at": {first, func(e *eventsv1.SignedEvent) *eventsv1.SignedEvent { e.OccurredAt = nil; return e }, ReasonMalformed},
+		"missing sig":    {first, func(e *eventsv1.SignedEvent) *eventsv1.SignedEvent { e.Signature = nil; return e }, ReasonMalformed},
+		"nil envelope":   {first, func(*eventsv1.SignedEvent) *eventsv1.SignedEvent { return nil }, ReasonMalformed},
+		"unknown version": {first, func(e *eventsv1.SignedEvent) *eventsv1.SignedEvent {
+			return mustSeal(t, signer, e, func(x *eventsv1.SignedEvent) { x.SchemaVersion = 2 })
+		}, ReasonUnknownEvent},
+		"unknown event": {first, func(e *eventsv1.SignedEvent) *eventsv1.SignedEvent {
+			return mustSeal(t, signer, e, func(x *eventsv1.SignedEvent) { x.EventType = "OrderVanished" })
+		}, ReasonUnknownEvent},
+		"producer differs": {first, func(e *eventsv1.SignedEvent) *eventsv1.SignedEvent {
+			return mustSeal(t, signer, e, func(x *eventsv1.SignedEvent) { x.Producer = "ledger" })
+		}, ReasonProducerMismatch},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			e := events[1]
-			e.Payload, e.PrevDigest = bytes.Clone(e.Payload), bytes.Clone(e.PrevDigest)
-			tc.edit(&e)
+			e := tc.edit(proto.Clone(events[1]).(*eventsv1.SignedEvent))
 			next, err := verifier.Next(tc.cursor, e)
 			var stop *StopError
 			if !errors.As(err, &stop) || stop.Reason != tc.want {
@@ -220,9 +250,9 @@ func TestChainVerificationStopsOnEveryBreak(t *testing.T) {
 	}
 }
 
-func mustSeal(t *testing.T, signer signing.Signer, e Envelope, edit func(*Envelope)) Envelope {
+func mustSeal(t *testing.T, signer signing.Signer, e *eventsv1.SignedEvent, edit func(*eventsv1.SignedEvent)) *eventsv1.SignedEvent {
 	t.Helper()
-	edit(&e)
+	edit(e)
 	sealed, _, err := Seal(context.Background(), signer, e)
 	if err != nil {
 		t.Fatal(err)
@@ -237,4 +267,26 @@ func TestSealRejectsMismatchedPayloadDigest(t *testing.T) {
 	if _, _, err := Seal(context.Background(), signer, e); err == nil {
 		t.Fatal("sealed a payload whose stored digest differs")
 	}
+	original := sealedChain(t, signer, 1)[0]
+	unsigned := proto.Clone(original).(*eventsv1.SignedEvent)
+	unsigned.Signature, unsigned.KeyId = nil, ""
+	if _, _, err := Seal(context.Background(), signer, unsigned); err != nil || unsigned.Signature != nil {
+		t.Fatal("Seal modified its input instead of returning a sealed copy")
+	}
 }
+
+// Without the authorization context a Reader serves nothing.
+func TestReaderRequiresAuthorizationContext(t *testing.T) {
+	reader, err := NewReader(unusedDB{}, "payment", ProducerTables{StreamHeads: "payment_stream_heads", Outbox: "payment_outbox"}, map[string][]string{"payment.orders": {"ledger"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = reader.ListEvents(context.Background(), &eventsv1.ListEventsRequest{Stream: "payment.orders", Limit: 10}); status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("ListEvents without authorization: %v", err)
+	}
+	if _, err = reader.GetStreamHead(context.Background(), &eventsv1.GetStreamHeadRequest{Stream: "payment.orders"}); status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("GetStreamHead without authorization: %v", err)
+	}
+}
+
+type unusedDB struct{ DB }

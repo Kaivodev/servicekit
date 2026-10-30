@@ -141,15 +141,11 @@ func startFixtureRPC(t *testing.T, name, peer string, material *mtls.Material, r
 	t.Helper()
 	log := logging.New(logs, slog.LevelInfo)
 	// The test-only RPC declares its policy like any business method.
-	schema, err := authztest.NewSchema()
+	service, err := authztest.Service("test.Trace", map[string]*descriptorpb.MethodOptions{"Call": authztest.Options(authztest.Rule{Callers: []string{peer}, Requirement: authztest.NotRequired})})
 	if err != nil {
 		t.Fatal(err)
 	}
-	service, err := schema.Service("test.Trace", map[string]*descriptorpb.MethodOptions{"Call": schema.Options(authztest.Rule{Callers: []string{peer}, Requirement: authztest.NotRequired})})
-	if err != nil {
-		t.Fatal(err)
-	}
-	policies, err := authz.LoadPolicies(schema.Extension, service)
+	policies, err := authz.LoadPolicies(service)
 	if err != nil {
 		t.Fatal(err)
 	}

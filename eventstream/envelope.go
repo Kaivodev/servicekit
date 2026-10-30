@@ -2,10 +2,10 @@
 // producers sequence and sign outbox rows per stream, receivers pull, verify
 // the hash chain and signatures, and store envelopes unchanged in an inbox.
 //
-// Envelope mirrors aipay.events.v1.SignedEvent; services convert between the
-// generated message and this type at their gRPC boundary. Table names are
-// supplied by the owning service; the expected columns follow the shared
-// producer and receiver templates of the database design.
+// Envelopes are the generated aipay.events.v1.SignedEvent messages: Reader
+// implements EventStreamServiceServer and Puller reads through the generated
+// client. Table names are supplied by the owning service; the expected columns
+// follow the shared producer and receiver templates of the database design.
 package eventstream
 
 import (
@@ -19,9 +19,12 @@ import (
 	"regexp"
 	"time"
 
+	eventsv1 "github.com/aipay-dev/protobuf/gen/go/aipay/events/v1"
 	"github.com/aipay-dev/servicekit/config"
 	"github.com/aipay-dev/servicekit/signing"
 	"github.com/google/uuid"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 const (
@@ -45,33 +48,10 @@ var (
 
 func ValidStream(name string) bool { return streamPattern.MatchString(name) }
 
-type Envelope struct {
-	EventID       string
-	Producer      string
-	Stream        string
-	Sequence      uint64
-	EventType     string
-	SchemaVersion uint32
-	OccurredAt    time.Time
-	RecordedAt    time.Time
-	Payload       []byte
-	PayloadDigest []byte
-	PrevDigest    []byte
-	KeyID         string
-	Signature     []byte
-}
-
 // Cursor is the last verified position of a stream.
 type Cursor struct {
 	Sequence uint64
 	Digest   [32]byte
-}
-
-// Head is a producer's reported stream head.
-type Head struct {
-	Stream      string
-	Sequence    uint64
-	EventDigest []byte
 }
 
 func validEventID(id string) bool {
@@ -83,31 +63,38 @@ func validEventID(id string) bool {
 
 // validTime requires microsecond precision: PostgreSQL TIMESTAMPTZ keeps no
 // more, and a stored envelope must reproduce the signed nanoseconds exactly.
-func validTime(t time.Time) bool {
-	return !t.IsZero() && !t.Before(minNanos) && !t.After(maxNanos) && t.Nanosecond()%1000 == 0
+func validTime(ts *timestamppb.Timestamp) bool {
+	if ts.CheckValid() != nil || ts.GetNanos()%1000 != 0 {
+		return false
+	}
+	t := ts.AsTime()
+	return !t.Before(minNanos) && !t.After(maxNanos)
 }
 
-func validateHeader(e Envelope) error {
+func validateHeader(e *eventsv1.SignedEvent) error {
+	if e == nil {
+		return errors.New("missing envelope")
+	}
 	switch {
-	case !validEventID(e.EventID):
+	case !validEventID(e.GetEventId()):
 		return errors.New("event_id must be a canonical lowercase UUIDv7")
-	case !config.ValidService(e.Producer):
+	case !config.ValidService(e.GetProducer()):
 		return errors.New("invalid producer")
-	case !ValidStream(e.Stream):
+	case !ValidStream(e.GetStream()):
 		return errors.New("invalid stream name")
-	case e.Sequence == 0 || e.Sequence > math.MaxInt64:
+	case e.GetSequence() == 0 || e.GetSequence() > math.MaxInt64:
 		return errors.New("sequence must be between 1 and 2^63-1")
-	case !eventTypePattern.MatchString(e.EventType):
+	case !eventTypePattern.MatchString(e.GetEventType()):
 		return errors.New("invalid event_type")
-	case e.SchemaVersion == 0 || e.SchemaVersion > math.MaxInt32:
+	case e.GetSchemaVersion() == 0 || e.GetSchemaVersion() > math.MaxInt32:
 		return errors.New("invalid schema_version")
-	case !validTime(e.OccurredAt):
+	case !validTime(e.GetOccurredAt()):
 		return errors.New("occurred_at must be a microsecond-precision time")
-	case !validTime(e.RecordedAt):
+	case !validTime(e.GetRecordedAt()):
 		return errors.New("recorded_at must be a microsecond-precision time")
-	case len(e.Payload) > MaxPayloadBytes:
+	case len(e.GetPayload()) > MaxPayloadBytes:
 		return errors.New("payload exceeds 1 MiB")
-	case len(e.PayloadDigest) != 32 || len(e.PrevDigest) != 32:
+	case len(e.GetPayloadDigest()) != 32 || len(e.GetPrevDigest()) != 32:
 		return errors.New("digests must be 32 bytes")
 	}
 	return nil
@@ -115,18 +102,18 @@ func validateHeader(e Envelope) error {
 
 // Validate checks the envelope shape, including key_id and signature
 // presence, without verifying the chain or the signature.
-func Validate(e Envelope) error {
+func Validate(e *eventsv1.SignedEvent) error {
 	if err := validateHeader(e); err != nil {
 		return err
 	}
-	if !signing.ValidKeyID(e.KeyID) || len(e.Signature) == 0 || len(e.Signature) > maxSignatureLen {
+	if !signing.ValidKeyID(e.GetKeyId()) || len(e.GetSignature()) == 0 || len(e.GetSignature()) > maxSignatureLen {
 		return errors.New("invalid key_id or signature")
 	}
 	return nil
 }
 
 // SigningInput returns the AIPAY-EVENT-V1 canonical bytes of e.
-func SigningInput(e Envelope) ([]byte, error) {
+func SigningInput(e *eventsv1.SignedEvent) ([]byte, error) {
 	if err := validateHeader(e); err != nil {
 		return nil, err
 	}
@@ -136,20 +123,20 @@ func SigningInput(e Envelope) ([]byte, error) {
 		b = binary.BigEndian.AppendUint32(b, uint32(len(v)))
 		b = append(b, v...)
 	}
-	str([]byte(e.Producer))
-	str([]byte(e.Stream))
-	b = binary.BigEndian.AppendUint64(b, e.Sequence)
-	str([]byte(e.EventID))
-	str([]byte(e.EventType))
-	b = binary.BigEndian.AppendUint64(b, uint64(e.SchemaVersion))
-	b = binary.BigEndian.AppendUint64(b, uint64(e.OccurredAt.UnixNano()))
-	str(e.PayloadDigest)
-	str(e.PrevDigest)
+	str([]byte(e.GetProducer()))
+	str([]byte(e.GetStream()))
+	b = binary.BigEndian.AppendUint64(b, e.GetSequence())
+	str([]byte(e.GetEventId()))
+	str([]byte(e.GetEventType()))
+	b = binary.BigEndian.AppendUint64(b, uint64(e.GetSchemaVersion()))
+	b = binary.BigEndian.AppendUint64(b, uint64(e.GetOccurredAt().AsTime().UnixNano()))
+	str(e.GetPayloadDigest())
+	str(e.GetPrevDigest())
 	return b, nil
 }
 
 // Digest returns event_digest = SHA-256(signing input).
-func Digest(e Envelope) ([32]byte, error) {
+func Digest(e *eventsv1.SignedEvent) ([32]byte, error) {
 	input, err := SigningInput(e)
 	if err != nil {
 		return [32]byte{}, err
@@ -157,26 +144,31 @@ func Digest(e Envelope) ([32]byte, error) {
 	return sha256.Sum256(input), nil
 }
 
-// Seal computes payload_digest when absent, then signs e with signer. It
-// returns the sealed envelope and its event_digest.
-func Seal(ctx context.Context, signer signing.Signer, e Envelope) (Envelope, [32]byte, error) {
-	payload := sha256.Sum256(e.Payload)
-	if e.PayloadDigest == nil {
-		e.PayloadDigest = payload[:]
-	} else if !bytes.Equal(e.PayloadDigest, payload[:]) {
-		return Envelope{}, [32]byte{}, errors.New("stored payload_digest does not match payload")
+// Seal returns a signed copy of e: payload_digest is computed when absent
+// (and must match when present), key_id is the signer's, and the signature
+// covers the AIPAY-EVENT-V1 signing input. It also returns the event_digest.
+func Seal(ctx context.Context, signer signing.Signer, e *eventsv1.SignedEvent) (*eventsv1.SignedEvent, [32]byte, error) {
+	if e == nil {
+		return nil, [32]byte{}, errors.New("missing envelope")
 	}
-	e.KeyID = signer.KeyID()
-	input, err := SigningInput(e)
+	sealed := proto.Clone(e).(*eventsv1.SignedEvent)
+	payload := sha256.Sum256(sealed.GetPayload())
+	if sealed.PayloadDigest == nil {
+		sealed.PayloadDigest = payload[:]
+	} else if !bytes.Equal(sealed.GetPayloadDigest(), payload[:]) {
+		return nil, [32]byte{}, errors.New("stored payload_digest does not match payload")
+	}
+	sealed.KeyId = signer.KeyID()
+	input, err := SigningInput(sealed)
 	if err != nil {
-		return Envelope{}, [32]byte{}, err
+		return nil, [32]byte{}, err
 	}
 	signature, err := signer.Sign(ctx, input)
 	if err != nil {
-		return Envelope{}, [32]byte{}, err
+		return nil, [32]byte{}, err
 	}
-	e.Signature = signature
-	return e, sha256.Sum256(input), nil
+	sealed.Signature = signature
+	return sealed, sha256.Sum256(input), nil
 }
 
 // Stop reasons. Every one of them stops consumption of the stream until a
@@ -225,7 +217,7 @@ func (v Verifier) check() error {
 }
 
 // Next verifies that e directly continues cursor and returns the new cursor.
-func (v Verifier) Next(cursor Cursor, e Envelope) (Cursor, error) {
+func (v Verifier) Next(cursor Cursor, e *eventsv1.SignedEvent) (Cursor, error) {
 	if err := v.check(); err != nil {
 		return cursor, err
 	}
@@ -236,29 +228,29 @@ func (v Verifier) Next(cursor Cursor, e Envelope) (Cursor, error) {
 		return stop(ReasonMalformed)
 	}
 	switch {
-	case e.Producer != v.Producer:
+	case e.GetProducer() != v.Producer:
 		return stop(ReasonProducerMismatch)
-	case e.Stream != v.Stream:
+	case e.GetStream() != v.Stream:
 		return stop(ReasonStreamMismatch)
-	case e.Sequence != cursor.Sequence+1:
+	case e.GetSequence() != cursor.Sequence+1:
 		return stop(ReasonSequenceGap)
-	case !bytes.Equal(e.PrevDigest, cursor.Digest[:]):
+	case !bytes.Equal(e.GetPrevDigest(), cursor.Digest[:]):
 		return stop(ReasonPrevDigest)
 	}
-	if payload := sha256.Sum256(e.Payload); !bytes.Equal(payload[:], e.PayloadDigest) {
+	if payload := sha256.Sum256(e.GetPayload()); !bytes.Equal(payload[:], e.GetPayloadDigest()) {
 		return stop(ReasonPayloadDigest)
 	}
 	input, err := SigningInput(e)
 	if err != nil {
 		return stop(ReasonMalformed)
 	}
-	if err = v.Keys.Verify(e.KeyID, input, e.Signature); errors.Is(err, signing.ErrUnknownKey) {
+	if err = v.Keys.Verify(e.GetKeyId(), input, e.GetSignature()); errors.Is(err, signing.ErrUnknownKey) {
 		return stop(ReasonUnknownKey)
 	} else if err != nil {
 		return stop(ReasonBadSignature)
 	}
-	if !v.Known(e.EventType, e.SchemaVersion) {
+	if !v.Known(e.GetEventType(), e.GetSchemaVersion()) {
 		return stop(ReasonUnknownEvent)
 	}
-	return Cursor{Sequence: e.Sequence, Digest: sha256.Sum256(input)}, nil
+	return Cursor{Sequence: e.GetSequence(), Digest: sha256.Sum256(input)}, nil
 }

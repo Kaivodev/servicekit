@@ -1,14 +1,20 @@
 package eventstream
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"math"
+	"time"
 
+	eventsv1 "github.com/aipay-dev/protobuf/gen/go/aipay/events/v1"
+	"github.com/aipay-dev/servicekit/authz"
 	"github.com/aipay-dev/servicekit/config"
 	"github.com/aipay-dev/servicekit/signing"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 // Sequencer assigns sequence numbers to committed outbox rows of one producer.
@@ -46,7 +52,7 @@ func NewSequencer(db TxStarter, producer string, tables ProducerTables, signer s
 
 type pendingRow struct {
 	id       int64
-	envelope Envelope
+	envelope *eventsv1.SignedEvent
 }
 
 // SequenceStream signs up to one batch and returns how many rows it sealed;
@@ -75,14 +81,15 @@ func (s *Sequencer) SequenceStream(ctx context.Context, stream string) (int, err
 	}
 	var pending []pendingRow
 	for rows.Next() {
-		var row pendingRow
+		row := pendingRow{envelope: &eventsv1.SignedEvent{}}
 		var version int32
-		e := &row.envelope
-		if err = rows.Scan(&row.id, &e.EventID, &e.EventType, &version, &e.OccurredAt, &e.RecordedAt, &e.Payload, &e.PayloadDigest); err != nil {
+		var occurred, recorded time.Time
+		e := row.envelope
+		if err = rows.Scan(&row.id, &e.EventId, &e.EventType, &version, &occurred, &recorded, &e.Payload, &e.PayloadDigest); err != nil {
 			rows.Close()
 			return 0, errors.New("read pending outbox row failed")
 		}
-		e.SchemaVersion = uint32(version)
+		e.SchemaVersion, e.OccurredAt, e.RecordedAt = uint32(version), timestamppb.New(occurred), timestamppb.New(recorded)
 		pending = append(pending, row)
 	}
 	rows.Close()
@@ -92,17 +99,16 @@ func (s *Sequencer) SequenceStream(ctx context.Context, stream string) (int, err
 	sequence := uint64(last)
 	for _, row := range pending {
 		e := row.envelope
-		e.Producer, e.Stream, e.Sequence, e.PrevDigest = s.producer, stream, sequence+1, prev[:]
-		e.OccurredAt, e.RecordedAt = e.OccurredAt.UTC(), e.RecordedAt.UTC()
+		e.Producer, e.Stream, e.Sequence, e.PrevDigest = s.producer, stream, sequence+1, bytes.Clone(prev[:])
 		sealed, digest, err := Seal(ctx, s.signer, e)
 		if err != nil {
 			return 0, fmt.Errorf("outbox row %d cannot be sealed: %w", row.id, err)
 		}
-		tag, err := tx.Exec(ctx, s.sealRow, row.id, int64(sealed.Sequence), sealed.PrevDigest, digest[:], sealed.KeyID, sealed.Signature)
+		tag, err := tx.Exec(ctx, s.sealRow, row.id, int64(sealed.GetSequence()), sealed.GetPrevDigest(), digest[:], sealed.GetKeyId(), sealed.GetSignature())
 		if err != nil || tag.RowsAffected() != 1 {
 			return 0, errors.New("seal outbox row failed")
 		}
-		sequence, prev = sealed.Sequence, digest
+		sequence, prev = sealed.GetSequence(), digest
 	}
 	if len(pending) == 0 {
 		return 0, nil
@@ -117,10 +123,12 @@ func (s *Sequencer) SequenceStream(ctx context.Context, stream string) (int, err
 	return len(pending), nil
 }
 
-// Reader serves EventStreamService for a producer from its outbox. Each stream
-// is readable only by the receivers configured for it, in addition to the
-// method policy that admits every possible receiver.
+// Reader implements aipay.events.v1.EventStreamService for a producer from its
+// outbox; register it on a server whose Authorizer loads the service's
+// policy. Each stream is readable only by the receivers configured for it, in
+// addition to the method policy that admits every possible receiver.
 type Reader struct {
+	eventsv1.UnimplementedEventStreamServiceServer
 	db         DB
 	producer   string
 	acl        map[string]map[string]bool
@@ -153,57 +161,62 @@ func NewReader(db DB, producer string, tables ProducerTables, receivers map[stri
 	}, nil
 }
 
-func (r *Reader) authorize(caller, stream string) error {
-	if !r.acl[stream][caller] {
+var errStreamDenied = status.Error(codes.PermissionDenied, "Stream is not available to this caller")
+
+// authorize takes the caller only from the verified authorization context, so
+// a Reader reached without the Authorizer serves nothing.
+func (r *Reader) authorize(ctx context.Context, stream string) error {
+	call, ok := authz.FromContext(ctx)
+	if !ok || !r.acl[stream][call.Caller()] {
 		// Unknown and unauthorized streams look the same to the caller.
-		return status.Error(codes.PermissionDenied, "Stream is not available to this caller")
+		return errStreamDenied
 	}
 	return nil
 }
 
-// ListEvents returns signed events after afterSequence. caller must be the
-// verified peer from the authorization context, never a request field.
-func (r *Reader) ListEvents(ctx context.Context, caller, stream string, afterSequence uint64, limit uint32) ([]Envelope, error) {
-	if err := r.authorize(caller, stream); err != nil {
+func (r *Reader) ListEvents(ctx context.Context, request *eventsv1.ListEventsRequest) (*eventsv1.ListEventsResponse, error) {
+	stream, after, limit := request.GetStream(), request.GetAfterSequence(), request.GetLimit()
+	if err := r.authorize(ctx, stream); err != nil {
 		return nil, err
 	}
-	if limit < 1 || limit > MaxBatch || afterSequence > 1<<63-1 {
+	if limit < 1 || limit > MaxBatch || after > math.MaxInt64 {
 		return nil, status.Error(codes.InvalidArgument, "limit must be between 1 and 500")
 	}
-	rows, err := r.db.Query(ctx, r.listEvents, stream, int64(afterSequence), int(limit))
+	rows, err := r.db.Query(ctx, r.listEvents, stream, int64(after), int(limit))
 	if err != nil {
 		return nil, status.Error(codes.Unavailable, "Events are temporarily unavailable")
 	}
 	defer rows.Close()
-	var events []Envelope
+	response := &eventsv1.ListEventsResponse{}
 	for rows.Next() {
-		var e Envelope
+		e := &eventsv1.SignedEvent{Producer: r.producer, Stream: stream}
 		var sequence int64
 		var version int32
-		if err = rows.Scan(&e.EventID, &sequence, &e.EventType, &version, &e.OccurredAt, &e.RecordedAt, &e.Payload, &e.PayloadDigest, &e.PrevDigest, &e.KeyID, &e.Signature); err != nil {
+		var occurred, recorded time.Time
+		if err = rows.Scan(&e.EventId, &sequence, &e.EventType, &version, &occurred, &recorded, &e.Payload, &e.PayloadDigest, &e.PrevDigest, &e.KeyId, &e.Signature); err != nil {
 			return nil, status.Error(codes.Internal, "Internal Server Error")
 		}
-		e.Producer, e.Stream, e.Sequence, e.SchemaVersion = r.producer, stream, uint64(sequence), uint32(version)
-		e.OccurredAt, e.RecordedAt = e.OccurredAt.UTC(), e.RecordedAt.UTC()
-		if e.Sequence != afterSequence+uint64(len(events))+1 {
+		e.Sequence, e.SchemaVersion, e.OccurredAt, e.RecordedAt = uint64(sequence), uint32(version), timestamppb.New(occurred), timestamppb.New(recorded)
+		if e.Sequence != after+uint64(len(response.Events))+1 {
 			return nil, status.Error(codes.Internal, "Internal Server Error")
 		}
-		events = append(events, e)
+		response.Events = append(response.Events, e)
 	}
 	if rows.Err() != nil {
 		return nil, status.Error(codes.Unavailable, "Events are temporarily unavailable")
 	}
-	return events, nil
+	return response, nil
 }
 
-func (r *Reader) Head(ctx context.Context, caller, stream string) (Head, error) {
-	if err := r.authorize(caller, stream); err != nil {
-		return Head{}, err
+func (r *Reader) GetStreamHead(ctx context.Context, request *eventsv1.GetStreamHeadRequest) (*eventsv1.GetStreamHeadResponse, error) {
+	stream := request.GetStream()
+	if err := r.authorize(ctx, stream); err != nil {
+		return nil, err
 	}
 	var sequence int64
 	var digest []byte
 	if err := r.db.QueryRow(ctx, r.readHead, stream).Scan(&sequence, &digest); err != nil {
-		return Head{}, status.Error(codes.PermissionDenied, "Stream is not available to this caller")
+		return nil, errStreamDenied
 	}
-	return Head{Stream: stream, Sequence: uint64(sequence), EventDigest: digest}, nil
+	return &eventsv1.GetStreamHeadResponse{Head: &eventsv1.StreamHead{Stream: stream, Sequence: uint64(sequence), EventDigest: digest}}, nil
 }

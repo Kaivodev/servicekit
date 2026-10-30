@@ -3,7 +3,7 @@
 set -eu
 
 if [ -z "${AIPAY_MODULES_TOKEN:-}" ]; then
-  echo "Set AIPAY_MODULES_TOKEN with read-only Contents access to aipay-dev/observability." >&2
+  echo "Set AIPAY_MODULES_TOKEN with read-only Contents access to aipay-dev/observability and aipay-dev/protobuf." >&2
   exit 1
 fi
 if [ "$#" -eq 0 ]; then
@@ -28,7 +28,7 @@ while IFS='=' read -r key value; do
 done
 [ "$protocol" = https ] && [ "$host" = github.com ] || exit 0
 case "$repo_path" in
-  aipay-dev/observability|aipay-dev/observability.git)
+  aipay-dev/observability|aipay-dev/observability.git|aipay-dev/protobuf|aipay-dev/protobuf.git)
     printf 'username=x-access-token\npassword=%s\n' "$AIPAY_MODULES_TOKEN" ;;
 esac
 HELPER

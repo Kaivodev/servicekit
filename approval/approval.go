@@ -17,6 +17,8 @@ import (
 	"net/url"
 	"slices"
 	"time"
+
+	approvalv1 "github.com/aipay-dev/protobuf/gen/go/aipay/approval/v1"
 )
 
 // DomainTag precedes the canonical request bytes, without a length prefix.
@@ -54,14 +56,6 @@ type Request struct {
 	ExpiresAt   time.Time
 	// Approvers lists approver IDs that already approved this request.
 	Approvers []string
-}
-
-// Assertion is the browser's AuthenticatorAssertionResponse, unchanged.
-type Assertion struct {
-	CredentialID      []byte
-	AuthenticatorData []byte
-	ClientDataJSON    []byte
-	Signature         []byte
 }
 
 // Result carries the counter to record with the approval; store it as the
@@ -110,7 +104,9 @@ const (
 
 // Verify checks one approver's assertion for request. The caller still
 // enforces the number of approvals and records the approval and counter.
-func (v *Verifier) Verify(request Request, key Key, assertion Assertion) (Result, error) {
+// assertion is the browser's AuthenticatorAssertionResponse, passed through
+// unchanged as aipay.approval.v1.WebAuthnAssertion.
+func (v *Verifier) Verify(request Request, key Key, assertion *approvalv1.WebAuthnAssertion) (Result, error) {
 	switch {
 	case !v.now().Before(request.ExpiresAt):
 		return reject("request_expired")
@@ -118,7 +114,7 @@ func (v *Verifier) Verify(request Request, key Key, assertion Assertion) (Result
 		return reject("key_revoked")
 	case key.RPID != v.rpID:
 		return reject("key_rp_id")
-	case !bytes.Equal(key.CredentialID, assertion.CredentialID) || len(assertion.CredentialID) == 0:
+	case !bytes.Equal(key.CredentialID, assertion.GetCredentialId()) || len(assertion.GetCredentialId()) == 0:
 		return reject("credential_mismatch")
 	case key.IAMUserID == "" || key.IAMUserID == request.RequestedBy:
 		return reject("self_approval")
@@ -131,7 +127,7 @@ func (v *Verifier) Verify(request Request, key Key, assertion Assertion) (Result
 		Origin      string `json:"origin"`
 		CrossOrigin bool   `json:"crossOrigin"`
 	}
-	if err := json.Unmarshal(assertion.ClientDataJSON, &client); err != nil {
+	if err := json.Unmarshal(assertion.GetClientDataJson(), &client); err != nil {
 		return reject("client_data_malformed")
 	}
 	challenge, err := base64.RawURLEncoding.Strict().DecodeString(client.Challenge)
@@ -143,7 +139,7 @@ func (v *Verifier) Verify(request Request, key Key, assertion Assertion) (Result
 	case !v.origins[client.Origin] || client.CrossOrigin:
 		return reject("origin_mismatch")
 	}
-	data := assertion.AuthenticatorData
+	data := assertion.GetAuthenticatorData()
 	if len(data) < 37 {
 		return reject("authenticator_data_malformed")
 	}
@@ -166,9 +162,9 @@ func (v *Verifier) Verify(request Request, key Key, assertion Assertion) (Result
 	if err != nil {
 		return reject("key_malformed")
 	}
-	clientHash := sha256.Sum256(assertion.ClientDataJSON)
+	clientHash := sha256.Sum256(assertion.GetClientDataJson())
 	signed := sha256.Sum256(append(bytes.Clone(data), clientHash[:]...))
-	if !ecdsa.VerifyASN1(public, signed[:], assertion.Signature) {
+	if !ecdsa.VerifyASN1(public, signed[:], assertion.GetSignature()) {
 		return reject("signature_invalid")
 	}
 	return Result{SignCount: counter}, nil
