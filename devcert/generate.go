@@ -49,7 +49,7 @@ func Generate(directory, domain string, services []string, validFor time.Duratio
 	if err != nil {
 		return err
 	}
-	ca := &x509.Certificate{SerialNumber: serial, Subject: pkix.Name{CommonName: "AI Pay local development CA"}, NotBefore: now.Add(-time.Minute), NotAfter: now.Add(validFor), IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign | x509.KeyUsageCRLSign}
+	ca := &x509.Certificate{SerialNumber: serial, Subject: pkix.Name{CommonName: "Kaivo local development CA"}, NotBefore: now.Add(-time.Minute), NotAfter: now.Add(validFor), IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign | x509.KeyUsageCRLSign}
 	caDER, err := x509.CreateCertificate(rand.Reader, ca, ca, &caKey.PublicKey, caKey)
 	if err != nil {
 		return err

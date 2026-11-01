@@ -8,7 +8,7 @@
 python3 dev/prepare.py
 docker compose --env-file ../.local/dev/stack.env -f dev/compose.yaml up -d --build
 docker compose --env-file ../.local/dev/stack.env -f dev/compose.yaml ps
-docker compose --env-file ../.local/dev/stack.env -f dev/compose.yaml exec iam /app/aipay-iam healthcheck
+docker compose --env-file ../.local/dev/stack.env -f dev/compose.yaml exec iam /app/kaivo-iam healthcheck
 # 保留数据库；再次 up 可以继续开发
 docker compose --env-file ../.local/dev/stack.env -f dev/compose.yaml down
 ```

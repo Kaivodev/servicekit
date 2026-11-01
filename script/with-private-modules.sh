@@ -3,7 +3,7 @@
 set -eu
 
 if [ -z "${AIPAY_MODULES_TOKEN:-}" ]; then
-  echo "Set AIPAY_MODULES_TOKEN with read-only Contents access to aipay-dev/observability and aipay-dev/protobuf." >&2
+  echo "Set AIPAY_MODULES_TOKEN with read-only Contents access to Kaivodev/observability and Kaivodev/protobuf." >&2
   exit 1
 fi
 if [ "$#" -eq 0 ]; then
@@ -28,7 +28,7 @@ while IFS='=' read -r key value; do
 done
 [ "$protocol" = https ] && [ "$host" = github.com ] || exit 0
 case "$repo_path" in
-  aipay-dev/observability|aipay-dev/observability.git|aipay-dev/protobuf|aipay-dev/protobuf.git)
+  Kaivodev/observability|Kaivodev/observability.git|Kaivodev/protobuf|Kaivodev/protobuf.git)
     printf 'username=x-access-token\npassword=%s\n' "$AIPAY_MODULES_TOKEN" ;;
 esac
 HELPER
@@ -41,6 +41,9 @@ config_count=$((config_count + 1))
 export "GIT_CONFIG_KEY_${config_count}=credential.useHttpPath" "GIT_CONFIG_VALUE_${config_count}=true"
 config_count=$((config_count + 1))
 export "GIT_CONFIG_KEY_${config_count}=credential.helper" "GIT_CONFIG_VALUE_${config_count}=!\"$auth_dir/credential\""
+config_count=$((config_count + 1))
+# Published Go module paths remain stable; fetch from the canonical organization.
+export "GIT_CONFIG_KEY_${config_count}=url.https://github.com/Kaivodev/.insteadOf" "GIT_CONFIG_VALUE_${config_count}=https://github.com/aipay-dev/"
 export GIT_CONFIG_COUNT=$((config_count + 1))
 export GIT_TERMINAL_PROMPT=0
 export GOPRIVATE="${GOPRIVATE:+${GOPRIVATE},}github.com/aipay-dev/*"
