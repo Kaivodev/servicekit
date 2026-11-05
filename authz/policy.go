@@ -11,8 +11,8 @@ import (
 	"regexp"
 	"time"
 
-	authzv1 "github.com/aipay-dev/protobuf/gen/go/aipay/authz/v1"
-	"github.com/aipay-dev/servicekit/config"
+	authzv1 "github.com/Kaivodev/protobuf/gen/go/aipay/authz/v1"
+	"github.com/Kaivodev/servicekit/config"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 )

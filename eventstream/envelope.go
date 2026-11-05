@@ -19,9 +19,9 @@ import (
 	"regexp"
 	"time"
 
-	eventsv1 "github.com/aipay-dev/protobuf/gen/go/aipay/events/v1"
-	"github.com/aipay-dev/servicekit/config"
-	"github.com/aipay-dev/servicekit/signing"
+	eventsv1 "github.com/Kaivodev/protobuf/gen/go/aipay/events/v1"
+	"github.com/Kaivodev/servicekit/config"
+	"github.com/Kaivodev/servicekit/signing"
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"

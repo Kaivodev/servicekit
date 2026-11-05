@@ -4,8 +4,8 @@ import (
 	"context"
 	"errors"
 
-	"github.com/aipay-dev/servicekit/config"
-	"github.com/aipay-dev/servicekit/mtls"
+	"github.com/Kaivodev/servicekit/config"
+	"github.com/Kaivodev/servicekit/mtls"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 )
 

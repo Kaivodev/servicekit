@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/aipay-dev/servicekit/config"
+	"github.com/Kaivodev/servicekit/config"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 

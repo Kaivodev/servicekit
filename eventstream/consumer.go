@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"time"
 
-	eventsv1 "github.com/aipay-dev/protobuf/gen/go/aipay/events/v1"
+	eventsv1 "github.com/Kaivodev/protobuf/gen/go/aipay/events/v1"
 	"github.com/jackc/pgx/v5"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )

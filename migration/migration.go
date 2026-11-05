@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/aipay-dev/servicekit/config"
+	"github.com/Kaivodev/servicekit/config"
 	"github.com/golang-migrate/migrate/v4"
 	_ "github.com/golang-migrate/migrate/v4/database/pgx/v5"
 	"github.com/golang-migrate/migrate/v4/source/iofs"

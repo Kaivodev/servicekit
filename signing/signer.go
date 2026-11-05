@@ -14,7 +14,7 @@ import (
 	"errors"
 	"regexp"
 
-	"github.com/aipay-dev/servicekit/config"
+	"github.com/Kaivodev/servicekit/config"
 )
 
 const (

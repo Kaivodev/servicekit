@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/aipay-dev/observability/asynqobs"
+	"github.com/Kaivodev/observability/asynqobs"
 	"github.com/hibiken/asynq"
 )
 

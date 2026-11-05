@@ -41,10 +41,7 @@ config_count=$((config_count + 1))
 export "GIT_CONFIG_KEY_${config_count}=credential.useHttpPath" "GIT_CONFIG_VALUE_${config_count}=true"
 config_count=$((config_count + 1))
 export "GIT_CONFIG_KEY_${config_count}=credential.helper" "GIT_CONFIG_VALUE_${config_count}=!\"$auth_dir/credential\""
-config_count=$((config_count + 1))
-# Published Go module paths remain stable; fetch from the canonical organization.
-export "GIT_CONFIG_KEY_${config_count}=url.https://github.com/Kaivodev/.insteadOf" "GIT_CONFIG_VALUE_${config_count}=https://github.com/aipay-dev/"
 export GIT_CONFIG_COUNT=$((config_count + 1))
 export GIT_TERMINAL_PROMPT=0
-export GOPRIVATE="${GOPRIVATE:+${GOPRIVATE},}github.com/aipay-dev/*"
+export GOPRIVATE="${GOPRIVATE:+${GOPRIVATE},}github.com/Kaivodev/*"
 "$@"

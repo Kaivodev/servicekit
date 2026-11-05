@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/aipay-dev/observability/asynqobs"
-	"github.com/aipay-dev/observability/logging"
-	"github.com/aipay-dev/servicekit/queue"
+	"github.com/Kaivodev/observability/asynqobs"
+	"github.com/Kaivodev/observability/logging"
+	"github.com/Kaivodev/servicekit/queue"
 	"github.com/hibiken/asynq"
 	"github.com/redis/go-redis/v9"
 )

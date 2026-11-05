@@ -12,8 +12,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/aipay-dev/observability/logging"
-	"github.com/aipay-dev/observability/tracing"
+	"github.com/Kaivodev/observability/logging"
+	"github.com/Kaivodev/observability/tracing"
 )
 
 type Config struct {

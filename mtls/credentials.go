@@ -16,7 +16,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/aipay-dev/servicekit/config"
+	"github.com/Kaivodev/servicekit/config"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/peer"
 )

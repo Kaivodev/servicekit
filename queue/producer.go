@@ -6,9 +6,9 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/aipay-dev/observability/asynqobs"
-	"github.com/aipay-dev/servicekit/config"
-	redisinfra "github.com/aipay-dev/servicekit/redis"
+	"github.com/Kaivodev/observability/asynqobs"
+	"github.com/Kaivodev/servicekit/config"
+	redisinfra "github.com/Kaivodev/servicekit/redis"
 	"github.com/hibiken/asynq"
 	"github.com/redis/go-redis/v9"
 	"go.opentelemetry.io/otel/trace"

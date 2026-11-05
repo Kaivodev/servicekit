@@ -15,8 +15,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/aipay-dev/servicekit/config"
-	"github.com/aipay-dev/servicekit/signing"
+	"github.com/Kaivodev/servicekit/config"
+	"github.com/Kaivodev/servicekit/signing"
 )
 
 // IAM identity assertions are compact JWS (RFC 7515) signed with ES256 by a

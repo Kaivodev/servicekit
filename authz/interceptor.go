@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/aipay-dev/servicekit/config"
+	"github.com/Kaivodev/servicekit/config"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"

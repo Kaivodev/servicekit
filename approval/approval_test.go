@@ -14,8 +14,8 @@ import (
 	"testing"
 	"time"
 
-	approvalv1 "github.com/aipay-dev/protobuf/gen/go/aipay/approval/v1"
-	"github.com/aipay-dev/protobuf/testvectors"
+	approvalv1 "github.com/Kaivodev/protobuf/gen/go/aipay/approval/v1"
+	"github.com/Kaivodev/protobuf/testvectors"
 	"google.golang.org/protobuf/proto"
 )
 

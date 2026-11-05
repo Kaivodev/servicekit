@@ -1,11 +1,11 @@
 github.com/Azure/go-ansiterm v0.0.0-20250102033503-faa5f7b0171c h1:udKWzYgxTojEKWjV8V+WSxDXJ4NFATAsZjh8iIbsQIg=
 github.com/Azure/go-ansiterm v0.0.0-20250102033503-faa5f7b0171c/go.mod h1:xomTg63KZ2rFqZQzSB4Vz2SUXa1BpHTVz9L5PTmPC4E=
+github.com/Kaivodev/observability v0.3.0 h1:BJ+JyYYT/dDap6AHZOfo5ZHoLtNC0EtGVuBTRL8IKQk=
+github.com/Kaivodev/observability v0.3.0/go.mod h1:ik+fdV+iv2Ft5AyU4RaVpgQsAzKMs7u8r7NNG7Rm8vU=
+github.com/Kaivodev/protobuf v0.2.0 h1:N+f/fqhMzu2sjK+r4Kh8unvKeZwnv3e7Qh+SM7ldBW0=
+github.com/Kaivodev/protobuf v0.2.0/go.mod h1:2ZQqBWlQpqDTxzsHU+eh17F17zL0wEK9NBfb4MYqphs=
 github.com/Microsoft/go-winio v0.6.2 h1:F2VQgta7ecxGYO8k3ZZz3RS8fVIXVxONVUPlNERoyfY=
 github.com/Microsoft/go-winio v0.6.2/go.mod h1:yd8OoFMLzJbo9gZq8j5qaps8bJ9aShtEA8Ipt1oGCvU=
-github.com/aipay-dev/observability v0.2.0 h1:F+SWof02ilgb4YA3a+Zwd3B7jBm5p4SI8i+hA9UMNK0=
-github.com/aipay-dev/observability v0.2.0/go.mod h1:1dAA797GtWVSjB5kT3WrNsKSodIPcq2NS1PU7zIfgYI=
-github.com/aipay-dev/protobuf v0.1.0 h1:C1NOygQ7vO5hqwIurJvkj3wLrV3epUo0kvg3zkF1EBw=
-github.com/aipay-dev/protobuf v0.1.0/go.mod h1:h7CyZ80TpDKtrDZ6XA2K+Wn06b2lDT/gX1eiicCfp7s=
 github.com/bsm/ginkgo/v2 v2.12.0 h1:Ny8MWAHyOepLGlLKYmXG4IEkioBysk6GpaRTLC8zwWs=
 github.com/bsm/ginkgo/v2 v2.12.0/go.mod h1:SwYbGRRDovPVboqFv0tPTcG1sN61LM1Z4ARdbAV9g4c=
 github.com/bsm/gomega v1.27.10 h1:yeMWxP2pV2fG3FgAODIY8EiRE3dy0aeFYt4l7wh6yKA=

@@ -12,7 +12,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/aipay-dev/servicekit/migration"
+	"github.com/Kaivodev/servicekit/migration"
 	"github.com/golang-migrate/migrate/v4"
 )
 

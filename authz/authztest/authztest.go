@@ -1,13 +1,13 @@
 // Package authztest builds test-only gRPC services whose methods carry
 // (aipay.authz.v1.policy) options from the generated SDK, for servicekit's own
-// tests. Services declare policies in github.com/aipay-dev/protobuf instead.
+// tests. Services declare policies in github.com/Kaivodev/protobuf instead.
 package authztest
 
 import (
 	"errors"
 	"strings"
 
-	authzv1 "github.com/aipay-dev/protobuf/gen/go/aipay/authz/v1"
+	authzv1 "github.com/Kaivodev/protobuf/gen/go/aipay/authz/v1"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protodesc"
 	"google.golang.org/protobuf/reflect/protoreflect"

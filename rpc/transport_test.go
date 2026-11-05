@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/aipay-dev/observability/logging"
+	"github.com/Kaivodev/observability/logging"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"

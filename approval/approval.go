@@ -18,7 +18,7 @@ import (
 	"slices"
 	"time"
 
-	approvalv1 "github.com/aipay-dev/protobuf/gen/go/aipay/approval/v1"
+	approvalv1 "github.com/Kaivodev/protobuf/gen/go/aipay/approval/v1"
 )
 
 // DomainTag precedes the canonical request bytes, without a length prefix.

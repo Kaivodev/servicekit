@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 
-	"github.com/aipay-dev/servicekit/config"
+	"github.com/Kaivodev/servicekit/config"
 	goredis "github.com/redis/go-redis/v9"
 )
 

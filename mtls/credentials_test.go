@@ -13,9 +13,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/aipay-dev/servicekit/config"
-	"github.com/aipay-dev/servicekit/devcert"
-	"github.com/aipay-dev/servicekit/mtls"
+	"github.com/Kaivodev/servicekit/config"
+	"github.com/Kaivodev/servicekit/devcert"
+	"github.com/Kaivodev/servicekit/mtls"
 )
 
 func TestExpiredIdentityAndWrongEKU(t *testing.T) {

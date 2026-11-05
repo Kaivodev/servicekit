@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/aipay-dev/servicekit/config"
+	"github.com/Kaivodev/servicekit/config"
 )
 
 func env(values map[string]string) func(string) string {

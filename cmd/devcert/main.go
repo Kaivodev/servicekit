@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/aipay-dev/servicekit/devcert"
+	"github.com/Kaivodev/servicekit/devcert"
 )
 
 func main() {

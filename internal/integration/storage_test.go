@@ -12,10 +12,10 @@ import (
 	"testing/fstest"
 	"time"
 
-	"github.com/aipay-dev/servicekit/config"
-	"github.com/aipay-dev/servicekit/migration"
-	"github.com/aipay-dev/servicekit/postgres"
-	redisinfra "github.com/aipay-dev/servicekit/redis"
+	"github.com/Kaivodev/servicekit/config"
+	"github.com/Kaivodev/servicekit/migration"
+	"github.com/Kaivodev/servicekit/postgres"
+	redisinfra "github.com/Kaivodev/servicekit/redis"
 	"github.com/jackc/pgx/v5"
 )
 

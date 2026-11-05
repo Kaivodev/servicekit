@@ -1,6 +1,6 @@
 # Kaivo 微服务运行库
 
-`github.com/aipay-dev/servicekit` 提供各私有服务共用的运行基础，采用官方 grpc-go。业务处理、用户认证、RBAC、资金模型、业务表结构与迁移仍由服务仓库维护；签名事件与已用认证证明的辅助只操作服务传入的表。
+`github.com/Kaivodev/servicekit` 提供各私有服务共用的运行基础，采用官方 grpc-go。业务处理、用户认证、RBAC、资金模型、业务表结构与迁移仍由服务仓库维护；签名事件与已用认证证明的辅助只操作服务传入的表。
 
 - `config`：集中校验 `AIPAY_*` 配置；必须提供 PostgreSQL、TLS 和明确的调用方名单。Redis 可选。`AIPAY_ENVIRONMENT` 取 `production`、`staging` 或 `development`，未设置按 `production` 处理，只有 `development` 能启用开发专用组件。
 - `mtls` / `rpc`：TLS 1.3、双向证书链校验、DNS 校验与 `spiffe://<trust-domain>/service/<name>` 身份绑定；连接复用、unary 超时、调用取消、报文大小限制、关联 ID 和访问日志。
@@ -13,7 +13,7 @@
 - `eventstream`：签名事件。产生端排序器在一个事务内锁流头、按 outbox 顺序分配连续序号、串接 `prev_digest`、签名并一次写入；`Reader` 按流清单限定接收方提供 `ListEvents`/`GetStreamHead`；接收端 `Puller` 校验序号、链、载荷摘要、签名与已知类型，校验通过的信封与游标同事务写入 inbox，任何失败都保存已验证前缀并把流置为停止，`CheckHead` 发现产生方历史回退或分叉同样停止；`Inbox` 在业务事务中一次性记录处理结果。表名由服务提供，列遵循数据库设计的共用模板。
 - `approval`：审批摘要 `SHA-256("AIPAY-APPROVAL-V1" || 规范请求)` 与 WebAuthn 断言校验（`webauthn.get`、`challenge`、来源、RP ID、UP/UV 标志、签名计数、COSE ES256 公钥、过期、自批与重复审批人）。签名计数恒为 0 的同步型 passkey 在已记录计数也为 0 时接受；计数一旦不为 0 就必须严格递增，回到 0 视为回退。
 
-契约来自固定版本的 `github.com/aipay-dev/protobuf`：方法策略直接读取生成的 `aipay.authz.v1` 选项类型，新版本契约里本库尚不执行的策略字段会让加载失败；事件信封就是 `aipay.events.v1.SignedEvent`，`eventstream.Reader` 直接实现 `EventStreamServiceServer`（调用方取自授权上下文），`Puller` 直接使用生成的客户端；审批断言为 `aipay.approval.v1.WebAuthnAssertion`。签名事件与审批的测试使用 SDK 的 `testvectors`。`authz/authztest` 只为本库测试构造带策略的测试服务。
+契约来自固定版本的 `github.com/Kaivodev/protobuf`：方法策略直接读取生成的 `aipay.authz.v1` 选项类型，新版本契约里本库尚不执行的策略字段会让加载失败；事件信封就是 `aipay.events.v1.SignedEvent`，`eventstream.Reader` 直接实现 `EventStreamServiceServer`（调用方取自授权上下文），`Puller` 直接使用生成的客户端；审批断言为 `aipay.approval.v1.WebAuthnAssertion`。签名事件与审批的测试使用 SDK 的 `testvectors`。`authz/authztest` 只为本库测试构造带策略的测试服务。
 
 组装根显式构造资源并注册业务 RPC；框架不自动发现业务。当前各私有服务仅注册标准 gRPC Health，空服务名表示进程及依赖就绪；不存在的业务服务返回 `NOT_FOUND`，不会报告业务可用。调用方身份仅证明服务身份，不能替代用户权限或资源范围检查。
 
@@ -63,4 +63,4 @@ python3 script/test-tracing.py --collector /path/to/otelcol-contrib --jaeger /pa
 
 ## 名称与兼容性
 
-项目品牌统一为 **Kaivo**，GitHub 组织为 **Kaivodev**。已发布 Go module、协议/签名标识及现有配置键暂时保留原值，属于兼容接口；改名不修改历史账本或协议语义。范围与迁移规则见[命名约定](https://github.com/Kaivodev/docs/blob/main/design/naming.md)。
+项目品牌统一为 **Kaivo**，GitHub 组织为 **Kaivodev**。Go module 已迁到 `github.com/Kaivodev/servicekit`，`GOPRIVATE` 使用同样大小写的 `github.com/Kaivodev/*`；协议/签名标识及现有配置键暂时保留原值，属于兼容接口；改名不修改历史账本或协议语义。范围与迁移规则见[命名约定](https://github.com/Kaivodev/docs/blob/main/design/naming.md)。
