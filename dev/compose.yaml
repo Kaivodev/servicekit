@@ -64,7 +64,7 @@ services:
     depends_on: [jaeger]
     networks: [private]
   iam-migrate:
-    image: aipay-local/iam:dev
+    image: kaivo-local/iam:dev
     build:
       context: ../../iam
       secrets: [aipay_modules_token]
@@ -99,7 +99,7 @@ services:
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
   iam:
-    image: aipay-local/iam:dev
+    image: kaivo-local/iam:dev
     user: '${AIPAY_DEV_UID}:${AIPAY_DEV_GID}'
     environment: *iam-environment
     volumes: *iam-volumes
@@ -116,7 +116,7 @@ services:
     security_opt: [no-new-privileges:true]
     stop_grace_period: 20s
   payment-migrate:
-    image: aipay-local/payment:dev
+    image: kaivo-local/payment:dev
     build:
       context: ../../payment
       secrets: [aipay_modules_token]
@@ -151,7 +151,7 @@ services:
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
   payment:
-    image: aipay-local/payment:dev
+    image: kaivo-local/payment:dev
     user: '${AIPAY_DEV_UID}:${AIPAY_DEV_GID}'
     environment: *payment-environment
     volumes: *payment-volumes
@@ -168,7 +168,7 @@ services:
     security_opt: [no-new-privileges:true]
     stop_grace_period: 20s
   ledger-migrate:
-    image: aipay-local/ledger:dev
+    image: kaivo-local/ledger:dev
     build:
       context: ../../ledger
       secrets: [aipay_modules_token]
@@ -203,7 +203,7 @@ services:
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
   ledger:
-    image: aipay-local/ledger:dev
+    image: kaivo-local/ledger:dev
     user: '${AIPAY_DEV_UID}:${AIPAY_DEV_GID}'
     environment: *ledger-environment
     volumes: *ledger-volumes
@@ -220,7 +220,7 @@ services:
     security_opt: [no-new-privileges:true]
     stop_grace_period: 20s
   settlement-migrate:
-    image: aipay-local/settlement:dev
+    image: kaivo-local/settlement:dev
     build:
       context: ../../settlement
       secrets: [aipay_modules_token]
@@ -255,7 +255,7 @@ services:
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
   settlement:
-    image: aipay-local/settlement:dev
+    image: kaivo-local/settlement:dev
     user: '${AIPAY_DEV_UID}:${AIPAY_DEV_GID}'
     environment: *settlement-environment
     volumes: *settlement-volumes
@@ -272,7 +272,7 @@ services:
     security_opt: [no-new-privileges:true]
     stop_grace_period: 20s
   reconciliation-migrate:
-    image: aipay-local/reconciliation:dev
+    image: kaivo-local/reconciliation:dev
     build:
       context: ../../reconciliation
       secrets: [aipay_modules_token]
@@ -307,7 +307,7 @@ services:
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
   reconciliation:
-    image: aipay-local/reconciliation:dev
+    image: kaivo-local/reconciliation:dev
     user: '${AIPAY_DEV_UID}:${AIPAY_DEV_GID}'
     environment: *reconciliation-environment
     volumes: *reconciliation-volumes

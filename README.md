@@ -1,4 +1,4 @@
-# AI Pay 微服务运行库
+# Kaivo 微服务运行库
 
 `github.com/aipay-dev/servicekit` 提供各私有服务共用的运行基础，采用官方 grpc-go。业务处理、用户认证、RBAC、资金模型、业务表结构与迁移仍由服务仓库维护；签名事件与已用认证证明的辅助只操作服务传入的表。
 
@@ -44,7 +44,7 @@ go run ./cmd/devcert --out ../.local/certs
 
 ## 追踪与任务
 
-服务启动时创建 observability/tracing Runtime；`rpc.ServerOptions.TracerProvider` / `ClientOptions.TracerProvider` 显式注入官方 otelgrpc StatsHandler。mTLS 先验证对端服务身份，再接收 W3C 上下文；trace ID 只用于关联。配置和采样约定见 [observability](https://github.com/aipay-dev/observability#追踪配置与兼容性)。各私有服务已接入运行时和 gRPC span，backend 已接入公网根 span；业务 RPC 尚未注册。
+服务启动时创建 observability/tracing Runtime；`rpc.ServerOptions.TracerProvider` / `ClientOptions.TracerProvider` 显式注入官方 otelgrpc StatsHandler。mTLS 先验证对端服务身份，再接收 W3C 上下文；trace ID 只用于关联。配置和采样约定见 [observability](https://github.com/Kaivodev/observability#追踪配置与兼容性)。各私有服务已接入运行时和 gRPC span，backend 已接入公网根 span；业务 RPC 尚未注册。
 
 `queue.Load(service, os.Getenv)` 只在确有任务的属主入口调用：`AIPAY_QUEUE_REDIS_URL` 必填并指向独立持久 Redis，不能沿用可淘汰缓存。其余后缀默认：`NAME=aipay.<service>`、`CONCURRENCY=10`、`POOL_SIZE=20`、`REDIS_TIMEOUT=3s`、`TASK_TIMEOUT=5m`、`MAX_RETRY=10`、`MAX_PAYLOAD_BYTES=1048576`、`SHUTDOWN_TIMEOUT=15s`。
 
@@ -60,3 +60,7 @@ python3 script/test-tracing.py --collector /path/to/otelcol-contrib --jaeger /pa
 ```
 
 集成测试使用专属临时 schema/队列与仅测试可见的 RPC，覆盖 HTTP → mTLS RPC → PostgreSQL outbox → Asynq 重试 → 下游 RPC/HTTP，校验 trace/span 父子关系、资源、日志及数据库幂等；另测 panic、超时、SkipRetry/RevokeTask、未知任务、实例重建、独立 OS 进程重启和正常/强制排空。测试重启会发送 SIGTERM 并等待退出；不等同于 SIGKILL/断电及租约恢复验证，也不代表真实业务 outbox 或生产部署已经实现。
+
+## 名称与兼容性
+
+项目品牌统一为 **Kaivo**，GitHub 组织为 **Kaivodev**。已发布 Go module、协议/签名标识及现有配置键暂时保留原值，属于兼容接口；改名不修改历史账本或协议语义。范围与迁移规则见[命名约定](https://github.com/Kaivodev/docs/blob/main/design/naming.md)。

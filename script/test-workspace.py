@@ -85,12 +85,12 @@ with tempfile.TemporaryDirectory(prefix='aipay-runtime-test-') as temp:
         log = open(root/'redis-output.log', 'ab'); outputs.append(log)
         return subprocess.Popen([redis_binary, '--bind', '127.0.0.1', '--port', str(redis_port), '--save', '', '--appendonly', 'no', '--dir', str(root)], stdout=log, stderr=subprocess.STDOUT)
     def health(name):
-        return subprocess.run([root/f'aipay-{name}', 'healthcheck'], env=envs[name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=4).returncode == 0
+        return subprocess.run([root/f'kaivo-{name}', 'healthcheck'], env=envs[name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=4).returncode == 0
     def start_service(name):
         log = open(root/f'{name}-output.log', 'ab'); outputs.append(log)
-        return subprocess.Popen([root/f'aipay-{name}', 'serve'], env=envs[name], stdout=log, stderr=subprocess.STDOUT)
+        return subprocess.Popen([root/f'kaivo-{name}', 'serve'], env=envs[name], stdout=log, stderr=subprocess.STDOUT)
     def rejected(name, args, options):
-        result = subprocess.run([root/f'aipay-{name}', *args], env=options, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=8)
+        result = subprocess.run([root/f'kaivo-{name}', *args], env=options, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=8)
         if result.returncode == 0:
             raise RuntimeError(f'{name} accepted invalid startup/migration')
         if b'postgres://' in result.stdout or b'never-log-this' in result.stdout:
@@ -110,8 +110,8 @@ with tempfile.TemporaryDirectory(prefix='aipay-runtime-test-') as temp:
         run(['go', 'run', './cmd/devcert', '--out', root/'certs'], cwd=workspace/'servicekit', env=env)
         print('isolated storage and certificate generation passed', flush=True)
         for name in SERVICES:
-            run(['go', 'build', '-o', root/f'aipay-{name}', '.'], cwd=workspace/name, env=env)
-            data = json.loads(run([root/f'aipay-{name}', 'version']))
+            run(['go', 'build', '-o', root/f'kaivo-{name}', '.'], cwd=workspace/name, env=env)
+            data = json.loads(run([root/f'kaivo-{name}', 'version']))
             if data['service'] != name:
                 raise RuntimeError('incorrect binary version identity')
             psql(f'CREATE ROLE aipay_{name} LOGIN')
@@ -134,8 +134,8 @@ with tempfile.TemporaryDirectory(prefix='aipay-runtime-test-') as temp:
                 'AIPAY_RPC_CALL_TIMEOUT':'500ms', 'AIPAY_STARTUP_TIMEOUT':'2s', 'AIPAY_SHUTDOWN_TIMEOUT':'2s',
             }
             rejected(name, ['serve'], envs[name])  # no migration yet
-            run([root/f'aipay-{name}', 'migrate', 'up'], env=envs[name])
-            run([root/f'aipay-{name}', 'migrate', 'up'], env=envs[name])
+            run([root/f'kaivo-{name}', 'migrate', 'up'], env=envs[name])
+            run([root/f'kaivo-{name}', 'migrate', 'up'], env=envs[name])
             processes[name] = start_service(name)
             wait_until(lambda n=name: health(n), f'{name} readiness')
             print(f'{name}: migrate, start, mTLS health and version passed', flush=True)
@@ -147,9 +147,9 @@ with tempfile.TemporaryDirectory(prefix='aipay-runtime-test-') as temp:
         connections = int(psql("SELECT count(*) FROM pg_stat_activity WHERE application_name='aipay-iam'"))
         if connections > 4:
             raise RuntimeError('failed startup leaked PostgreSQL pools')
-        run([root/'aipay-iam', 'migrate', 'down'], env=envs['iam'])
+        run([root/'kaivo-iam', 'migrate', 'down'], env=envs['iam'])
         wait_until(lambda: not health('iam'), 'schema loss readiness')
-        run([root/'aipay-iam', 'migrate', 'up'], env=envs['iam'])
+        run([root/'kaivo-iam', 'migrate', 'up'], env=envs['iam'])
         wait_until(lambda: health('iam'), 'schema restored readiness')
         redis_process.terminate(); redis_process.wait(timeout=5)
         for name in SERVICES:
