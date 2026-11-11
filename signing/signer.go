@@ -5,13 +5,18 @@
 package signing
 
 import (
+	"bytes"
 	"context"
 	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/x509"
+	"encoding/pem"
 	"errors"
+	"io"
+	"os"
 	"regexp"
 
 	"github.com/Kaivodev/servicekit/config"
@@ -20,6 +25,7 @@ import (
 const (
 	BackendKMS    = "kms"
 	BackendMemory = "memory"
+	BackendFile   = "file"
 )
 
 var keyIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
@@ -47,6 +53,7 @@ type Config struct {
 	Environment config.Environment
 	Backend     string
 	KeyID       string
+	KeyFile     string
 }
 
 // Load reads AIPAY_ENVIRONMENT, AIPAY_SIGNING_BACKEND (default kms) and
@@ -56,7 +63,7 @@ func Load(get func(string) string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	cfg := Config{Environment: environment, Backend: get("AIPAY_SIGNING_BACKEND"), KeyID: get("AIPAY_SIGNING_KEY_ID")}
+	cfg := Config{Environment: environment, Backend: get("AIPAY_SIGNING_BACKEND"), KeyID: get("AIPAY_SIGNING_KEY_ID"), KeyFile: get("AIPAY_SIGNING_KEY_FILE")}
 	if cfg.Backend == "" {
 		cfg.Backend = BackendKMS
 	}
@@ -75,13 +82,18 @@ func (c Config) Validate() error {
 			return errors.New("the in-memory signer is only allowed when AIPAY_ENVIRONMENT=development")
 		}
 		return nil
+	case BackendFile:
+		if c.Environment != config.Development || c.KeyFile == "" {
+			return errors.New("the file signer requires AIPAY_ENVIRONMENT=development and AIPAY_SIGNING_KEY_FILE")
+		}
+		return nil
 	default:
-		return errors.New("AIPAY_SIGNING_BACKEND must be kms or memory")
+		return errors.New("AIPAY_SIGNING_BACKEND must be kms, memory or file")
 	}
 }
 
-// Open is the only way to obtain the in-memory signer, and refuses it outside
-// development. key is required for the KMS backend and ignored otherwise.
+// Open creates a signer only from an explicitly selected backend. Development
+// backends are refused outside development; key is required for KMS.
 func Open(ctx context.Context, cfg Config, key KMSKey) (Signer, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
@@ -93,7 +105,40 @@ func Open(ctx context.Context, cfg Config, key KMSKey) (Signer, error) {
 		}
 		return &memorySigner{id: cfg.KeyID, key: private}, nil
 	}
+	if cfg.Backend == BackendFile {
+		return openDevelopmentFile(cfg.KeyID, cfg.KeyFile)
+	}
 	return NewKMS(ctx, cfg.KeyID, key)
+}
+
+func openDevelopmentFile(keyID, path string) (Signer, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, errors.New("open development signing key failed")
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 {
+		return nil, errors.New("development signing key must be a private regular file")
+	}
+	data, err := io.ReadAll(io.LimitReader(f, 4097))
+	if err != nil || len(data) > 4096 {
+		return nil, errors.New("read development signing key failed")
+	}
+	defer clear(data)
+	block, rest := pem.Decode(data)
+	if block == nil || block.Type != "PRIVATE KEY" || len(bytes.TrimSpace(rest)) != 0 {
+		return nil, errors.New("development signing key must be one PKCS#8 PEM block")
+	}
+	parsed, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+	if err != nil {
+		return nil, errors.New("parse development signing key failed")
+	}
+	private, ok := parsed.(*ecdsa.PrivateKey)
+	if !ok || private.Curve != elliptic.P256() {
+		return nil, errors.New("development signing key must be ECDSA P-256")
+	}
+	return &memorySigner{id: keyID, key: private}, nil
 }
 
 // NewKMS checks that the KMS key is P-256 before any signature is requested.

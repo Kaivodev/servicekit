@@ -6,7 +6,11 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/x509"
+	"encoding/pem"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -66,10 +70,83 @@ func TestDefaultBackendIsKMS(t *testing.T) {
 	if _, err = Open(context.Background(), cfg, nil); err == nil {
 		t.Fatal("KMS backend opened without a key")
 	}
-	for _, bad := range []map[string]string{{}, {"AIPAY_SIGNING_KEY_ID": "bad key"}, {"AIPAY_SIGNING_KEY_ID": "k", "AIPAY_SIGNING_BACKEND": "file"}, {"AIPAY_SIGNING_KEY_ID": "k", "AIPAY_ENVIRONMENT": "prod"}} {
+	for _, bad := range []map[string]string{{}, {"AIPAY_SIGNING_KEY_ID": "bad key"}, {"AIPAY_SIGNING_KEY_ID": "k", "AIPAY_SIGNING_BACKEND": "file"}, {"AIPAY_SIGNING_KEY_ID": "k", "AIPAY_SIGNING_BACKEND": "file", "AIPAY_SIGNING_KEY_FILE": "key.pem"}, {"AIPAY_SIGNING_KEY_ID": "k", "AIPAY_ENVIRONMENT": "prod"}} {
 		if _, err = Load(env(bad)); err == nil {
 			t.Fatalf("accepted %v", bad)
 		}
+	}
+}
+
+func TestDevelopmentFileSignerSurvivesReopen(t *testing.T) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "event-signing.pem")
+	if err = os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: encoded}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(env(map[string]string{"AIPAY_ENVIRONMENT": "development", "AIPAY_SIGNING_BACKEND": "file", "AIPAY_SIGNING_KEY_ID": "collection-dev-1", "AIPAY_SIGNING_KEY_FILE": path}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := Open(t.Context(), cfg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signature, err := first.Sign(t.Context(), []byte("persisted event"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := Open(t.Context(), cfg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !first.PublicKey().Equal(second.PublicKey()) {
+		t.Fatal("reopened file signer changed public key")
+	}
+	keys, err := NewPublicKeys(map[string]*ecdsa.PublicKey{second.KeyID(): second.PublicKey()})
+	if err != nil || keys.Verify(second.KeyID(), []byte("persisted event"), signature) != nil {
+		t.Fatal("reopened signer did not verify the prior signature", err)
+	}
+
+	if err = os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = Open(t.Context(), cfg, nil); err == nil {
+		t.Fatal("world-readable development signing key accepted")
+	}
+}
+
+func TestDevelopmentFileSignerRejectsWrongKeyMaterial(t *testing.T) {
+	p384, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := x509.MarshalPKCS8PrivateKey(p384)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, data := range map[string][]byte{
+		"wrong curve":   pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: encoded}),
+		"wrong block":   pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: encoded}),
+		"trailing data": append(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: encoded}), []byte("extra")...),
+		"not PEM":       []byte("synthetic invalid key material"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "event-signing.pem")
+			if err := os.WriteFile(path, data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg := Config{Environment: config.Development, Backend: BackendFile, KeyID: "collection-dev-1", KeyFile: path}
+			if _, err := Open(t.Context(), cfg, nil); err == nil {
+				t.Fatal("invalid development signing key accepted")
+			}
+		})
 	}
 }
 
