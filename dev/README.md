@@ -1,45 +1,50 @@
-# 本地五服务联调
+# 阶段 2 本地联调栈
 
-同级工作区需要 `iam`、`payment`、`ledger`、`settlement`、`reconciliation`；各自固定依赖已发布的 `servicekit`。需要 Docker Compose、Go，以及可以读取 `observability`、`servicekit` 的 `AIPAY_MODULES_TOKEN` 环境变量。
+两个入口共用业务配置生成器。源码按同级目录布局。运行命令均从 servicekit 根目录开始。八个业务进程之外，开发 HTTPS 收银入口把浏览器请求转给 upstream-sim。验收依赖和目前阻塞资金闭环的具体环节见[演示清单](demo.md)。
 
-在 servicekit 仓库运行：
+## 本机进程
+
+需要 Python 3.9+、Go 1.27、OpenSSL、psql、一个专用 PostgreSQL 18 开发实例和一个缓存 Redis。Go 模块及校验材料须已可用。将管理员连接和缓存连接放在当前终端的环境变量 `AIPAY_DEV_POSTGRES_ADMIN_URL`、`AIPAY_DEV_REDIS_URL`，使用实际的 postgres[ql]:// 和 redis[s]:// URL。数据库 URL 支持主机、端口、百分号编码的用户名/密码、库名以及 sslmode、sslrootcert、connect_timeout、application_name。建议用私有环境文件或交互式秘密输入提供带密码的值。
+
+```sh
+python3 dev/native/stack.py prepare
+python3 dev/native/stack.py verify
+python3 dev/native/stack.py build
+python3 dev/native/stack.py migrate
+python3 dev/native/stack.py up
+python3 dev/native/stack.py status
+python3 dev/native/stack.py refresh-market
+python3 dev/native/stack.py down
+```
+
+- `prepare` 独占创建 `../.local/dev/native/`，检查证书、公钥、签名器和权限，再建六个库。已有目录会拒绝覆盖。只生成配置可用 `prepare --files-only`，之后用相同管理员连接执行 `provision`。数据库步骤失败时保留生成材料，用 `provision` 重试。角色带本栈标记，遇到同名旧角色或他栈库会拒绝接管。管理员 URL 不持久化。
+- 数据库名为 `aipay_<服务>`，迁移角色为服务名。IAM、ledger、payment、reconciliation 以迁移脚本授权的 `<服务>_app` 非 owner 身份运行。backend、settlement 使用各自独立的开发角色。notifier 使用 payment 的二进制和自己的 mTLS 身份，upstream-sim 使用内存存储；两者都没有数据库或迁移。
+- 缓存 Redis 的 DB 0–5 依次分配给 backend、IAM、ledger、settlement、reconciliation、payment，传入 URL 的 DB 部分由栈替换。队列有独立实例，IAM 和 payment 分别用 DB 1、5。提供 `AIPAY_DEV_QUEUE_REDIS_URL` 会使用已有的持久化、noeviction 队列实例；仅有缓存 URL 时，栈用本机 `redis-server` 和 `redis-cli` 在 127.0.0.1:6389 管理第二个实例，启用 AOF 并将队列数据保存在状态目录。
+- `build` 以 `GOWORK=off` 构建七个二进制，继承调用方的 Go 构建缓存。可先用 `build --bin-dir <目录>` 仅做构建。IAM、payment 仍固定 servicekit v0.4.0，联调构建在临时 modfile 中选用含 file signer 的已发布 v0.5.0。其他服务使用自身依赖。部署时各属主应自行确认并升级固定版本。
+- 监听地址均为 127.0.0.1。IAM、ledger、settlement、reconciliation、payment、notifier 的 gRPC 端口分别为 9101、9102、9103、9104、9105、9115。backend 公网、平台与卖方监听分别为 8080、8081、8082。模拟上游 API 为 9080，浏览器收银链接用 HTTPS 9443，客户端仅需信任本栈的 `certs/ca.crt`。upstream-sim 重启后原模拟订单与收银链接失效。
+- `up` 逐个等待服务就绪；gRPC 使用属主 CLI（含 `notifier healthcheck`），backend 使用 `/health/ready`，upstream-sim 使用 `/healthz`，收银入口通过 HTTPS 转发该探针。失败时仅回收本次成功启动的进程。日志在 `logs/<service>/`，子 PID 在 `run/<service>.pid`。停机指令通过私有 Unix socket 交给持有子进程句柄的父进程。外部 PostgreSQL、缓存与自备队列不会收到停止指令。`status` 在有服务未就绪时返回非零。
+- 私有 env、7 天证书、持久化 ES256 签名密钥与公钥、EPay 平台 RSA、密封密钥、上游凭据分别存于 `env/`、`certs/`、`inputs/`、`handoff/`。目录 0700、文件 0600。保留整组状态以继续开发；证书过期应协调重签和重启。原有签名链、密封数据仍依赖原业务密钥。不要打印 env、私钥、数据库 URL、整个 Compose 配置或模拟器凭据接口的响应。
+- `refresh-market` 使用刚结束的 UTC 分钟，生成 payment 的十分钟报价样本、reconciliation 自有的两份开发行情观测和一小时覆盖事实。重复刷新同一分钟得到同一报价；历史行情保留供旧订单核验。payment 每次报价重读文件。reconciliation 启动时载入，故命令会单独重启已运行的 reconciliation。报价和覆盖事实均有时限，演示前刷新。
+- 商户通知若要实际投递，在 prepare 前提供 `AIPAY_NOTIFIER_EGRESS_PROXY` 和 `AIPAY_NOTIFIER_ALLOWED_HOSTS`，并提供匹配商户地址的回执端。默认预留本地 CONNECT 代理 3128 和精确主机 127.0.0.1。开发 bot 已配置本地测试 token 和 webhook secret，Bot API 测试端预留 9081。两项外部测试端及平台/卖方浏览器入口的 HTTPS 终止见演示清单。
+
+## Compose
+
+需要支持 `env_file.format: raw` 的 Docker Compose（2.30+）、BuildKit 和能读取私有 Go 模块的 `AIPAY_MODULES_TOKEN`。准备脚本沿用相同的 OpenSSL、Go 和同级源码要求。
 
 ```sh
 python3 dev/prepare.py
-docker compose --env-file ../.local/dev/stack.env -f dev/compose.yaml up -d --build
-docker compose --env-file ../.local/dev/stack.env -f dev/compose.yaml ps
-docker compose --env-file ../.local/dev/stack.env -f dev/compose.yaml exec iam /app/kaivo-iam healthcheck
-# 保留数据库；再次 up 可以继续开发
-docker compose --env-file ../.local/dev/stack.env -f dev/compose.yaml down
+dc() { docker compose --env-file ../.local/dev/compose/stack.env -f dev/compose.yaml "$@"; }
+dc up -d --build
+dc ps -a
+python3 dev/prepare.py --refresh-market
+dc restart reconciliation
+dc down
 ```
 
-准备脚本拒绝覆盖已有状态，生成随机开发密码、短期证书和独立日志目录。私钥保持 0600，服务容器以当前开发用户 UID/GID 读取；数据库和缓存只在 Compose 私网，gRPC 仅映射宿主机回环地址 9101–9105。五个数据库使用不同用户并撤销 PUBLIC 连接权限。迁移容器成功退出后才启动对应服务。
+**未在本机验证**。本轮仅静态解析 Compose 和交叉检查配置。新项目名为 `aipay-p2`，独占 `../.local/dev/compose/` 与独立命名卷，避免接管旧五服务栈的用户、卷或密钥。切换前应停止占用相同宿主端口的旧栈或本机进程。普通 `down` 保留卷，`down -v` 会删除数据库和队列卷。
 
-`../.local/dev/stack.env` 含开发凭据，禁止提交、打印或用于生产。不要对有需保留数据的栈使用 `down -v`；它会删除数据库卷。证书到期后需有计划地更换并重启；准备脚本不替换现有密钥。服务日志在 `../.local/dev/logs/<service>/`。
+每个数据库服务在自身迁移容器成功退出后启动。Docker 中 payment、reconciliation 与 upstream-sim 共用网络命名空间，以使两份固定 manifest 的 127.0.0.1 域名限制和实际模拟器同时成立。容器间 gRPC 仍核验命名的服务身份；挂载按身份划分。backend、notifier、收银和既有 OTLP Collector / Jaeger 分别有独立容器。宿主端口仅发布到回环，数据库及两个 Redis 在私网。Jaeger UI 端口 16686，OTLP/gRPC 端口 4317。默认代理和 Bot API 回环地址在各自容器内，实际投递/收发需要可达的测试端。
 
-加入 payment 之前准备的开发目录可原地升级并保留数据。Postgres 卷已初始化，init 脚本不会重跑，需手工补建角色和库；证书目录缺少 payment 时整体重签，开发 CA 随之更换，所有容器需重建：
+## 验证机记录
 
-```sh
-python3 dev/prepare.py --add-missing-credentials  # 只追加缺少的密码和日志目录
-rm -rf ../.local/dev/certs && GOWORK=off go run ./cmd/devcert --out ../.local/dev/certs
-docker compose --env-file ../.local/dev/stack.env -f dev/compose.yaml up -d postgres
-docker compose --env-file ../.local/dev/stack.env -f dev/compose.yaml exec -T postgres \
-  sh -c 'psql -U postgres -d postgres -v ON_ERROR_STOP=1 -v password="$PAYMENT_DB_PASSWORD"' <<'SQL'
-CREATE ROLE payment LOGIN PASSWORD :'password';
-CREATE DATABASE aipay_payment OWNER payment;
-REVOKE CONNECT ON DATABASE aipay_payment FROM PUBLIC;
-GRANT CONNECT ON DATABASE aipay_payment TO payment;
-SQL
-docker compose --env-file ../.local/dev/stack.env -f dev/compose.yaml up -d --build --force-recreate
-```
-
-没有需保留的数据时，也可 `down -v` 并删除 `../.local/dev` 后重新准备。
-
-尚未接入认证、支付、账务或结算业务。健康成功只说明进程和依赖就绪；没有模拟业务成功接口。容器构建与远端 CI 的执行结果应以本次实际验证为准，不能由配置文件存在推断通过。
-
-
-队列 Redis 独立于缓存，使用独立密码、AOF `everysec`、`noeviction` 和命名卷；这仍存在故障持久性窗口，不能替代业务 outbox/幂等。已有开发目录可运行 `python3 dev/prepare.py --add-missing-credentials`，只追加缺少的密码，不重建已有数据库凭据或证书。具体任务属主使用 `AIPAY_QUEUE_REDIS_URL=redis://:<queue-password>@queue-redis:6379/0`，目前各服务没有注册业务任务。
-
-本地 Collector 监听回环端口 4317，服务通过 Compose 私网发送 OTLP；宿主机 backend 可设置 `AIPAY_TRACE_ENDPOINT=http://127.0.0.1:4317`。Jaeger UI 位于 http://127.0.0.1:16686，按响应 `X-Trace-ID` 查找链路。Jaeger 使用有界内存存储，重启丢弃追踪；生产需独立的存储、TLS/访问控制和保留策略。Collector/Jaeger 不参与服务 readiness。此 Compose 仅用于开发，不对公网开放查询或收集端口。
-
-`collector.yaml` / `jaeger.yaml` 已用于原生二进制配置校验与实际链路查询；容器执行和远端 CI 本轮仍按约定留待具备环境后验证。
+先运行 `GOWORK=off make check`，再按本机步骤核对六个迁移退出码和八个业务进程的就绪结果。可用 `AIPAY_TEST_SIM_BINARY=../.local/dev/native/bin/upstream-sim python3 -B dev/native/test_stack.py -v` 单独复查配置生成、行情幂等和进程归属。支付验收另需记录真实的订单/冻结 ID、账本序号、余额前后值、审批人与流游标，见[演示清单](demo.md)。

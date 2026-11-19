@@ -21,6 +21,8 @@
 
 ## 使用与验证
 
+阶段 2 的八进程本机联调与 Compose 用法见[本地联调栈](dev/README.md)，业务验收依赖见[演示前置条件](dev/demo.md)。
+
 生产使用已发布固定版本，各服务示例配置位于自身 `.env.example`。私有依赖（observability、protobuf）用本机 Git 凭据或只读 `AIPAY_MODULES_TOKEN`；CI 凭据仅允许读取所需模块，禁止放进 Git URL 或构建参数。
 
 ```sh

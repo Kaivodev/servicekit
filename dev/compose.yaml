@@ -1,4 +1,17 @@
-name: aipay-local
+name: aipay-p2
+x-service: &service
+  user: '${AIPAY_DEV_UID}:${AIPAY_DEV_GID}'
+  networks: [private]
+  read_only: true
+  tmpfs: [/tmp]
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  stop_grace_period: 25s
+x-probe: &probe
+  interval: 3s
+  timeout: 5s
+  retries: 20
+  start_period: 10s
 services:
   postgres:
     image: postgres:18
@@ -6,16 +19,13 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_DB: postgres
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?run dev/prepare.py}
-      IAM_DB_PASSWORD: ${IAM_DB_PASSWORD}
-      PAYMENT_DB_PASSWORD: ${PAYMENT_DB_PASSWORD:?run dev/prepare.py --add-missing-credentials for an existing stack}
-      LEDGER_DB_PASSWORD: ${LEDGER_DB_PASSWORD}
-      SETTLEMENT_DB_PASSWORD: ${SETTLEMENT_DB_PASSWORD}
-      RECONCILIATION_DB_PASSWORD: ${RECONCILIATION_DB_PASSWORD}
+    env_file:
+      - ${AIPAY_DEV_DIR}/env/provision.env
     volumes:
       - postgres:/var/lib/postgresql
       - ./init-databases.sh:/docker-entrypoint-initdb.d/10-aipay.sh:ro
     healthcheck:
-      test: [CMD-SHELL, 'pg_isready -U postgres -d postgres']
+      test: [CMD-SHELL, 'pg_isready -h 127.0.0.1 -U postgres -d postgres']
       interval: 2s
       timeout: 2s
       retries: 30
@@ -34,7 +44,7 @@ services:
   queue-redis:
     image: redis:8
     environment:
-      REDIS_PASSWORD: ${QUEUE_REDIS_PASSWORD:?run dev/prepare.py --add-missing-credentials for an existing stack}
+      REDIS_PASSWORD: ${QUEUE_REDIS_PASSWORD:?run dev/prepare.py for this stack}
     command: [sh, -c, 'exec redis-server --appendonly yes --appendfsync everysec --maxmemory-policy noeviction --requirepass "$$REDIS_PASSWORD"']
     volumes: [queue-redis:/data]
     healthcheck:
@@ -64,265 +74,294 @@ services:
     depends_on: [jaeger]
     networks: [private]
   iam-migrate:
-    image: kaivo-local/iam:dev
+    <<: *service
+    image: kaivo-p2/iam:dev
     build:
       context: ../../iam
+      dockerfile: ../servicekit/dev/Dockerfile.signing
       secrets: [aipay_modules_token]
-    user: '${AIPAY_DEV_UID}:${AIPAY_DEV_GID}'
-    environment: &iam-environment
-      AIPAY_GRPC_ADDR: 0.0.0.0:9101
-      AIPAY_GRPC_SERVER_NAME: iam
-      AIPAY_RPC_ALLOWED_PEERS: backend,probe,iam
-      AIPAY_TLS_TRUST_DOMAIN: aipay.test
-      AIPAY_TLS_CA_FILE: /run/aipay/ca.crt
-      AIPAY_TLS_CERT_FILE: /run/aipay/service/tls.crt
-      AIPAY_TLS_KEY_FILE: /run/aipay/service/tls.key
-      AIPAY_DATABASE_URL: postgres://iam:${IAM_DB_PASSWORD}@postgres:5432/aipay_iam?sslmode=disable
-      AIPAY_REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/1
-      AIPAY_LOG_DIR: /app/logs
-      AIPAY_TRACE_ENDPOINT: http://collector:4317
-      AIPAY_TRACE_ALLOW_INSECURE: "true"
-      AIPAY_TRACE_ENVIRONMENT: local
-    volumes: &iam-volumes
-      - ${AIPAY_DEV_DIR}/certs/ca.crt:/run/aipay/ca.crt:ro
-      - ${AIPAY_DEV_DIR}/certs/iam:/run/aipay/service:ro
-      - ${AIPAY_DEV_DIR}/logs/iam:/app/logs
+    env_file:
+      - path: ${AIPAY_DEV_DIR}/env/iam-migrate.env
+        format: raw
     command: [migrate, up]
-    healthcheck:
-      disable: true
     depends_on:
-      postgres:
-        condition: service_healthy
-    networks: [private]
-    read_only: true
-    tmpfs: [/tmp]
-    cap_drop: [ALL]
-    security_opt: [no-new-privileges:true]
-  iam:
-    image: kaivo-local/iam:dev
-    user: '${AIPAY_DEV_UID}:${AIPAY_DEV_GID}'
-    environment: *iam-environment
-    volumes: *iam-volumes
-    ports: ['127.0.0.1:9101:9101']
-    depends_on:
-      iam-migrate:
-        condition: service_completed_successfully
-      redis:
-        condition: service_healthy
-    networks: [private]
-    read_only: true
-    tmpfs: [/tmp]
-    cap_drop: [ALL]
-    security_opt: [no-new-privileges:true]
-    stop_grace_period: 20s
-  payment-migrate:
-    image: kaivo-local/payment:dev
-    build:
-      context: ../../payment
-      secrets: [aipay_modules_token]
-    user: '${AIPAY_DEV_UID}:${AIPAY_DEV_GID}'
-    environment: &payment-environment
-      AIPAY_GRPC_ADDR: 0.0.0.0:9105
-      AIPAY_GRPC_SERVER_NAME: payment
-      AIPAY_RPC_ALLOWED_PEERS: backend,probe,payment
-      AIPAY_TLS_TRUST_DOMAIN: aipay.test
-      AIPAY_TLS_CA_FILE: /run/aipay/ca.crt
-      AIPAY_TLS_CERT_FILE: /run/aipay/service/tls.crt
-      AIPAY_TLS_KEY_FILE: /run/aipay/service/tls.key
-      AIPAY_DATABASE_URL: postgres://payment:${PAYMENT_DB_PASSWORD}@postgres:5432/aipay_payment?sslmode=disable
-      AIPAY_REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/5
-      AIPAY_LOG_DIR: /app/logs
-      AIPAY_TRACE_ENDPOINT: http://collector:4317
-      AIPAY_TRACE_ALLOW_INSECURE: "true"
-      AIPAY_TRACE_ENVIRONMENT: local
-    volumes: &payment-volumes
-      - ${AIPAY_DEV_DIR}/certs/ca.crt:/run/aipay/ca.crt:ro
-      - ${AIPAY_DEV_DIR}/certs/payment:/run/aipay/service:ro
-      - ${AIPAY_DEV_DIR}/logs/payment:/app/logs
-    command: [migrate, up]
-    healthcheck:
-      disable: true
-    depends_on:
-      postgres:
-        condition: service_healthy
-    networks: [private]
-    read_only: true
-    tmpfs: [/tmp]
-    cap_drop: [ALL]
-    security_opt: [no-new-privileges:true]
-  payment:
-    image: kaivo-local/payment:dev
-    user: '${AIPAY_DEV_UID}:${AIPAY_DEV_GID}'
-    environment: *payment-environment
-    volumes: *payment-volumes
-    ports: ['127.0.0.1:9105:9105']
-    depends_on:
-      payment-migrate:
-        condition: service_completed_successfully
-      redis:
-        condition: service_healthy
-    networks: [private]
-    read_only: true
-    tmpfs: [/tmp]
-    cap_drop: [ALL]
-    security_opt: [no-new-privileges:true]
-    stop_grace_period: 20s
+      postgres: {condition: service_healthy}
+    healthcheck: {disable: true}
   ledger-migrate:
-    image: kaivo-local/ledger:dev
+    <<: *service
+    image: kaivo-p2/ledger:dev
     build:
       context: ../../ledger
       secrets: [aipay_modules_token]
-    user: '${AIPAY_DEV_UID}:${AIPAY_DEV_GID}'
-    environment: &ledger-environment
-      AIPAY_GRPC_ADDR: 0.0.0.0:9102
-      AIPAY_GRPC_SERVER_NAME: ledger
-      AIPAY_RPC_ALLOWED_PEERS: backend,probe,ledger
-      AIPAY_TLS_TRUST_DOMAIN: aipay.test
-      AIPAY_TLS_CA_FILE: /run/aipay/ca.crt
-      AIPAY_TLS_CERT_FILE: /run/aipay/service/tls.crt
-      AIPAY_TLS_KEY_FILE: /run/aipay/service/tls.key
-      AIPAY_DATABASE_URL: postgres://ledger:${LEDGER_DB_PASSWORD}@postgres:5432/aipay_ledger?sslmode=disable
-      AIPAY_REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/2
-      AIPAY_LOG_DIR: /app/logs
-      AIPAY_TRACE_ENDPOINT: http://collector:4317
-      AIPAY_TRACE_ALLOW_INSECURE: "true"
-      AIPAY_TRACE_ENVIRONMENT: local
-    volumes: &ledger-volumes
-      - ${AIPAY_DEV_DIR}/certs/ca.crt:/run/aipay/ca.crt:ro
-      - ${AIPAY_DEV_DIR}/certs/ledger:/run/aipay/service:ro
-      - ${AIPAY_DEV_DIR}/logs/ledger:/app/logs
+    env_file:
+      - path: ${AIPAY_DEV_DIR}/env/ledger-migrate.env
+        format: raw
     command: [migrate, up]
-    healthcheck:
-      disable: true
     depends_on:
-      postgres:
-        condition: service_healthy
-    networks: [private]
-    read_only: true
-    tmpfs: [/tmp]
-    cap_drop: [ALL]
-    security_opt: [no-new-privileges:true]
-  ledger:
-    image: kaivo-local/ledger:dev
-    user: '${AIPAY_DEV_UID}:${AIPAY_DEV_GID}'
-    environment: *ledger-environment
-    volumes: *ledger-volumes
-    ports: ['127.0.0.1:9102:9102']
-    depends_on:
-      ledger-migrate:
-        condition: service_completed_successfully
-      redis:
-        condition: service_healthy
-    networks: [private]
-    read_only: true
-    tmpfs: [/tmp]
-    cap_drop: [ALL]
-    security_opt: [no-new-privileges:true]
-    stop_grace_period: 20s
-  settlement-migrate:
-    image: kaivo-local/settlement:dev
+      postgres: {condition: service_healthy}
+    healthcheck: {disable: true}
+  payment-migrate:
+    <<: *service
+    image: kaivo-p2/payment:dev
     build:
-      context: ../../settlement
+      context: ../../payment
+      dockerfile: ../servicekit/dev/Dockerfile.signing
       secrets: [aipay_modules_token]
-    user: '${AIPAY_DEV_UID}:${AIPAY_DEV_GID}'
-    environment: &settlement-environment
-      AIPAY_GRPC_ADDR: 0.0.0.0:9103
-      AIPAY_GRPC_SERVER_NAME: settlement
-      AIPAY_RPC_ALLOWED_PEERS: backend,probe,settlement
-      AIPAY_TLS_TRUST_DOMAIN: aipay.test
-      AIPAY_TLS_CA_FILE: /run/aipay/ca.crt
-      AIPAY_TLS_CERT_FILE: /run/aipay/service/tls.crt
-      AIPAY_TLS_KEY_FILE: /run/aipay/service/tls.key
-      AIPAY_DATABASE_URL: postgres://settlement:${SETTLEMENT_DB_PASSWORD}@postgres:5432/aipay_settlement?sslmode=disable
-      AIPAY_REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/3
-      AIPAY_LOG_DIR: /app/logs
-      AIPAY_TRACE_ENDPOINT: http://collector:4317
-      AIPAY_TRACE_ALLOW_INSECURE: "true"
-      AIPAY_TRACE_ENVIRONMENT: local
-    volumes: &settlement-volumes
-      - ${AIPAY_DEV_DIR}/certs/ca.crt:/run/aipay/ca.crt:ro
-      - ${AIPAY_DEV_DIR}/certs/settlement:/run/aipay/service:ro
-      - ${AIPAY_DEV_DIR}/logs/settlement:/app/logs
+    env_file:
+      - path: ${AIPAY_DEV_DIR}/env/payment-migrate.env
+        format: raw
     command: [migrate, up]
-    healthcheck:
-      disable: true
     depends_on:
-      postgres:
-        condition: service_healthy
-    networks: [private]
-    read_only: true
-    tmpfs: [/tmp]
-    cap_drop: [ALL]
-    security_opt: [no-new-privileges:true]
-  settlement:
-    image: kaivo-local/settlement:dev
-    user: '${AIPAY_DEV_UID}:${AIPAY_DEV_GID}'
-    environment: *settlement-environment
-    volumes: *settlement-volumes
-    ports: ['127.0.0.1:9103:9103']
-    depends_on:
-      settlement-migrate:
-        condition: service_completed_successfully
-      redis:
-        condition: service_healthy
-    networks: [private]
-    read_only: true
-    tmpfs: [/tmp]
-    cap_drop: [ALL]
-    security_opt: [no-new-privileges:true]
-    stop_grace_period: 20s
+      postgres: {condition: service_healthy}
+    healthcheck: {disable: true}
   reconciliation-migrate:
-    image: kaivo-local/reconciliation:dev
+    <<: *service
+    image: kaivo-p2/reconciliation:dev
     build:
       context: ../../reconciliation
       secrets: [aipay_modules_token]
-    user: '${AIPAY_DEV_UID}:${AIPAY_DEV_GID}'
-    environment: &reconciliation-environment
-      AIPAY_GRPC_ADDR: 0.0.0.0:9104
-      AIPAY_GRPC_SERVER_NAME: reconciliation
-      AIPAY_RPC_ALLOWED_PEERS: backend,probe,reconciliation
-      AIPAY_TLS_TRUST_DOMAIN: aipay.test
-      AIPAY_TLS_CA_FILE: /run/aipay/ca.crt
-      AIPAY_TLS_CERT_FILE: /run/aipay/service/tls.crt
-      AIPAY_TLS_KEY_FILE: /run/aipay/service/tls.key
-      AIPAY_DATABASE_URL: postgres://reconciliation:${RECONCILIATION_DB_PASSWORD}@postgres:5432/aipay_reconciliation?sslmode=disable
-      AIPAY_REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/4
-      AIPAY_LOG_DIR: /app/logs
-      AIPAY_TRACE_ENDPOINT: http://collector:4317
-      AIPAY_TRACE_ALLOW_INSECURE: "true"
-      AIPAY_TRACE_ENVIRONMENT: local
-    volumes: &reconciliation-volumes
-      - ${AIPAY_DEV_DIR}/certs/ca.crt:/run/aipay/ca.crt:ro
-      - ${AIPAY_DEV_DIR}/certs/reconciliation:/run/aipay/service:ro
-      - ${AIPAY_DEV_DIR}/logs/reconciliation:/app/logs
+    env_file:
+      - path: ${AIPAY_DEV_DIR}/env/reconciliation-migrate.env
+        format: raw
     command: [migrate, up]
+    depends_on:
+      postgres: {condition: service_healthy}
+    healthcheck: {disable: true}
+  settlement-migrate:
+    <<: *service
+    image: kaivo-p2/settlement:dev
+    build:
+      context: ../../settlement
+      secrets: [aipay_modules_token]
+    env_file:
+      - path: ${AIPAY_DEV_DIR}/env/settlement-migrate.env
+        format: raw
+    command: [migrate, up]
+    depends_on:
+      postgres: {condition: service_healthy}
+    healthcheck: {disable: true}
+  backend-migrate:
+    <<: *service
+    image: kaivo-p2/backend:dev
+    build:
+      context: ../../backend
+      secrets: [aipay_modules_token]
+    env_file:
+      - path: ${AIPAY_DEV_DIR}/env/backend-migrate.env
+        format: raw
+    command: [migrate, up]
+    depends_on:
+      postgres: {condition: service_healthy}
+    healthcheck: {disable: true}
+  upstream-sim:
+    <<: *service
+    image: kaivo-p2/upstream-sim:dev
+    # Keep the simulator unmodified. The Alpine runtime supplies its HTTP probe.
+    build:
+      context: ../../upstream-sim
+      dockerfile_inline: |
+        FROM golang:1.27.3-bookworm@sha256:972b4110ba0f47539a975c31e52c64765e1ff19f2d74469ae4a595c6676e80a5 AS build
+        WORKDIR /src
+        COPY . .
+        RUN GOWORK=off CGO_ENABLED=0 go build -mod=readonly -trimpath -o /out/upstream-sim ./cmd/upstream-sim
+        FROM alpine:3.23
+        COPY --from=build --chmod=0755 /out/upstream-sim /app/upstream-sim
+        USER 65532:65532
+        ENTRYPOINT ["/app/upstream-sim"]
+    env_file:
+      - path: ${AIPAY_DEV_DIR}/env/upstream-sim.env
+        format: raw
+    volumes:
+      - ${AIPAY_DEV_DIR}/logs/upstream-sim:/app/logs
+      - ${AIPAY_DEV_DIR}/inputs/upstream-sim:/run/kaivo/inputs:ro
+    ports:
+      - '127.0.0.1:9080:9080'
+      - '127.0.0.1:9104:9104'
+      - '127.0.0.1:9105:9105'
     healthcheck:
-      disable: true
+      <<: *probe
+      test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:9080/healthz]
+  cashier:
+    <<: *service
+    image: python:3.13-alpine
+    command: [python3, -B, /app/cashier.py]
+    env_file:
+      - path: ${AIPAY_DEV_DIR}/env/cashier.env
+        format: raw
+    volumes:
+      - ./cashier.py:/app/cashier.py:ro
+      - ${AIPAY_DEV_DIR}/certs/cashier:/run/kaivo/identity:ro
+      - ${AIPAY_DEV_DIR}/certs/ca.crt:/run/kaivo/ca.crt:ro
+    ports: ['127.0.0.1:9443:9443']
     depends_on:
-      postgres:
-        condition: service_healthy
-    networks: [private]
-    read_only: true
-    tmpfs: [/tmp]
-    cap_drop: [ALL]
-    security_opt: [no-new-privileges:true]
-  reconciliation:
-    image: kaivo-local/reconciliation:dev
+      upstream-sim: {condition: service_healthy}
+    healthcheck:
+      <<: *probe
+      test: [CMD, python3, -c, "import ssl,urllib.request; urllib.request.urlopen('https://127.0.0.1:9443/healthz', context=ssl.create_default_context(cafile='/run/kaivo/ca.crt'), timeout=3).close()"]
+  iam:
+    <<: *service
+    image: kaivo-p2/iam:dev
+    env_file:
+      - path: ${AIPAY_DEV_DIR}/env/iam.env
+        format: raw
+    volumes:
+      - ${AIPAY_DEV_DIR}/logs/iam:/app/logs
+      - ${AIPAY_DEV_DIR}/inputs/iam:/run/kaivo/inputs:ro
+      - ${AIPAY_DEV_DIR}/data/iam:/run/kaivo/data
+      - ${AIPAY_DEV_DIR}/certs/ca.crt:/run/kaivo/ca.crt:ro
+      - ${AIPAY_DEV_DIR}/certs/iam:/run/kaivo/identity:ro
+      - ${AIPAY_DEV_DIR}/certs/public:/run/kaivo/public:ro
+    ports:
+      - '127.0.0.1:9101:9101'
+    healthcheck:
+      <<: *probe
+      test: [CMD, /app/service, healthcheck]
+    depends_on:
+      iam-migrate: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+      queue-redis: {condition: service_healthy}
+  ledger:
+    <<: *service
+    image: kaivo-p2/ledger:dev
+    env_file:
+      - path: ${AIPAY_DEV_DIR}/env/ledger.env
+        format: raw
+    volumes:
+      - ${AIPAY_DEV_DIR}/logs/ledger:/app/logs
+      - ${AIPAY_DEV_DIR}/inputs/ledger:/run/kaivo/inputs:ro
+      - ${AIPAY_DEV_DIR}/data/ledger:/run/kaivo/data
+      - ${AIPAY_DEV_DIR}/certs/ca.crt:/run/kaivo/ca.crt:ro
+      - ${AIPAY_DEV_DIR}/certs/ledger:/run/kaivo/identity:ro
+      - ${AIPAY_DEV_DIR}/certs/public:/run/kaivo/public:ro
+    ports:
+      - '127.0.0.1:9102:9102'
+    healthcheck:
+      <<: *probe
+      test: [CMD, /app/kaivo-ledger, healthcheck]
+    depends_on:
+      ledger-migrate: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+  payment:
+    image: kaivo-p2/payment:dev
     user: '${AIPAY_DEV_UID}:${AIPAY_DEV_GID}'
-    environment: *reconciliation-environment
-    volumes: *reconciliation-volumes
-    ports: ['127.0.0.1:9104:9104']
-    depends_on:
-      reconciliation-migrate:
-        condition: service_completed_successfully
-      redis:
-        condition: service_healthy
-    networks: [private]
     read_only: true
     tmpfs: [/tmp]
     cap_drop: [ALL]
-    security_opt: [no-new-privileges:true]
-    stop_grace_period: 20s
+    security_opt: ["no-new-privileges:true"]
+    stop_grace_period: 25s
+    network_mode: service:upstream-sim
+    env_file:
+      - path: ${AIPAY_DEV_DIR}/env/payment.env
+        format: raw
+    volumes:
+      - ${AIPAY_DEV_DIR}/logs/payment:/app/logs
+      - ${AIPAY_DEV_DIR}/inputs/payment:/run/kaivo/inputs:ro
+      - ${AIPAY_DEV_DIR}/data/payment:/run/kaivo/data
+      - ${AIPAY_DEV_DIR}/certs/ca.crt:/run/kaivo/ca.crt:ro
+      - ${AIPAY_DEV_DIR}/certs/payment:/run/kaivo/identity:ro
+      - ${AIPAY_DEV_DIR}/certs/public:/run/kaivo/public:ro
+    healthcheck:
+      <<: *probe
+      test: [CMD, /app/service, healthcheck]
+    depends_on:
+      payment-migrate: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+      queue-redis: {condition: service_healthy}
+      iam: {condition: service_healthy}
+      ledger: {condition: service_healthy}
+      upstream-sim: {condition: service_healthy}
+  notifier:
+    <<: *service
+    image: kaivo-p2/payment:dev
+    env_file:
+      - path: ${AIPAY_DEV_DIR}/env/notifier.env
+        format: raw
+    volumes:
+      - ${AIPAY_DEV_DIR}/logs/notifier:/app/logs
+      - ${AIPAY_DEV_DIR}/certs/ca.crt:/run/kaivo/ca.crt:ro
+      - ${AIPAY_DEV_DIR}/certs/notifier:/run/kaivo/identity:ro
+    ports:
+      - '127.0.0.1:9115:9115'
+    command: [notifier]
+    healthcheck:
+      <<: *probe
+      test: [CMD, env, AIPAY_NOTIFIER_GRPC_ADDR=127.0.0.1:9115, /app/service, notifier, healthcheck]
+    depends_on:
+      payment: {condition: service_healthy}
+  reconciliation:
+    image: kaivo-p2/reconciliation:dev
+    user: '${AIPAY_DEV_UID}:${AIPAY_DEV_GID}'
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    stop_grace_period: 25s
+    network_mode: service:upstream-sim
+    env_file:
+      - path: ${AIPAY_DEV_DIR}/env/reconciliation.env
+        format: raw
+    volumes:
+      - ${AIPAY_DEV_DIR}/logs/reconciliation:/app/logs
+      - ${AIPAY_DEV_DIR}/inputs/reconciliation:/run/kaivo/inputs:ro
+      - ${AIPAY_DEV_DIR}/data/reconciliation:/run/kaivo/data
+      - ${AIPAY_DEV_DIR}/certs/ca.crt:/run/kaivo/ca.crt:ro
+      - ${AIPAY_DEV_DIR}/certs/reconciliation:/run/kaivo/identity:ro
+      - ${AIPAY_DEV_DIR}/certs/public:/run/kaivo/public:ro
+    healthcheck:
+      <<: *probe
+      test: [CMD, /app/kaivo-reconciliation, healthcheck]
+    depends_on:
+      reconciliation-migrate: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+      ledger: {condition: service_healthy}
+      payment: {condition: service_healthy}
+      upstream-sim: {condition: service_healthy}
+  settlement:
+    <<: *service
+    image: kaivo-p2/settlement:dev
+    env_file:
+      - path: ${AIPAY_DEV_DIR}/env/settlement.env
+        format: raw
+    volumes:
+      - ${AIPAY_DEV_DIR}/logs/settlement:/app/logs
+      - ${AIPAY_DEV_DIR}/inputs/settlement:/run/kaivo/inputs:ro
+      - ${AIPAY_DEV_DIR}/data/settlement:/run/kaivo/data
+      - ${AIPAY_DEV_DIR}/certs/ca.crt:/run/kaivo/ca.crt:ro
+      - ${AIPAY_DEV_DIR}/certs/settlement:/run/kaivo/identity:ro
+      - ${AIPAY_DEV_DIR}/certs/public:/run/kaivo/public:ro
+    ports:
+      - '127.0.0.1:9103:9103'
+    healthcheck:
+      <<: *probe
+      test: [CMD, /app/kaivo-settlement, healthcheck]
+    depends_on:
+      settlement-migrate: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+  backend:
+    <<: *service
+    image: kaivo-p2/backend:dev
+    env_file:
+      - path: ${AIPAY_DEV_DIR}/env/backend.env
+        format: raw
+    volumes:
+      - ${AIPAY_DEV_DIR}/logs/backend:/app/logs
+      - ${AIPAY_DEV_DIR}/inputs/backend:/run/kaivo/inputs:ro
+      - ${AIPAY_DEV_DIR}/data/backend:/run/kaivo/data
+      - ${AIPAY_DEV_DIR}/certs/ca.crt:/run/kaivo/ca.crt:ro
+      - ${AIPAY_DEV_DIR}/certs/backend:/run/kaivo/identity:ro
+      - ${AIPAY_DEV_DIR}/certs/public:/run/kaivo/public:ro
+    ports:
+      - '127.0.0.1:8080:8080'
+      - '127.0.0.1:8081:8081'
+      - '127.0.0.1:8082:8082'
+    healthcheck:
+      <<: *probe
+      test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:8080/health/ready]
+    depends_on:
+      backend-migrate: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+      iam: {condition: service_healthy}
+      payment: {condition: service_healthy}
 networks:
   private:
     internal: true
