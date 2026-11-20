@@ -1,5 +1,6 @@
 """A private control socket per service. Only the parent signals its own child."""
 import http.client
+import json
 import os
 from pathlib import Path
 import shutil
@@ -10,19 +11,27 @@ import subprocess
 import sys
 import time
 
-from stack_config import LIBRARY, PORTS, SERVICES, read_env, write
+from stack_config import DEPOSIT_SERVICES, LIBRARY, PORTS, SERVICES, deposit_settings, read_env, write
 
 
 def service_env(root, name):
     # In particular do not inherit admin DSNs, module tokens or another service's keys.
     env = {k: os.environ[k] for k in ("PATH", "LANG", "TZ", "TMPDIR") if k in os.environ}
     if name != "queue-redis":
-        env.update(read_env(root / "env" / (name + ".env")))
+        owner = "ledger" if name == "ledger-reader" else name
+        env.update(read_env(root / "env" / (owner + ".env")))
+        env.update(deposit_settings(root, owner))
+    if name == "ledger-reader":
+        env.update(AIPAY_GRPC_ADDR="127.0.0.1:9122", AIPAY_LEDGER_JOBS="off",
+                   AIPAY_LEDGER_PAYMENT_EVENTS="off", AIPAY_LOG_DIR=str(root / "logs/ledger-reader"))
+    if name == "devcollection":
+        env["AIPAY_DEVCOLLECTION_OVERLAP_FILE"] = str(root / "demo/overlap.json")
     return env
 
 
 def services(root):
-    return (("queue-redis",) if (root / "data/queue-redis/redis.conf").exists() else ()) + SERVICES
+    deposits = DEPOSIT_SERVICES if (root / "deposits.enabled").is_file() else ()
+    return (("queue-redis",) if (root / "data/queue-redis/redis.conf").exists() else ()) + deposits + SERVICES
 
 
 def command(root, name):
@@ -30,7 +39,9 @@ def command(root, name):
         return [sys.executable, "-B", str(LIBRARY / "dev/cashier.py")]
     if name == "queue-redis":
         return ["redis-server", str(root / "data/queue-redis/redis.conf")]
-    binary = root / "bin" / ("payment" if name == "notifier" else name)
+    if name in DEPOSIT_SERVICES:
+        return [str(root / "bin" / ("kaivo-" + name)), "serve"]
+    binary = root / "bin" / {"notifier": "payment", "ledger-reader": "ledger"}.get(name, name)
     args = {"notifier": ["notifier"], "upstream-sim": []}.get(name, ["serve"])
     return [str(binary), *args]
 
@@ -38,6 +49,20 @@ def command(root, name):
 def health(root, name):
     env = service_env(root, name)
     try:
+        if name == "devchain":
+            conn = http.client.HTTPConnection("127.0.0.1", PORTS[name], timeout=3)
+            try:
+                conn.request("POST", "/", '{"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}')
+                response = conn.getresponse()
+                return response.status == 200 and json.load(response).get("result") == "0x7a69"
+            finally:
+                conn.close()
+        if name == "devcollection":
+            # The controller owns the probe. The server never receives ledger keys.
+            env = {k: v for k, v in env.items() if k.startswith(("AIPAY_GRPC_", "AIPAY_TLS_")) or
+                   k in ("AIPAY_ENVIRONMENT", "AIPAY_DEVCOLLECTION_CHAIN_ID")}
+            env.update(AIPAY_TLS_CERT_FILE=str(root / "certs/ledger/tls.crt"),
+                       AIPAY_TLS_KEY_FILE=str(root / "certs/ledger/tls.key"))
         if name == "cashier":
             tls = ssl.create_default_context(cafile=str(root / "certs/ca.crt"))
             conn = http.client.HTTPSConnection("127.0.0.1", PORTS[name], context=tls, timeout=3)
@@ -58,7 +83,7 @@ def health(root, name):
         probe = command(root, name)[:1] + (["notifier"] if name == "notifier" else []) + ["healthcheck"]
         return subprocess.run(probe, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                               stderr=subprocess.DEVNULL, timeout=6).returncode == 0
-    except (OSError, subprocess.TimeoutExpired, http.client.HTTPException):
+    except (OSError, ValueError, subprocess.TimeoutExpired, http.client.HTTPException):
         return False
 
 
@@ -135,7 +160,7 @@ def start(root, name):
         if health(root, name):
             return False
         raise RuntimeError(f"{name} is running but unready; inspect its logs")
-    ports = [PORTS.get(name, 6389)] + ([8081, 8082] if name == "backend" else [])
+    ports = [9122 if name == "ledger-reader" else PORTS.get(name, 6389)] + ([8081, 8082] if name == "backend" else [])
     for port in ports:
         with socket.socket() as probe:
             probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)

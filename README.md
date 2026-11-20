@@ -21,12 +21,12 @@
 
 ## 使用与验证
 
-阶段 2 的八进程本机联调与 Compose 用法见[本地联调栈](dev/README.md)，业务验收依赖见[演示前置条件](dev/demo.md)。
+阶段 2 本机联调、开发预存工具与 Compose 用法见[本地联调栈](dev/README.md)，业务验收依赖见[演示前置条件](dev/demo.md)。
 
-生产使用已发布固定版本，各服务示例配置位于自身 `.env.example`。私有依赖（observability、protobuf）用本机 Git 凭据或只读 `AIPAY_MODULES_TOKEN`；CI 凭据仅允许读取所需模块，禁止放进 Git URL 或构建参数。
+生产使用已发布固定版本，各服务示例配置位于自身 `.env.example`。CI 的只读 `AIPAY_MODULES_TOKEN` 需要读取 observability、protobuf 和 dev/tools 固定使用的已发布 servicekit。本机也可使用 Git 凭据。
 
 ```sh
-make fmt check
+make fmt check build
 # 仅对隔离的测试实例执行
 AIPAY_TEST_DATABASE_URL=... AIPAY_TEST_REDIS_URL=... make test-integration
 # 同级工作区五服务的完整进程验证；只创建并销毁自己的临时数据库实例

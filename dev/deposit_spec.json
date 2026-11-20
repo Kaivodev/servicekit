@@ -1,0 +1,12 @@
+{
+  "block_seconds": 3,
+  "latest": 3,
+  "finalized": 2,
+  "replay_key": "normal",
+  "transfers": [
+    {"key": "normal", "block": 1, "chain_raw": "1000000000000000000000"},
+    {"key": "mismatch", "block": 1, "chain_raw": "1234567000000000001", "receipt_raw": "2234567000000000001"},
+    {"key": "duplicate-delivery", "block": 2, "chain_raw": "7000000000000"},
+    {"key": "unfinalized", "block": 3, "chain_raw": "1000000000001"}
+  ]
+}

@@ -1,53 +1,87 @@
-# 阶段 2 演示前置条件
+# 阶段 2 演示验收
 
-验收依据为同级 docs 的[开发计划第 10 轮](../../docs/plan/development-plan.md)、[C2C 交易设计](../../docs/design/c2c-trading.md)与[契约流清单](../../docs/design/contracts.md)。下表的“已具备”指能在属主源码定位到的能力，整条资金路径仍待真实验收。冻结顺序以服务的实际状态机为准：先由 ledger 确认卖方担保，再由 payment 派发上游单并向买方展示指引。
+验收以 [开发计划](../../docs/plan/development-plan.md)、[审批和资金契约](../../docs/design/contracts.md) 及验证机生成的 `demo/reports` 为准。命令见 [本机运行步骤](README.md#阶段-2-演示驱动)。以下状态区分了驱动覆盖、已执行的验证和仍需属主提供的入口。
 
-| 验收环节 | 已具备 | 本任务已补 | 缺失、属主与建议 |
-|---|---|---|---|
-| 卖方预存、可用库存 | ledger 验签到账先入暂挂；reconciliation 核对独立链证据后签发 SellerDepositVerified；ledger 校验原回执再重分类 | collection 专用证书、持久 ES256、公钥 pin 和两个接收方的预留地址 | collection 仓库缺位，独立开发链、历史绑定、钱包科目和可复验的收款样本待准备。见下节 |
-| 平台与双人审批 | IAM 邀请、密码和 WebAuthn 登录；payment、reconciliation 对真实审批材料另验两份断言，发起人不能自批 | 一致的 RP ID 和 HTTPS origin、门户路由登记、IAM 安全邮件队列/开发目录、签发与验证公钥 | IAM 提供一次性且可审计的初始管理员开通；payment、reconciliation 各自登记人和钥匙。演示驱动需隔离多个自然人的软件认证器并保存计数 |
-| bot 注册、Telegram 绑定、TOTP | backend webhook 与 IAM 的私聊 /start、/bind、/totp；IAM 建个人账户、幂等更新和一次性 TOTP 绑定 | 本地 bot token、webhook secret、测试 API 地址和 enrollment origin | 演示驱动应以真实 update JSON、不同 update_id 和正确的 X-Telegram-Bot-Api-Secret-Token 投递私聊。提供本地 Bot API 的 getWebhookInfo（URL 与配置一致）、sendMessage、deleteMessage；群场景另需 getChatMember。已有门户账户的 /bind 需经近期 TOTP 取得绑定码。准备 enrollment 页 HTTPS 终止 |
-| 商户业务、应用和 EPay | IAM 的 CreateBusiness、CreateApplication、GenerateEpayV1Key、上传 V2 商户 RSA 公钥、获取平台公钥；iam.applications 在 payment 投影 | IAM 本地 sealer、持久身份签名、平台 RSA DER 及其验签公钥、EPay 路由和缓存限速 | backend 的 bot 尚缺业务/应用写命令。backend 或后续驱动须以真实 backend mTLS 身份，对每个写操作执行私聊 Authorize，绑定目标、规范命令摘要、新 TOTP 和 MFA_RECENT，再调 IAM。V1 需开关、来源 CIDR，KEY 仅首次交付；V2 由商户持私钥、IAM 登记 SPKI。创建应用后仍要支付方式开通 |
-| 模拟插件、通道与核验账户 | upstream-plugins 有支付/核验两类包；payment、reconciliation 分域上传、回放、审批、启用；模拟器有独立 query 凭据 | 选 form-md5 作为演示通道。交易 ref 为 sim-md5-v1，模拟账户 md5-demo，gateway 为 http://127.0.0.1:9080；reconciliation 的插件通道映射、本地密封器与只读凭据已生成 | 按下文操作制作并上传包。payment 当前的卖方审核来源是 Unavailable，需属主提供可信审核适配与 C2C 商户资格/域名审核入口。reconciliation 需要离线登记只读来源见证，绑定通道、凭据摘要、有效期、审计，再由 RPC 密封、两人审批和启用 |
-| EPay 下单、冻结、模拟收款、回调、查单 | backend 验签限速并调用 payment；payment 核资格、锁定版本、向 ledger ReserveTrade、取得冻结再派发；回调验签后由主动查单确认 | mTLS、模拟器及 HTTPS 收银页、backend /callback/sim_form_md5、payment 证据目录、dispatcher/worker、队列、报价文件 | 需卖方已有可用、与收款户不同、有生效的支付方式、两侧定价、通道/卖方绑定、已审批支付插件与风控版本；按实际回调来源配置通道策略。notification 测试另需受控 CONNECT 代理与可回执商户端，payment 负责签名，notifier 只投递 |
-| 风控期、独立查单与放币 | payment 签 OrderPaid v2；reconciliation 根据原冻结、风控截止、独立只读查单、定价/行情、屏障与覆盖签授权；ledger 有三种授权的记账规则 | 开启 payment.orders/pricing 拉取、独立验证宿主、争议登记表校验、同分钟两份行情观测与有时限的开发覆盖 | **ledger** 缺生产装配的 payment.orders 网络 puller；reconciliation.matches 在 ledger 与 collection 同开关。先补齐有版本白名单的接收与可恢复启动，确保到账事实/授权乱序时保持 pending。payment 的风控没有环境变量覆盖；以正常双审批 RiskPolicyChange 明确设置 hold_duration_seconds（可为 0，建议短正数以展示到期前后），ledger 与 reconciliation 仍按权威时间判断 |
-| 商户余额、管理端和卖方门户 | ledger 释放时给原收款账户记 N、平台费用记 F，Q=N+F；ledger、payment 有卖方/平台只读 RPC；IAM 支持独立网页入口 | 三个 HTTP 监听、IAM/payment/ledger 对端、门户 origins 和 cookie 密钥、精确 IAM 路由登记 | backend 已提交基线 b6e9b40 的门户主要为占位；本次只读工作树中另有正在接入的会话/CSRF、通道与卖方余额代码，须按最终版本逐路实测平台审批、卖方仅本人可读。准备 admin.aipay.test 与 seller.aipay.test 的本地 HTTPS 终止。卖方首次开户还需 IAM 的 iam_seller_activations。EPay merchant/info 仍缺可用的商户余额映射，以 ledger 经授权的原账户读模型或属主只读验收查询核对原账户余额增量 |
-| 未付取消 | payment 发起原单关闭；reconciliation 要求两次独立 closed/unpaid 观察；ledger 接受绑定当前版本的取消授权才还卖方 Q | 迟到付款复查窗口在开发环境设为 5 秒，模拟器可设置迟付或关单不支持 | protobuf/payment/reconciliation 约定并接通首次核验的触发与重驱；验证两次观察期间迟付不会解冻，未知结果保留占用 |
-| 已付未放币退款 | payment 先以当前版本占用原担保 Q，再向模拟上游原路全额退；reconciliation 独立 query_refund 核对原单，ledger 按核实终态处理 | payment 与 verification 各用自己的凭据，支持模拟成功、失败、未知 | protobuf/payment/reconciliation 接通退款核验触发；ledger 补网络接收与支付事件类型覆盖。验收失败分支恢复原风控，未知继续占用，成功才归还卖方 |
-| 已放币全额退款 | 先从原收款人可用余额预留 N；独立核实后反向冲销 N 与原三项费用 F，卖方恢复 Q | 原报价、锁定版本和开发覆盖可用于两域校验 | 同上，另需账户确有 N 和有效覆盖。验证余额不足时不先退法币，失败释放预留，未知保留，重试仅一笔反向分录 |
-| 争议与幂等 | payment 登记双方证据、等待 ledger 屏障后发布 OrderDisputed；双人裁决，reconciliation 从 payment 读裁决并用自己登记的公钥复核；ledger 有放币前退款交接和放币后可控余额冻结规则 | dispute registry、同 RP 校验和 payment 对端；模拟器可重发相同回调 | payment/reconciliation/ledger 完成上述触发和传输；演示驱动覆盖旧 control_version、重复回调、重复信封、批准后重启。保存事件 ID/sequence、冻结版本、分录序号及前后余额；同一授权与同一链转账只能产生一次资金效果 |
+## 开通清单
 
-## 卖方预存建议
-
-1. 在开发工具或未来 collection 仓库实现**只用于开发的 collection 流生产者**，持有本栈 collection 的 mTLS 身份和事件私钥。提供 ListEvents 和 GetStreamHead，持久化同一串 sequence、prev_digest 和 event ID，使用标准 SignedEvent 的 ReceiptConfirmed schema 1，仅允许 ledger 和 reconciliation 拉取。
-2. 准备独立的本地 EVM 链（31337）或只服务于开发的确定性 EVM RPC fixture。其数据集独立于生产者提交的回执，覆盖 chainId、finalized 块、指定高度的 canonical 块、交易回执及全块 log index。选用核验器已登记的 BSC USDT 合约，保持 ERC-20 原始金额到 10⁻⁶ USDT 的转换一致。预置有区块高度范围的地址→卖方账户绑定，在 ledger 开立对应 collection_wallet 科目。
-3. 在第二阶段部署时启用 AIPAY_RECON_DEPOSITS、独立节点、bindings 文件、screening policy 和 development_allow，再启用 AIPAY_LEDGER_DEPOSITS。先收到回执时只增钱包资产与 unmatched_receipts；只有 reconciliation 签发引用原 collection_event_id 的 SellerDepositVerified 后，ledger 才从暂挂转到卖方可用。验收前后各查一次暂挂、钱包、卖方余额，重放和颠倒到达次序，钱包只增加一次。
-4. **对 line-6000 的影响**：复用已有的验签、EVM 解析、历史绑定、复核、账本规则和迁移，不需改变事件 schema 或资金判定。现有 ledger 在构造阶段同时连 collection 和 reconciliation，后者的交易 jobs 又会连 ledger。启用预存后的冷启动需由 ledger 拆开消费者连接生命周期、支持后台重连，或由联调部署分两阶段启动。只读盘点未改属主。直接写余额、手填核实事件或把 coverage 文件当预存会跳过待验收的不变量。
-
-## 审批、包与数据准备
-
-- IAM 的迁移不会产生管理员。IAM 属主需要隔离开发环境的初始化仪式，建立至少两名不同的初始管理员及已核实资料。高权限邀请由另一名管理员批准；管理员与审批人角色互斥。操作员与两名审批人分开。通过受限的首次密码会话完成 WebAuthn 注册，重新登录取得近期认证。登录凭据保存在 iam_webauthn_credentials。
-- 业务审批还需 payment_approver_people / payment_approver_keys，reconciliation_admin_people / reconciliation_admin_keys。独立复核 payment 争议裁决另需 reconciliation_dispute_people / reconciliation_dispute_keys 登记能验证 payment 审批人的材料。各属主离线维护 IAM 用户→自然人、公钥、credential ID、有效期与撤销；应用运行账号无登记权限。演示驱动用软件认证器为各人保存独立 ES256 密钥、credential ID 和计数，按每次 challenge、RP ID、origin、UP/UV 生成 WebAuthn 注册与断言。IAM 登录断言和两份审批断言分别生成。
-- 用 upstream-plugins 的**干净 v0.2.1 checkout** 构建 pluginctl，预置准确的 go1.27.3 工具链。对 plugins/sim_form_md5、plugins/sim_form_md5_verify 各用 pluginctl build、package、replay、verify；输出放在 checkout 外。包内保留 manifest.json、plugin.wasm、fixtures/ 及匹配的摘要、回放报告、source_commit。该 tag 两个 manifest 的插件版本仍为 0.2.0。pluginctl 会把含未跟踪文件的工作树也标为 uncommitted，上传会拒绝。当前同级 checkout 有未跟踪的 .DS_Store，验证机可从本地仓库克隆一个干净的 tag 副本。
-- payment 上传 payment 包，两人发布，配置初始停用通道、卖方审核、凭据 ref、支付方式、定价与风控；双审批绑定/启用插件并启用通道。reconciliation 单独上传 verification 包、双人发布；属主先核实独立来源并在 reconciliation_credential_attestations 登记见证，再将 handoff/query.json 的原始凭据经 StoreVerificationCredentials 密封，提交/双批核验账户、申请/双批启用。审批的 channel_code 为 sim_form_md5，两个账户配置里的 gateway、account_id 相同，凭据用途不同。商户支付方式审核与平台通道开关分别完成。
-
-## 契约流与当前接线
-
-| 契约流 | 生产方 → 接收方 | 本栈与属主现状 |
+| 操作 | 入口及成功条件 | 当前状态 |
 |---|---|---|
-| iam.applications | iam → payment | 已配 mTLS、IAM 事件 JWKS、受众和 payment 新鲜度检查 |
-| iam.business_ownership / iam.security | iam → payment / settlement | 前者的归属转移协议和 payment puller 待接；后者 IAM 有安全事件和读 ACL，settlement 缺消费者 |
-| payment.orders / payment.pricing | payment → ledger、reconciliation | payment 签两流；reconciliation 配 payment 地址与 JWKS，分别拉取。ledger 有 OrderPaid inbox 入账规则，缺这两流的对端装配和完整类型处理 |
-| collection.deposits | collection → ledger、reconciliation | 已备两方地址和 collection JWKS。默认均关闭，待生产者及独立 EVM/绑定就位 |
-| collection.sweeps | collection → ledger、reconciliation | 工作区缺生产者和运行接线 |
-| settlement.wallets / settlement.withdrawals | settlement → ledger、reconciliation | settlement 当前为基础服务。生产者及两个接收方的对应拉取待属主实现 |
-| reconciliation.matches | reconciliation → ledger、settlement | 已签名，ledger 已配地址与 JWKS，与两个预存来源共同启用；settlement 缺接收器 |
-| ledger.trades | ledger → payment、reconciliation、settlement | ledger 内核签名/出流；三个接收方均无此流的可配置 puller。payment 恢复通过认证的账本查询；reconciliation 已接冻结明细 RPC |
-| reconciliation.attestations | reconciliation → settlement | 两端均待实现 |
-| ledger.journal / ledger.checkpoints | ledger → settlement、reconciliation | ledger 提供 JournalService 哈希链和签名检查点流；下游无相应持续拉取配置。journal 不逐条签名 |
+| 初始管理员 | IAM 属主 `bootstrap` 封存同一份声明，通过安全邮件及平台 `auth/password/reset` 设置各自密码。两人分别登录、注册 ES256 凭据、重新登录并完成挑战 | 驱动已接入，go-webauthn 已独立验证注册、断言和计数 |
+| 邀请人员 | 管理员 1 在平台 `invitations/platform-staff` 邀请两名审批人和审核、运营、风控人员各一名。受保护邀请由管理员 2 批准。每人用自己的邮件令牌接受邀请，注册 WebAuthn 并登录 | 待验证机 |
+| 登记审批人 | payment `approvers register`；reconciliation `registry approvers/dispute-approvers register`。争议登记使用 payment 返回的 key ID 和同一自然人。重试先 list 并核对指纹 | 待验证机 |
+| 制包 | 从本地仓库克隆干净 v0.2.1，检查 HEAD 及工作树，用 go1.27.3 对两包 build、package、replay、verify | 两包已在临时私有状态目录完成四项操作 |
+| 卖方 | Telegram 私聊 `/start` 注册，`/balance` 取账户 ID，按账户 ID 和 Telegram 用户 ID 只读核对 `iam_telegram_bindings.user_id`。将六项声明持久化后执行 IAM 属主 `sellers activate`。管理员邀请同一账户和邮箱，卖方接受邀请、绑定 TOTP 并登录。指定已登记账户时用 `sellers list` 核对 | 报告用 `demo_verification_ref`、`demo_declared_by` 标出演示核验引用与声明人，记录 IAM 返回的登记时间 |
+| 钱包与预存 | `deposits-on` 为实际卖方生成绑定，ledger `wallets register` 开立 collection_wallet。normal、replay、延后原回执的第三块样本，逐笔核对卖方门户与钱包 | 驱动已接入。验收要求原始转账仅一笔钱包分录 |
+| 双域发布 | 运营分别在平台 `plugins`、`verification/plugins` 上传，两名登记审批人各自签署属主生成的规范材料。核对实际提交人的 `requested_by`、材料摘要、两份签署记录和最终状态 | 已接入 IAM 000010 授权，待验证机 |
+| 通道 | 运营申请支付方式、卖方通道、两侧定价和插件启用。风控人员通过 `risk-policies/requests` 提交 20 秒持有期的策略。两名审批人分别签署各项申请，定价和风控生效后再双批启用通道 | 需要 payment 独立的有效卖方审核资料 |
+| 独立核验 | 比对模拟器交易与独立只读凭据，属主 `registry attestations register` 见证后，运营在 `verification/credentials` 密封凭据，提请双批 `verification/accounts` 和 `verification/enables` | 待验证机 |
+| 商户 | 私聊 /start、/totp → 浏览器 GET/POST 绑定页 → /balance、/business_create、/app_create。V1 配回环 CIDR，/key_generate 首次交付并观察相同消息 ID 的 deleteMessage。另建 V2 应用并上传商户公钥，用于关单和退款 | bot 的 19 条路由已纳入 IAM。模拟 Bot API、真实格式 update 与通知验签有单测 |
+| 收款资格 | /access_apply、逐提示 /access_next、/access_submit。审核员在平台读取 revision 及材料哈希后提交 reviews，商户按 /access 返回的版本 /access_enable | 待验证机核对真实资格、来源与应用投影 |
 
-## 验证与待定项
+## 资金场景清单
 
-本轮运行了两种栈的配置自测（开发秘密只在内存）、建库 SQL 输入检查、分钟刷新幂等，实际验证了托管 Redis 的认证、队列分库与 AOF 重启恢复，并通过真实 upstream-sim 的构建/race 测试、进程就绪/再启动/停机与外部 PID 保护，并以真实 HTTPS 收银 GET/POST 和独立只读凭据查到 paid。此 HTTPS 实测使用进程管道提供的临时测试证书，未验证整套新 CA/mTLS。Compose YAML 可解析，**未在本机验证**。沙箱拒绝写同级状态目录，完整 prepare/证书文件核验未运行成功；离线模块缓存缺失锁定的私有包、pgx v5.11.0 等，六个数据库服务构建和 servicekit make check 受阻。未运行 PostgreSQL、迁移、八业务进程全栈和资金验收。
+| 场景 | 真实操作与验收条件 | 当前状态 |
+|---|---|---|
+| main | V1 /mapi.php 下单。卖方门户冻结 Q 后显示模拟收银页，HTTPS POST 付款，模拟器向 backend 回调。payment 主动查单产生 OrderPaid，商户验签并回 success。风险到期后 reconciliation 独立查单、签授权，ledger 放币。卖方减少 Q，商户增加 N，三项费用合计增加 F，Q=N+F | 已编排，待取得完整运行报告 |
+| cancel | V2 /api/pay/create、/api/pay/close。两笔独立订单，首次需两条间隔至少五秒的 closed/unpaid 才归还 Q。第二笔对原单开启模拟器 late_payment，在首条核验后收银付款，要求观察到 paid 且没有取消授权 | 已编排，待验证机 |
+| refund-before-release | V2 收银付款后、放币前请求全额 /api/pay/refund。查核 ledger PRE_RELEASE 占用、reconciliation 查退款、最终分录、/api/pay/refundquery 和余额复原 | 已编排，待验证机 |
+| refund-after-release | V2 放币后先核对 N、F，再全额退款。ledger 的 POST_RELEASE 预留等于 N。核实后商户和费用冲销、卖方恢复 Q。第二笔单要求商户实际可用低于 N 才发退款，核对无预留及模拟器独立 refund-query 查无退款 | 正常分支待运行。干净栈缺少可让商户实际支用该余额的入口；驱动保存该笔样本供真实支用后续跑 |
+| dispute | 运营登记原单和商户 /order 证据，卖方在本人门户追加原单证据。风控人员提交放给原收款人的裁决，两名审批人签署，等待 reconciliation 复核与 ledger 落账 | 已编排，待验证机 |
+| duplicates | 原单三份相同回调，待放币核对一次资金效果。另让两个真实 ledger 拉取器读取同一 collection 签名信封，核对完整字节摘要、游标冲突和唯一分录。另一笔单暂缓 ledger 拉取 matches，真实授权签发后由运营登记争议，再恢复拉取，要求原授权因旧版本隔离。风控人员以当前版本提交裁决，两名审批人签署，只有新授权可入账 | 已编排，双读协调有单测；两副本对同一数据库的游标竞争和旧授权隔离待验证机 |
 
-需要确定 collection 演示生产者的归属、独立节点或固定链证据方案，初始管理员/审批人登记的属主与仪式，以及本轮是否接受用经授权的属主 RPC/账本只读证据作为中间检查点。计划要求的 bot、门户和资金闭环仍应分别保留真实入口的最终验收记录。
+## 报告和取证
+
+- 报告记录真实步骤、入口、HTTP 状态、backend 业务码或协议错误、请求关联 ID、各步骤的余额和证据。错误时查状态目录 `logs/<服务>/process.log` 和 `logs/<服务>/runtime.log`。认证材料和模拟器收银令牌只进入私有状态。
+- 商户本人通过 bot /balance、/orders、/order 取证，卖方通过 `accounts/{seller_account_id}/balance`、`holds?order_id=…` 和订单详情取证。平台订单快照提供原收款账户和锁定报价 Q/N/F。退款查询使用签名的 V2 请求。
+- 服务缺少对外读模型的证据在显式 PostgreSQL READ ONLY 事务中读取。payment_outbox 给出事件类型、ID 与 sequence。reconciliation_verification_evidence、reconciliation_authorizations、reconciliation_outbox 给出独立查单、签发时刻及 sequence。ledger_trade_authorizations、ledger_trade_refunds、ledger_trade_reservations 给出执行版本、预留与释放分录。ledger_balances 汇总原三项平台费用；预存另查 ledger_inbox、ledger_trade_deposits 和 ledger_trade_unmatched_receipts。IAM 封存摘要仅用于恢复同一次开通仪式。
+- 所有场景均待验证机 PostgreSQL 18 验收。本轮隔离实例在 initdb 的共享内存创建处被沙箱拒绝。
+
+## 卖方预存验收
+
+在 `prepare` 后先运行 `refresh-market`，再用 `demo setup seller` 生成数据集和开立 collection_wallet。创世块取生成时刻，随后每块默认增加 3 秒。回执确认时间取所属区块时间，重启或复用已有数据集时保持原值。
+
+驱动在发布 normal 和 unfinalized 前，通过 ledger 的只读事务核对 USDT/USD 汇率，成功时把版本、观测时间和汇率记入报告。人工发布时可将 `deposits/scenario.json` 中对应回执的 `confirmed_at` 传给 psql 的同名变量，以下查询须返回一行。
+
+```sql
+SELECT version, observed_at, rate FROM ledger_usd_rates
+WHERE asset = 'USDT' AND observed_at <= :'confirmed_at'::timestamptz
+ORDER BY observed_at DESC, created_at DESC, version DESC LIMIT 1;
+```
+
+无记录时先确认 ledger 已加载 `AIPAY_LEDGER_DEV_USD_RATES_FILE`。如果旧数据集的回执早于首条观测，新分钟的汇率无法覆盖它。已被隔离的链上转账即使重放也不会入账。要重新验收完整演示，请保留原栈取证，使用新的隔离栈，先刷新汇率，再生成数据集并发布新转账。
+
+**余额快照。** 使用 ledger 属主的只读连接，给 psql 变量 `wallet` 和 `seller` 传入上述编码和卖方 UUID。在发布前、原回执后、核实后、重放后各执行一次，保留三项结果。钱包的 registered 必须为 true。另记录 collection 的 head、两个消费者的 inbox 状态和入账分录序号。
+
+```sql
+WITH wanted(code) AS (VALUES
+    (:'wallet'), ('unmatched_receipts:USDT:BSC'), ('user_available:USDT:' || :'seller'))
+SELECT w.code, a.id IS NOT NULL AS registered,
+       COALESCE(b.balance_units, 0) AS units, b.last_seq
+FROM wanted w
+LEFT JOIN ledger_accounts a ON a.code = w.code
+LEFT JOIN ledger_balances b ON b.account_id = a.id
+ORDER BY w.code;
+```
+
+| 操作与顺序 | 核验和余额检查点（单位 10⁻⁶ USDT） |
+|---|---|
+| `receipt add normal`，再次 add | 两次返回同一 event ID。钱包和暂挂各增 1,000,000,000。为观察两步，可先以 `--finalized 0` 启动，待记录快照后停栈，改为 2 并重启。reconciliation 核实后暂挂回到基线，卖方增加同额，钱包维持第一次增量 |
+| `receipt replay normal` | 新 event ID、下一 sequence，原 receipt_id、载荷和链上元组相同。ledger 复用原分录；reconciliation 隔离对同一回执的第二次认领。三项余额与核实后相同 |
+| `receipt add mismatch` | 回执 2,234,567 单位，独立链日志 1,234,567 单位，二者还有尚不足 1 单位的链上尾数。reconciliation 隔离，卖方可用不增。ledger 收到签名回执时仍会增加钱包与暂挂，需逐笔对照基线 |
+| `receipt add unfinalized` | 块 3 存在，默认 finalized=2，reconciliation 保持 pending 并重试。提高到 3 后可核实。此样本 raw=1,000,000,000,001，对应 1 单位 |
+
+**验证核实事件先到。** 在发布一笔尚未使用的样本前停栈，例如预留上表的 unfinalized。临时把 `env/ledger.env` 中 AIPAY_LEDGER_COLLECTION_ADDR 指到未监听的本机端口，保留 reconciliation 的真实 collection 地址。启栈并发布样本，待链 finalized 达到样本高度。用 ledger 的只读连接查看 ledger_inbox，确认 reconciliation.matches 的 SellerDepositVerified 已到且 pending，三项余额仍处于该样本的基线。停栈恢复 ledger 地址，重启等待原回执到达。核对 ledger_trade_unmatched_receipts.posting_seq 与 ledger_trade_deposits.unmatched_seq 引用同一笔钱包分录，暂挂回到基线、卖方及钱包分别只增一次。整个验收只提交 collection 回执，核实事件由 reconciliation 签发。
+
+## 契约流接线
+
+| 契约流 | 本栈与验收边界 |
+|---|---|
+| iam.applications | payment 经 mTLS 拉取，按 IAM 事件 JWKS 验签并检查新鲜度 |
+| collection.deposits | 9106 的开发生产者签发回执；ledger 与 reconciliation 拉取，后者还从独立 EVM RPC 核对原转账 |
+| payment.orders、payment.pricing | ledger 和 reconciliation 均配置 payment 地址、签名公钥与拉取开关 |
+| reconciliation.matches | ledger 与 collection.deposits 一起启用拉取。迟到回执、并发投递和旧授权样本分别核对两条流的游标与入账结果 |
+| ledger.trades、ledger.journal、ledger.checkpoints | ledger 提供资金事件与分录、签名检查点读取；本演示以授权的账户与冻结查询、属主分录证据核对。payment 的恢复走账本查询 |
+| iam.business_ownership、iam.security | 前者的归属转移和 payment 拉取、后者的 settlement 消费仍待属主接入 |
+| collection.sweeps、settlement.wallets、settlement.withdrawals、reconciliation.attestations | 这些流仍待生产端或消费端接线，阶段 2 演示覆盖模拟收款、预存及担保资金流 |
+
+验证机可用隔离实例设置 AIPAY_TEST_DATABASE_URL、AIPAY_TEST_REDIS_URL 执行 `make test-integration`。保留每个场景的两份报告和状态目录内对应服务的日志。

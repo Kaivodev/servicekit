@@ -18,7 +18,8 @@ STATE = WORKSPACE / ".local" / "dev"
 SERVICES = ("iam", "ledger", "payment", "notifier", "reconciliation", "settlement", "upstream-sim", "cashier", "backend")
 OWNERS = tuple(s for s in SERVICES if s not in ("notifier", "upstream-sim", "cashier"))
 APP_ROLES = ("iam", "ledger", "payment", "reconciliation")
-PORTS = {"iam": 9101, "ledger": 9102, "settlement": 9103, "reconciliation": 9104, "payment": 9105,
+DEPOSIT_SERVICES = ("devchain", "devcollection")
+PORTS = {"devchain": 8545, "devcollection": 9106, "iam": 9101, "ledger": 9102, "settlement": 9103, "reconciliation": 9104, "payment": 9105,
          "notifier": 9115, "upstream-sim": 9080, "cashier": 9443, "backend": 8080}
 CACHE_DB = {"backend": 0, "iam": 1, "ledger": 2, "settlement": 3, "reconciliation": 4, "payment": 5}
 PEERS = {"iam": "backend,payment,settlement", "ledger": "backend,payment,reconciliation,settlement",
@@ -26,6 +27,7 @@ PEERS = {"iam": "backend,payment,settlement", "ledger": "backend,payment,reconci
          "settlement": "backend"}
 RP = "admin.aipay.test"
 ORIGIN = "https://" + RP
+LEDGER_RATE_FILE_LIMIT = 64 << 10  # ledger/internal/fx/devfile.go
 
 
 def write(path, data):
@@ -54,6 +56,10 @@ def read_env(path):
     return dict(line.split("=", 1) for line in path.read_text().splitlines() if line)
 
 
+def seller_ceremony_env(root, iam_owner_dsn):
+    save_env(root / "env/iam-sellers.env", {"AIPAY_IAM_SELLERS_DATABASE_URL": iam_owner_dsn})
+
+
 def url_parts(raw, schemes):
     if not raw or any(c.isspace() for c in raw):
         raise ValueError("expected a database or Redis URL")
@@ -67,14 +73,14 @@ def url_parts(raw, schemes):
     return u
 
 
-def database_url(admin, owner, password, db):
+def database_url(admin, owner, password, db, prefix="aipay_"):
     u = url_parts(admin, ("postgres", "postgresql"))
     # An admin DSN's identity/target must never override the service's URI.
     if any(k not in ("sslmode", "sslrootcert", "connect_timeout", "application_name")
            for k, _ in parse_qsl(u.query, keep_blank_values=True)):
         raise ValueError("unsupported PostgreSQL URL option (see dev/README.md)")
     host = u.netloc.rsplit("@", 1)[-1]
-    return urlunsplit((u.scheme, f"{owner}:{quote(password, safe='')}@{host}", "/aipay_" + db, u.query, ""))
+    return urlunsplit((u.scheme, f"{owner}:{quote(password, safe='')}@{host}", "/" + prefix + db, u.query, ""))
 
 
 def redis_db(raw, index):
@@ -92,11 +98,44 @@ def b64(data):
     return base64.b64encode(data).decode("ascii")
 
 
+def append_ledger_rate(path, minute):
+    history = []
+    if path.exists():
+        if path.stat().st_size > LEDGER_RATE_FILE_LIMIT:
+            raise ValueError("existing ledger USD rate file exceeds 64 KiB")
+        history = json.loads(path.read_bytes())
+        if not isinstance(history, list):
+            raise ValueError("ledger USD rate history must be a JSON array")
+    observed_at = stamp(minute)
+    if any(row["asset"] == "USDT" and row["observed_at"] == observed_at for row in history):
+        return
+    history.append(dict(asset="USDT", source_a="dev-a", rate_a="1.0000",
+                        source_b="dev-b", rate_b="0.9999", observed_at=observed_at))
+    data = (json.dumps(history, separators=(",", ":")) + "\n").encode()
+    if len(data) > LEDGER_RATE_FILE_LIMIT:
+        raise ValueError("ledger USD rate history is full; archive completed demo minutes before refreshing")
+    write(path, data)
+
+
+def minute_snapshot_id(minute):
+    """Deterministic UUIDv7 for one development rate minute.
+
+    payment internal IDs are UUIDv7 and ledger rejects quotes whose
+    rate_snapshot_id is not one. The timestamp is the minute itself and the
+    random bits come from the minute, so refreshing a minute again yields the
+    same ID.
+    """
+    ms = int(minute.timestamp() * 1000)
+    rand = int.from_bytes(hashlib.sha256(b"kaivo-dev-rate:" + stamp(minute).encode()).digest()[:10], "big")
+    value = (ms & ((1 << 48) - 1)) << 80 | 0x7 << 76 | (rand >> 68 & 0xFFF) << 64 | 0b10 << 62 | (rand & ((1 << 62) - 1))
+    return str(uuid.UUID(int=value))
+
+
 def refresh(root, now=None):
     now = now or datetime.now(timezone.utc)
     end = now.replace(second=0, microsecond=0)
     minute = end - timedelta(minutes=1)
-    key = "dev-" + minute.strftime("%Y%m%dT%H%MZ")
+    key = minute_snapshot_id(minute)
     rate = {"rate_snapshot_id": key, "minute": stamp(minute), "collected_at": stamp(end),
             "usable_for_quoting": True, "expires_at": stamp(minute + timedelta(minutes=10))}
     market_file = root / "inputs/reconciliation/market.json"
@@ -112,6 +151,7 @@ def refresh(root, now=None):
                                 raw_sha256=b64(hashlib.sha256(sample).digest())))
     if len(json.dumps(records).encode()) >= 1 << 20:
         raise ValueError("market history exceeds the reconciliation file limit; archive completed demo minutes first")
+    append_ledger_rate(root / "inputs/ledger/usd-rates.json", minute)
     dump(market_file, records)
     dump(market_file.with_name("coverage.json"), dict(covered=True, as_of=stamp(now), expires_at=stamp(now + timedelta(hours=1))))
     dump(root / "inputs/payment/rate.json", rate)
@@ -152,6 +192,7 @@ def generate_inputs(root, sim_listen):
         write(inputs / svc / "epay.der", der)
     write(root / "handoff/platform-public.pem", subprocess.check_output(["openssl", "pkey", "-pubout"], input=rsa))
     payment_secret, query_secret = secrets.token_hex(32), secrets.token_hex(32)
+    dump(inputs / "payment/seller-reviews.json", [])
     dump(inputs / "payment/plugins.json", {"credentials": {"sim-md5-v1": {"secrets": {"shared": b64(payment_secret.encode())}}},
                                          "evidence_key": b64(secrets.token_bytes(32))})
     dump(root / "handoff/query.json", {"query_key": query_secret})
@@ -161,6 +202,42 @@ def generate_inputs(root, sim_listen):
     dump(inputs / "iam/routes.json", routes())
     write(inputs / "backend/bot-token", "10001:" + secrets.token_urlsafe(32))
     refresh(root)
+
+
+def native_deposit_inputs(root, admin, passwords):
+    for name in DEPOSIT_SERVICES:
+        (root / "logs" / name).mkdir(mode=0o700, exist_ok=True)
+    password = passwords.setdefault("COLLECTION_DEV_DB_PASSWORD", secrets.token_hex(24))
+    cert = root / "certs/collection"
+    save_env(root / "env/devcollection.env", {
+        "AIPAY_ENVIRONMENT": "development", "AIPAY_DEVCOLLECTION_CHAIN_ID": "31337",
+        "AIPAY_DATABASE_URL": database_url(admin, "collection_dev", password, "collection_dev", prefix=""),
+        "AIPAY_GRPC_ADDR": f"127.0.0.1:{PORTS['devcollection']}", "AIPAY_GRPC_SERVER_NAME": "collection",
+        "AIPAY_RPC_ALLOWED_PEERS": "ledger,reconciliation", "AIPAY_TLS_TRUST_DOMAIN": "aipay.test",
+        "AIPAY_TLS_CA_FILE": root / "certs/ca.crt", "AIPAY_TLS_CERT_FILE": cert / "tls.crt",
+        "AIPAY_TLS_KEY_FILE": cert / "tls.key", "AIPAY_SIGNING_BACKEND": "file",
+        "AIPAY_SIGNING_KEY_ID": "collection-dev", "AIPAY_SIGNING_KEY_FILE": cert / "signing.pem",
+        "AIPAY_DEVCOLLECTION_JWKS_FILE": root / "certs/public/collection.jwks",
+    })
+    save_env(root / "env/devchain.env", {"AIPAY_ENVIRONMENT": "development",
+             "AIPAY_DEVCHAIN_DATASET": root / "deposits/chain.json"})
+
+
+def deposit_settings(root, name):
+    marker = root / "deposits.enabled"
+    if not marker.is_file():
+        return {}
+    if name == "ledger":
+        delayed = {"AIPAY_LEDGER_COLLECTION_ADDR": "127.0.0.1:1"} if (root / "deposits.delay-collection").exists() else {}
+        if (root / "deposits.delay-matches").exists():
+            delayed["AIPAY_LEDGER_RECONCILIATION_ADDR"] = "127.0.0.1:1"
+        return delayed | {"AIPAY_LEDGER_DEPOSITS": "on", "AIPAY_LEDGER_DEPOSIT_POLL_INTERVAL": "1s",
+                "AIPAY_LEDGER_DEPOSIT_BATCH": "100"}
+    if name == "reconciliation":
+        return read_env(root / "deposits/reconciliation.env") | {"AIPAY_RECON_DEPOSITS": "on"}
+    if name == "devchain":
+        return {"AIPAY_DEVCHAIN_FINALIZED": marker.read_text().strip()}
+    return {}
 
 
 def prepare(root, admin, cache, queue, compose=False):
@@ -188,6 +265,8 @@ def prepare(root, admin, cache, queue, compose=False):
             passwords[svc.upper() + "_DB_PASSWORD"] = secrets.token_hex(24)
             if svc in APP_ROLES:
                 passwords[svc.upper() + "_APP_PASSWORD"] = secrets.token_hex(24)
+        if not compose:
+            native_deposit_inputs(root, admin, passwords)
         save_env(root / "env/provision.env", passwords)
         for svc in SERVICES:
             # Containers mount only their own materials and the public registry.
@@ -211,6 +290,8 @@ def prepare(root, admin, cache, queue, compose=False):
                 pw = passwords[svc.upper() + "_DB_PASSWORD"]
                 dsn = database_url(admin, svc, pw, svc)
                 save_env(root / "env" / (svc + "-migrate.env"), {"AIPAY_DATABASE_URL": dsn})
+                if svc == "iam":
+                    seller_ceremony_env(root, dsn)
                 if svc in APP_ROLES:
                     dsn = database_url(admin, svc + "_app", passwords[svc.upper() + "_APP_PASSWORD"], svc)
                 values.update(DATABASE_URL=dsn, REDIS_URL=redis_db(cache, CACHE_DB[svc]),
@@ -230,6 +311,9 @@ def prepare(root, admin, cache, queue, compose=False):
                               IAM_EPAY_SEALER_FILE=inputs / "sealer.key", IAM_WEBAUTHN_RP_ID=RP, IAM_WEBAUTHN_ORIGINS=ORIGIN)
             elif svc == "ledger":
                 values.update(LEDGER_JOBS="on", LEDGER_CHECKPOINT_KEY_ID="ledger-dev", LEDGER_ANCHOR_DIR=data / "anchors",
+                              LEDGER_DEV_USD_RATES_FILE=inputs / "usd-rates.json",
+                              LEDGER_PAYMENT_EVENTS="on", LEDGER_PAYMENT_ADDR=address("payment"),
+                              LEDGER_PAYMENT_SERVER_NAME="payment", LEDGER_PAYMENT_JWKS_FILE=public / "payment.jwks",
                               LEDGER_APPROVAL_RP_ID=RP, LEDGER_APPROVAL_ORIGINS=ORIGIN, LEDGER_DEPOSITS="off",
                               LEDGER_COLLECTION_ADDR=("collection:9106" if compose else "127.0.0.1:9106"), LEDGER_COLLECTION_SERVER_NAME="collection",
                               LEDGER_COLLECTION_JWKS_FILE=public / "collection.jwks", LEDGER_RECONCILIATION_ADDR=address("reconciliation"),
@@ -239,7 +323,7 @@ def prepare(root, admin, cache, queue, compose=False):
                               IAM_EVENT_KEYS_FILE=public / "iam.jwks", LEDGER_RPC_ADDRESS=address("ledger"),
                               PAYMENT_DISPATCHER_ENABLED="true", PAYMENT_WORKER_ENABLED="true",
                               PAYMENT_APPROVAL_RP_ID=RP, PAYMENT_APPROVAL_ORIGINS=ORIGIN, PAYMENT_DEV_RATE_FILE=inputs / "rate.json",
-                              PAYMENT_DEV_RATE_MAX_AGE="10m", PLUGIN_ENABLED="true", PLUGIN_CREDENTIALS_FILE=inputs / "plugins.json",
+                              PAYMENT_DEV_SELLER_REVIEWS_FILE=inputs / "seller-reviews.json", PAYMENT_DEV_RATE_MAX_AGE="10m", PLUGIN_ENABLED="true", PLUGIN_CREDENTIALS_FILE=inputs / "plugins.json",
                               PLUGIN_EVIDENCE_DIRECTORY=data / "evidence", PLUGIN_TEST_ONLY_ALLOW_HTTP="true",
                               PLUGIN_TEST_ONLY_ALLOW_LOOPBACK="true", PLUGIN_CALLBACK_URL=f"http://{address('backend')}/callback/sim_form_md5",
                               PAYMENT_NOTIFICATION_IAM_ADDRESS=address("iam"), PAYMENT_NOTIFICATION_LOCAL_RSA_FILE=inputs / "epay.der")
@@ -249,7 +333,7 @@ def prepare(root, admin, cache, queue, compose=False):
                               NOTIFIER_TLS_TRUST_DOMAIN="aipay.test", NOTIFIER_TEST_ONLY_ALLOW_HTTP="true",
                               NOTIFIER_TEST_ONLY_ALLOW_LOOPBACK="true",
                               NOTIFIER_EGRESS_PROXY=os.getenv("AIPAY_NOTIFIER_EGRESS_PROXY", "http://127.0.0.1:3128"),
-                              NOTIFIER_ALLOWED_HOSTS=os.getenv("AIPAY_NOTIFIER_ALLOWED_HOSTS", "127.0.0.1"))
+                              NOTIFIER_ALLOWED_HOSTS=os.getenv("AIPAY_NOTIFIER_ALLOWED_HOSTS", "localhost"))
             elif svc == "reconciliation":
                 values.update(RECONCILIATION_JOBS="on", RECONCILIATION_AUTHORIZATION_VALID_FOR="5m",
                               LEDGER_RPC_ADDRESS=address("ledger"), PAYMENT_RPC_ADDRESS=address("payment"),
@@ -268,6 +352,8 @@ def prepare(root, admin, cache, queue, compose=False):
             elif svc == "backend":
                 values.update(HTTP_ADDR=listen + ":8080", ADMIN_HTTP_ADDR=listen + ":8081", SELLER_HTTP_ADDR=listen + ":8082",
                               IAM_GRPC_ADDR=address("iam"), PAYMENT_GRPC_ADDR=address("payment"),
+                              RECONCILIATION_GRPC_ADDR=address("reconciliation"), HTTP_MAX_BODY_BYTES="23068672",
+                              TELEGRAM_MONITOR_INTERVAL="2s", TELEGRAM_KEY_MESSAGE_TTL="10s",
                               LEDGER_GRPC_ADDR=address("ledger"), PLATFORM_ORIGIN=ORIGIN, SELLER_ORIGIN="https://seller.aipay.test",
                               PORTAL_COOKIE_KEY=secrets.token_urlsafe(32), EPAY_V2_LOCAL_RSA_FILE=inputs / "epay.der",
                               TOTP_ENROLLMENT_ORIGIN="https://merchant.aipay.test", TELEGRAM_ENABLED="true",

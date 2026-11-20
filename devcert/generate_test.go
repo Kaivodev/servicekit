@@ -1,6 +1,9 @@
 package devcert
 
 import (
+	"bytes"
+	"crypto/x509"
+	"encoding/pem"
 	"os"
 	"path/filepath"
 	"testing"
@@ -18,6 +21,10 @@ func TestGeneratedCertificatesAndNoOverwrite(t *testing.T) {
 	options := config.TLS{CAFile: filepath.Join(dir, "ca.crt"), CertFile: filepath.Join(dir, "iam/tls.crt"), KeyFile: filepath.Join(dir, "iam/tls.key"), TrustDomain: "aipay.test"}
 	if _, err := mtls.Load(options, "iam"); err != nil {
 		t.Fatal(err)
+	}
+	ca, leaf := readCertificate(t, options.CAFile), readCertificate(t, options.CertFile)
+	if len(ca.SubjectKeyId) == 0 || !bytes.Equal(leaf.AuthorityKeyId, ca.SubjectKeyId) {
+		t.Fatal("leaf certificate lacks the CA authority key identifier")
 	}
 	info, err := os.Stat(options.KeyFile)
 	if err != nil || info.Mode().Perm() != 0600 {
@@ -38,4 +45,21 @@ func TestGeneratedCertificatesAndNoOverwrite(t *testing.T) {
 	if _, err := mtls.Load(options, "iam"); err == nil {
 		t.Fatal("wrong trust domain accepted")
 	}
+}
+
+func readCertificate(t *testing.T, path string) *x509.Certificate {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	block, _ := pem.Decode(raw)
+	if block == nil {
+		t.Fatal("certificate is not PEM")
+	}
+	certificate, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return certificate
 }

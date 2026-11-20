@@ -14,6 +14,13 @@ SELECT pg_advisory_lock(72401212);
 CREATE TEMP TABLE dev_roles(name text PRIMARY KEY, pass text);
 CREATE TEMP TABLE dev_databases(name text PRIMARY KEY, owner_name text, app_name text);
 SQL
+  if [ -n "${COLLECTION_DEV_DB_PASSWORD:-}" ]; then
+    cat <<'SQL'
+\getenv pw COLLECTION_DEV_DB_PASSWORD
+INSERT INTO dev_roles VALUES ('collection_dev', :'pw');
+INSERT INTO dev_databases VALUES ('collection_dev', 'collection_dev', 'collection_dev');
+SQL
+  fi
   for svc in iam ledger payment reconciliation settlement backend; do
     upper=$(echo "$svc" | tr '[:lower:]' '[:upper:]')
     printf '\\getenv pw %s_DB_PASSWORD\n' "$upper"

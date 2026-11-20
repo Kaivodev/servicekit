@@ -57,6 +57,12 @@ func Generate(directory, domain string, services []string, validFor time.Duratio
 	if err := writePair(directory, "ca", caDER, caKey); err != nil {
 		return err
 	}
+	// Sign leaves with the parsed CA so they carry its generated Subject Key
+	// Identifier as their Authority Key Identifier. Strict X.509 verifiers,
+	// including Python 3.13+ default contexts, reject leaves without it.
+	if ca, err = x509.ParseCertificate(caDER); err != nil {
+		return err
+	}
 	for _, service := range services {
 		dir := filepath.Join(directory, service)
 		if err := os.Mkdir(dir, 0700); err != nil {

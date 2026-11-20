@@ -9,15 +9,39 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import uuid
 from unittest.mock import patch
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import processes
+import stack
+import deposit_scenario as fixture
 import stack_config as cfg
 
 
 class Configuration(unittest.TestCase):
+    def test_demo_routes_and_reader_settings(self):
+        routes = cfg.routes()
+        by_key = {(r["method"], r["path"]): r for r in routes}
+        self.assertEqual(len(by_key), len(routes))
+        bot = [r for r in routes if r["path"].startswith("/bot/")]
+        self.assertEqual(len(bot), 19)
+        contract = cfg.WORKSPACE / "backend/docs/examples/telegram-routes.json"
+        if contract.exists():
+            self.assertEqual(bot, json.loads(contract.read_text()))
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "env").mkdir()
+            cfg.save_env(root / "env/ledger.env", {"AIPAY_GRPC_ADDR": "127.0.0.1:9102"})
+            (root / "deposits.enabled").touch()
+            (root / "deposits.delay-matches").touch()
+            self.assertEqual(processes.service_env(root, "ledger")["AIPAY_LEDGER_RECONCILIATION_ADDR"], "127.0.0.1:1")
+            reader = processes.service_env(root, "ledger-reader")
+            self.assertEqual(reader["AIPAY_GRPC_ADDR"], "127.0.0.1:9122")
+            self.assertEqual(reader["AIPAY_LEDGER_JOBS"], "off")
+            self.assertEqual(processes.command(root,"ledger-reader"), [str(root / "bin/ledger"), "serve"])
+
     def test_profiles(self):
         for compose in (False, True):
             with self.subTest(compose=compose), tempfile.TemporaryDirectory() as tmp:
@@ -41,14 +65,33 @@ class Configuration(unittest.TestCase):
                     with self.assertRaises(FileExistsError):
                         cfg.prepare(root, "", "", "")
                 self.assertEqual(len(cert_calls), 1)
+                if not compose:
+                    tool = dict(line.split("=", 1) for line in files[root / "env/devcollection.env"].splitlines())
+                    self.assertEqual(tool["AIPAY_RPC_ALLOWED_PEERS"], "ledger,reconciliation")
+                    self.assertTrue(tool["AIPAY_DATABASE_URL"].split("?")[0].endswith("/collection_dev"))
+                    self.assertEqual(tool["AIPAY_SIGNING_KEY_ID"], "collection-dev")
+                    self.assertEqual(tool["AIPAY_SIGNING_KEY_FILE"], str(root / "certs/collection/signing.pem"))
+                    self.assertIn("COLLECTION_DEV_DB_PASSWORD=", files[root / "env/provision.env"])
+                    self.assertEqual(files[root / "env/devchain.env"].count("AIPAY_"), 2)
+                else:
+                    self.assertNotIn(root / "env/devcollection.env", files)
                 for name in ("notifier", "collection", "iam", "payment", "reconciliation"):
                     self.assertIn(name, cert_calls[0][cert_calls[0].index("--services") + 1].split(","))
                 envs = {name: dict(line.split("=", 1) for line in files[root / "env" / (name + ".env")].splitlines())
                         for name in cfg.SERVICES}
+                issuer = files[root / "env/iam-sellers.env"]
+                owner = files[root / "env/iam-migrate.env"].removeprefix("AIPAY_DATABASE_URL=")
+                self.assertEqual(issuer, "AIPAY_IAM_SELLERS_DATABASE_URL=" + owner)
+                self.assertNotEqual(owner.strip(), envs["iam"]["AIPAY_DATABASE_URL"])
+                self.assertFalse(any("AIPAY_IAM_SELLERS_DATABASE_URL" in values for values in envs.values()))
                 for svc in cfg.OWNERS:
                     self.assertNotIn("only-in-test", envs[svc]["AIPAY_DATABASE_URL"])
                     self.assertIn("/aipay_" + svc, envs[svc]["AIPAY_DATABASE_URL"])
                 self.assertEqual(envs["payment"]["AIPAY_IAM_EVENT_KEYS_FILE"], envs["ledger"]["AIPAY_IAM_ASSERTION_KEYS_FILE"])
+                ledger_rates = root / "inputs/ledger/usd-rates.json"
+                self.assertEqual(envs["ledger"]["AIPAY_LEDGER_DEV_USD_RATES_FILE"],
+                                 "/run/kaivo/inputs/usd-rates.json" if compose else str(ledger_rates))
+                self.assertEqual(json.loads(files[ledger_rates])[0]["asset"], "USDT")
                 self.assertTrue(envs["reconciliation"]["AIPAY_PAYMENT_EVENT_KEYS_FILE"].endswith("/payment.jwks"))
                 self.assertIn("payment", envs["iam"]["AIPAY_RPC_ALLOWED_PEERS"].split(","))
                 self.assertTrue(envs["payment"]["AIPAY_QUEUE_REDIS_URL"].endswith("/5"))
@@ -65,25 +108,143 @@ class Configuration(unittest.TestCase):
                 self.assertTrue(subprocess.check_output(["openssl", "pkey", "-inform", "DER", "-pubout"], input=der)
                                 == files[root / "handoff/platform-public.pem"])
 
+    def test_upgrade_seller_ceremony_env(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.object(stack, "request", return_value=None):
+            root = Path(tmp)
+            for folder in ("env", "inputs/iam", "inputs/payment"):
+                (root / folder).mkdir(parents=True)
+            cfg.dump(root / "inputs/iam/routes.json", [])
+            for name in ("backend", "payment", "ledger", "notifier"):
+                cfg.save_env(root / "env" / (name + ".env"), {})
+            cfg.save_env(root / "env/iam-migrate.env", {"AIPAY_DATABASE_URL": "iam-owner"})
+            cfg.save_env(root / "env/iam.env", {"AIPAY_DATABASE_URL": "iam-runtime"})
+            for _ in range(2):
+                stack.demo_config(root)
+                self.assertEqual(cfg.read_env(root / "env/iam-sellers.env"),
+                                 {"AIPAY_IAM_SELLERS_DATABASE_URL": "iam-owner"})
+                self.assertEqual(cfg.read_env(root / "env/iam.env"), {"AIPAY_DATABASE_URL": "iam-runtime"})
+                self.assertEqual(cfg.read_env(root / "env/ledger.env")["AIPAY_LEDGER_DEV_USD_RATES_FILE"],
+                                 str(root / "inputs/ledger/usd-rates.json"))
+
+    def test_deposit_phase(self):
+        seller = "019ab233-4567-7890-8123-456789abcdef"
+        with tempfile.TemporaryDirectory() as tmp, patch.object(stack, "request", return_value=None):
+            root = Path(tmp)
+            (root / "env").mkdir()
+            (root / "logs").mkdir()
+            cfg.native_deposit_inputs(root, "postgres://localhost:5432/postgres", {})
+            for name, flag in (("ledger", "AIPAY_LEDGER_DEPOSITS"), ("reconciliation", "AIPAY_RECON_DEPOSITS")):
+                cfg.save_env(root / "env" / (name + ".env"), {flag: "off"})
+                self.assertEqual(processes.service_env(root, name)[flag], "off")
+            self.assertNotIn("devchain", processes.services(root))
+            genesis = int(datetime(2027, 1, 2, 3, 4, 5, tzinfo=timezone.utc).timestamp())
+            with patch.object(fixture, "time", return_value=genesis):
+                stack.deposits(root, seller, None)
+            self.assertEqual(processes.services(root)[:2], ("devchain", "devcollection"))
+            self.assertEqual(processes.command(root, "devchain"), [str(root / "bin/kaivo-devchain"), "serve"])
+            self.assertEqual(processes.command(root, "devcollection"), [str(root / "bin/kaivo-devcollection"), "serve"])
+            env = processes.service_env(root, "reconciliation")
+            self.assertEqual(env["AIPAY_RECON_EVM_CHAIN_ID"], "31337")
+            self.assertEqual(env["AIPAY_RECON_EVM_RPC_URL"], "http://127.0.0.1:8545")
+            self.assertEqual(env["AIPAY_RECON_EVM_REGISTRY_VERSION"], "bsc-usdt-v1")
+            self.assertEqual(env["AIPAY_RECON_SCREENING_MODE"], "development_allow")
+            self.assertEqual(env["AIPAY_RECON_DEPOSITS"], "on")
+            self.assertEqual(processes.service_env(root, "ledger")["AIPAY_LEDGER_DEPOSITS"], "on")
+            binding, = json.loads(Path(env["AIPAY_RECON_BINDINGS_FILE"]).read_text())["bindings"]
+            self.assertEqual((binding["account_id"], binding["valid_from_block"], binding["valid_to_block"]), (seller, 1, 3))
+            chain_file = Path(processes.service_env(root, "devchain")["AIPAY_DEVCHAIN_DATASET"])
+            scenario = json.loads((root / "deposits/scenario.json").read_text())
+            self.assertEqual(scenario["replay_key"], "normal")
+            normal, mismatch = (scenario["receipts"][k] for k in ("normal", "mismatch"))
+            chain = json.loads(chain_file.read_text())
+            timestamps = [int(b["timestamp"], 16) for b in chain["blocks"]]
+            self.assertEqual(timestamps, [genesis, genesis + 3, genesis + 6, genesis + 9])
+            for claim in scenario["receipts"].values():
+                confirmed = datetime.fromtimestamp(timestamps[claim["block_number"]], timezone.utc)
+                self.assertEqual(claim["confirmed_at"], cfg.stamp(confirmed))
+            for claim in (normal, mismatch):
+                log, = chain["receipts"][claim["chain_transaction_id"]]["logs"]
+                self.assertEqual(int(log["logIndex"], 16), claim["transfer_index"])
+                self.assertEqual(log["topics"][2][-40:], binding["deposit_address"][2:])
+                self.assertEqual(str(int(log["data"], 16)) == claim["raw_amount"], claim == normal)
+            self.assertGreater(scenario["receipts"]["unfinalized"]["block_number"], chain["finalized"])
+            spec = json.loads(fixture.SPEC.read_text())
+            spec["transfers"][0]["receipt_raw"] = "900000000000000000000"
+            cfg.dump(root / "changed-spec.json", spec)
+            with patch.object(fixture, "time", return_value=genesis):
+                fixture.generate(root / "changed", seller, root / "changed-spec.json")
+            self.assertEqual((root / "changed/chain.json").read_bytes(), chain_file.read_bytes())
+            self.assertNotEqual((root / "changed/scenario.json").read_bytes(), (root / "deposits/scenario.json").read_bytes())
+            with patch.object(fixture, "time", return_value=genesis + 60):
+                stack.deposits(root, seller, 3)
+                fixture.generate(root / "new", seller)
+            self.assertEqual(json.loads(chain_file.read_text()), chain)
+            self.assertEqual(json.loads((root / "deposits/scenario.json").read_text()), scenario)
+            self.assertEqual(int(json.loads((root / "new/chain.json").read_text())["blocks"][0]["timestamp"], 16), genesis + 60)
+            self.assertEqual(processes.service_env(root, "devchain")["AIPAY_DEVCHAIN_FINALIZED"], "3")
+            with self.assertRaises(ValueError):
+                stack.deposits(root, seller, 4)
+            with self.assertRaises(ValueError):
+                stack.deposits(root, "019ab233-4567-7890-8123-456789abcdee", None)
+            stack.deposits(root, None, None)
+            self.assertEqual(processes.service_env(root, "ledger")["AIPAY_LEDGER_DEPOSITS"], "off")
+            self.assertTrue(chain_file.exists())
+
+    def test_raw_amounts(self):
+        for raw, units in (("1000000000000000000000", 10**9), ("1999999999999", 1),
+                           (str((2**63-1)*10**12), 2**63-1)):
+            self.assertEqual(fixture.ledger_units(raw), units)
+        for raw in ("1", "00", "-1", "1e21", str(2**63*10**12)):
+            with self.assertRaises(ValueError):
+                fixture.ledger_units(raw)
+
     def test_refresh_preserves_original_minutes(self):
-        # These three files contain only synthetic prices, timestamps and public digests.
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            for svc in ("payment", "reconciliation"):
+            for svc in ("payment", "reconciliation", "ledger"):
                 (root / "inputs" / svc).mkdir(parents=True)
             now = datetime(2026, 11, 19, 12, 30, 10, tzinfo=timezone.utc)
             rate = root / "inputs/payment/rate.json"
             market = root / "inputs/reconciliation/market.json"
+            ledger = root / "inputs/ledger/usd-rates.json"
             cfg.refresh(root, now)
-            previous = [p.read_bytes() for p in (rate, market)]
+            previous = [p.read_bytes() for p in (rate, market, ledger)]
+            first = dict(asset="USDT", source_a="dev-a", rate_a="1.0000", source_b="dev-b", rate_b="0.9999",
+                         observed_at="2026-11-19T12:29:00Z")
+            self.assertEqual(json.loads(previous[2]), [first])
             cfg.refresh(root, now + timedelta(seconds=30))
-            self.assertEqual(previous, [p.read_bytes() for p in (rate, market)])
+            self.assertEqual(previous, [p.read_bytes() for p in (rate, market, ledger)])
             cfg.refresh(root, now + timedelta(minutes=1))
             records = json.loads(market.read_text())
             self.assertEqual(len(records), 4)
             self.assertEqual(records[:2], json.loads(previous[1]))
             self.assertEqual(json.loads(rate.read_text())["minute"], records[-1]["minute"])
             self.assertEqual(rate.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(json.loads(ledger.read_text()), [first, first | {"observed_at": records[-1]["minute"]}])
+            self.assertEqual(ledger.stat().st_mode & 0o777, 0o600)
+            # payment internal IDs are UUIDv7; ledger rejects any other rate_snapshot_id.
+            snapshot = json.loads(rate.read_text())["rate_snapshot_id"]
+            parsed = uuid.UUID(snapshot)
+            self.assertEqual((parsed.version, str(parsed)), (7, snapshot))
+            self.assertNotEqual(snapshot, json.loads(previous[0])["rate_snapshot_id"])
+
+    def test_ledger_rate_limit_preserves_history(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "usd-rates.json"
+            minute = datetime(2026, 11, 19, 12, 30, tzinfo=timezone.utc)
+            cfg.append_ledger_rate(path, minute)
+            row, = json.loads(path.read_bytes())
+            # In the compact array each additional row costs its JSON bytes and a comma.
+            row_bytes = len(json.dumps(row, separators=(",", ":")).encode()) + 1
+            count = ((64 << 10) - len(b"]\n")) // row_bytes
+            cfg.dump(path, [row | {"observed_at": cfg.stamp(minute + timedelta(minutes=i))} for i in range(count - 1)])
+            cfg.append_ledger_rate(path, minute + timedelta(minutes=count - 1))
+            full = path.read_bytes()
+            self.assertLessEqual(len(full), 64 << 10)
+            cfg.append_ledger_rate(path, minute)
+            with self.assertRaisesRegex(ValueError, "ledger USD rate history is full"):
+                cfg.append_ledger_rate(path, minute + timedelta(minutes=count))
+            self.assertEqual(path.read_bytes(), full)
 
     def test_provisioning_sql_uses_all_role_envs(self):
         # Capture precisely the stdin sent to psql. No server or credentials are used.
@@ -94,7 +255,12 @@ class Configuration(unittest.TestCase):
             wrapper.chmod(0o700)
             env = {"PATH": tmp + os.pathsep + os.environ["PATH"], "STACK_ID": "test", "CAPTURE_SQL": str(sql)}
             subprocess.run(["sh", str(cfg.LIBRARY / "dev/init-databases.sh")], check=True, env=env)
+            self.assertNotIn("collection_dev", sql.read_text())
+            subprocess.run(["sh", str(cfg.LIBRARY / "dev/init-databases.sh")], check=True,
+                           env=env | {"COLLECTION_DEV_DB_PASSWORD": "fixture"})
             commands = sql.read_text()
+            self.assertIn("\\getenv pw COLLECTION_DEV_DB_PASSWORD", commands)
+            self.assertIn("('collection_dev', 'collection_dev', 'collection_dev')", commands)
             for svc in cfg.OWNERS:
                 self.assertIn("\\getenv pw " + svc.upper() + "_DB_PASSWORD\n", commands)
             for svc in cfg.APP_ROLES:

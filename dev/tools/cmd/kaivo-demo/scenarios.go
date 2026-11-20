@@ -1,0 +1,463 @@
+package main
+
+import (
+	"bytes"
+	"crypto"
+	"crypto/md5"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"encoding/pem"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"path/filepath"
+	"regexp"
+	"strconv"
+	"strings"
+	"time"
+)
+
+func (d *driver) epay(version, path string, v url.Values) object {
+	v.Set("pid", d.required("pid/"+version))
+	if version == "v1" {
+		var keys struct{ Key string }
+		decode(file(filepath.Join(d.dir, "merchant-key.json")), &keys)
+		v.Set("sign_type", "MD5")
+		v.Set("sign", v1Sign(v, keys.Key))
+	} else {
+		v.Set("timestamp", strconv.FormatInt(time.Now().Unix(), 10))
+		v.Set("sign_type", "RSA")
+		plain, ok := canonical(v)
+		require(ok, "invalid V2 parameters")
+		h := sha256.Sum256([]byte(plain))
+		sig, e := rsa.SignPKCS1v15(rand.Reader, d.merchantRSA(), crypto.SHA256, h[:])
+		check(e)
+		v.Set("sign", base64.StdEncoding.EncodeToString(sig))
+	}
+	code, body := d.browser("merchant").http("POST", path, path, "application/x-www-form-urlencoded", form(v), nil)
+	var r object
+	decode(body, &r)
+	if version == "v1" {
+		require(code == 200 && num(r, "code") == 1, fmt.Sprintf("%s HTTP %d EPay code %v", path, code, r["code"]))
+	} else {
+		if code != 200 || r["sign"] == nil {
+			stop("%s HTTP %d EPay code %v", path, code, r["code"])
+		}
+		f := url.Values{}
+		for k, v := range r {
+			f.Set(k, fmt.Sprint(v))
+		}
+		plain, ok := canonical(f)
+		require(ok && f.Get("sign_type") == "RSA", "invalid V2 response parameters")
+		h := sha256.Sum256([]byte(plain))
+		block, _ := pem.Decode(file(filepath.Join(d.root, "handoff/platform-public.pem")))
+		require(block != nil, "missing platform SPKI")
+		key, e := x509.ParsePKIXPublicKey(block.Bytes)
+		check(e)
+		pk, ok := key.(*rsa.PublicKey)
+		require(ok && rsa.VerifyPKCS1v15(pk, crypto.SHA256, h[:], standard(str(r, "sign"))) == nil, "invalid platform signature")
+		pending := (path == "/api/pay/refund" || path == "/api/pay/close") && num(r, "code") == -1 && r["msg"] == "结果待确认"
+		if pending {
+			d.trace("EPay signed pending result; await owner evidence")
+		}
+		require(num(r, "code") == 0 || pending, fmt.Sprintf("%s EPay code %v", path, r["code"]))
+	}
+	return r
+}
+func (d *driver) sim(method, path string, data object) []byte {
+	var cfg object
+	decode(file(filepath.Join(d.root, "inputs/upstream-sim/config.json")), &cfg)
+	var body []byte
+	if data != nil {
+		body = encoded(data)
+	}
+	req, e := http.NewRequest(method, "http://127.0.0.1:9080"+path, bytes.NewReader(body))
+	check(e)
+	req.Header.Set("Authorization", "Bearer "+str(cfg, "control_token"))
+	req.Header.Set("Content-Type", "application/json")
+	res, e := localHTTP.Do(req)
+	require(e == nil, "sim transport failed")
+	defer res.Body.Close()
+	d.trace(fmt.Sprintf("%s %s → HTTP %d", method, path, res.StatusCode))
+	require(res.StatusCode >= 200 && res.StatusCode < 300, "sim rejected request")
+	b, e := io.ReadAll(io.LimitReader(res.Body, 2<<20))
+	check(e)
+	return b
+}
+func (d *driver) cashier(link string, pay bool) {
+	u, e := url.Parse(link)
+	require(e == nil && u.Scheme == "https" && u.Host == "127.0.0.1:9443" && u.User == nil && u.RawQuery == "" && u.Fragment == "" && regexp.MustCompile(`^/cashier/[A-Za-z0-9_-]+$`).MatchString(u.EscapedPath()), "unexpected cashier link")
+	roots := x509.NewCertPool()
+	require(roots.AppendCertsFromPEM(file(filepath.Join(d.root, "certs/ca.crt"))), "missing cashier CA")
+	tr := &http.Transport{TLSClientConfig: &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12}}
+	defer tr.CloseIdleConnections()
+	c := &http.Client{Transport: tr, Timeout: 8 * time.Second, CheckRedirect: localHTTP.CheckRedirect}
+	methods := []string{"GET"}
+	if pay {
+		methods = append(methods, "POST")
+	}
+	for _, method := range methods {
+		req, e := http.NewRequest(method, link, nil)
+		check(e)
+		res, e := c.Do(req)
+		require(e == nil, "cashier TLS request failed")
+		res.Body.Close()
+		d.trace(fmt.Sprintf("%s /cashier/{token} → HTTP %d", method, res.StatusCode))
+		require(res.StatusCode == 200, "cashier rejected request")
+	}
+}
+
+type tradeRun struct {
+	d                                *driver
+	name, proto, number, order, link string
+}
+
+func (t tradeRun) step(label string, f func()) { t.d.step(t.name+" "+label, f) }
+func (d *driver) trade(name, proto string) tradeRun {
+	t := tradeRun{d: d, name: name, proto: proto, number: d.key(d.scope + "/" + name)}
+	k := d.scope + "/" + name
+	t.step("余额基线", func() {
+		snap := d.balanceSnapshot(k + "/before")
+		d.put("balances/"+k, snap)
+		d.evidence("before", snap)
+	})
+	t.step("下单与冻结", func() {
+		v := url.Values{"out_trade_no": {t.number}, "type": {"alipay"}, "name": {"阶段二担保"}, "money": {"1.00"}, "notify_url": {notifyOrigin + "/notify"}, "return_url": {"https://merchant.aipay.test/return"}, "clientip": {"127.0.0.1"}, "method": {"web"}}
+		path := "/mapi.php"
+		link := "payurl"
+		if proto == "v2" {
+			path = "/api/pay/create"
+			link = "pay_info"
+		}
+		r := d.epay(proto, path, v)
+		if proto == "v1" && r[link] == nil {
+			link = "qrcode"
+		}
+		d.put("trade-no/"+k, str(r, "trade_no"))
+		d.put("cashier/"+k, str(r, link))
+		d.evidence("trade_no", str(r, "trade_no"))
+		d.cashier(str(r, link), false)
+		orders := d.bot(k+"/orders", "/orders "+d.required("business")+" "+d.required("app/"+proto))
+		order := capture("(?m)^("+uuidPattern+") · [^\n]*商户单号 "+regexp.QuoteMeta(t.number)+" ·", orders)
+		d.put("order/"+k, order)
+		hold := d.ledgerTrade(order)
+		require(hold != nil && str(hold, "status") == "RESERVED" && str(hold, "seller_account_id") == d.required("seller-account") && str(hold, "account_id") == d.required("merchant-account"), "not the expected frozen order")
+		var base object
+		d.read("balances/"+k, &base)
+		require(units(d.sellerBalance(), "available_usdt_micro") == num(base, "seller")-num(hold, "escrow_usdt"), "seller Q was not reserved")
+		d.evidence("seller_hold_platform_quote_and_ledger_posting", hold)
+	})
+	t.link = d.required("cashier/" + k)
+	t.order = d.required("order/" + k)
+	return t
+}
+func (t tradeRun) paid(copies int) {
+	d := t.d
+	t.step("收银与主动查单", func() {
+		if copies > 1 {
+			d.sim("PUT", "/__test/scenarios/md5-demo/"+t.order, object{"callback_copies": copies})
+		}
+		d.cashier(t.link, true)
+		waitFor("acknowledged callback copies and ledger OrderPaid", 60*time.Second, func() bool {
+			var rows []object
+			decode(d.sim("GET", "/__test/deliveries", nil), &rows)
+			matches := []object{}
+			event := ""
+			for _, r := range rows {
+				if r["order_id"] == t.order && r["ack"] == true {
+					if event == "" {
+						event = str(r, "event_id")
+					}
+					require(str(r, "event_id") == event, "callback copy event ID mismatch")
+					matches = append(matches, r)
+				}
+			}
+			v := d.ledgerTrade(t.order)
+			if len(matches) >= copies && v["paid_verified_at"] != nil {
+				paid := d.rows("ledger", "ledger_trade_payments", "SELECT source_event_id,source_sequence,expected_version,paid_verified_at,encode(query_evidence_sha256,'hex') AS query_evidence_sha256 FROM ledger_trade_payments WHERE order_id=$1", t.order)
+				events := d.rows("payment", "payment_outbox", "SELECT event_id,sequence FROM payment_outbox WHERE event_type='OrderPaid' AND order_id=$1", t.order)
+				require(len(paid) == 1 && len(events) == 1 && paid[0]["source_event_id"] == events[0]["event_id"] && paid[0]["source_sequence"] == events[0]["sequence"], "OrderPaid evidence mismatch")
+				d.evidence("active_query_and_OrderPaid", paid)
+				d.evidence("upstream_callbacks", matches)
+				d.chainEvidence(t.order)
+				return true
+			}
+			return false
+		})
+	})
+}
+func (t tradeRun) terminal(status string) {
+	d := t.d
+	waitFor(status, 2*time.Minute, func() bool { return d.ledgerTrade(t.order)["status"] == status })
+	d.chainEvidence(t.order)
+}
+func (t tradeRun) finish(released bool) {
+	d := t.d
+	k := d.scope + "/" + t.name
+	var before object
+	require(d.read("balances/"+k, &before), "missing baseline")
+	after := normalized(d.balanceSnapshot(k + "/after/" + id()))
+	h := d.ledgerTrade(t.order)
+	q, n, f := num(h, "escrow_usdt"), num(h, "recipient_usdt"), num(h, "platform_fee_usdt")
+	require(q == n+f, "Q differs from N+F")
+	if !released {
+		q, n, f = 0, 0, 0
+	}
+	d.evidence("after", after)
+	require(num(after, "seller") == num(before, "seller")-q && num(after, "merchant") == num(before, "merchant")+n && num(after, "ledger_fee_accounts") == num(before, "ledger_fee_accounts")+f, "final seller, merchant or fee balance mismatch")
+}
+func (t tradeRun) release() {
+	t.step("风控到期与独立放币", func() {
+		t.terminal("RELEASED")
+		h := t.d.ledgerTrade(t.order)
+		require(h["risk_release_at"] != nil && num(h, "released_seq") > num(h, "reserve_seq"), "missing release journal")
+		auth := t.d.rows("reconciliation", "reconciliation_authorizations/outbox", "SELECT a.authorization_id,a.control_version,a.issued_at,o.sequence FROM reconciliation_authorizations a JOIN reconciliation_outbox o ON o.event_id=a.authorization_id WHERE a.order_id=$1 AND a.event_type='TradeReleaseAuthorized'", t.order)
+		require(len(auth) == 1, "expected one independent release authorization")
+		issued, e := time.Parse(time.RFC3339Nano, str(auth[0], "issued_at"))
+		check(e)
+		deadline, e := time.Parse(time.RFC3339Nano, str(h, "risk_release_at"))
+		check(e)
+		require(!issued.Before(deadline), "release authorization predates risk deadline")
+		calls := t.d.rows("reconciliation", "reconciliation_verification_evidence", "SELECT id,verified_at FROM reconciliation_verification_evidence WHERE order_id=$1 AND eligible AND operation='query_payment' AND convert_from(record_json,'UTF8')::jsonb->>'Outcome'='paid'", t.order)
+		require(len(calls) > 0, "missing independent paid verification")
+		t.d.evidence("reconciliation_release", auth)
+		t.finish(true)
+	})
+}
+func (t tradeRun) notify() {
+	t.step("商户验签回执", func() {
+		waitFor("signed merchant notification", 90*time.Second, func() bool {
+			rs, e := readRecords[receipt](filepath.Join(t.d.dir, "notifications.json"))
+			check(e)
+			for _, r := range rs {
+				if r.MerchantOrder == t.number && r.Trade == t.d.required("trade-no/"+t.d.scope+"/"+t.name) && r.Money == "1.00" && r.PID == t.d.required("pid/v1") {
+					t.d.evidence("merchant_receipt", r)
+					return true
+				}
+			}
+			return false
+		})
+	})
+}
+func (d *driver) cancel(late bool) {
+	name := "未付"
+	if late {
+		name = "迟付"
+	}
+	t := d.trade(name, "v2")
+	t.step("关单", func() {
+		if late {
+			d.sim("PUT", "/__test/scenarios/md5-demo/"+t.order, object{"late_payment": true})
+		}
+		d.epay("v2", "/api/pay/close", url.Values{"out_trade_no": {t.number}})
+	})
+	const obs = "SELECT id,verified_at,convert_from(record_json,'UTF8')::jsonb->>'Outcome' AS outcome FROM reconciliation_verification_evidence WHERE order_id=$1 AND operation='query_payment' ORDER BY verified_at"
+	if !late {
+		t.step("二次未付核验并归还", func() {
+			t.terminal("CANCELLED")
+			rows := d.rows("reconciliation", "reconciliation_verification_evidence", obs, t.order)
+			var first, last time.Time
+			for _, r := range rows {
+				if r["outcome"] == "closed_unpaid" {
+					v, e := time.Parse(time.RFC3339Nano, str(r, "verified_at"))
+					check(e)
+					if first.IsZero() {
+						first = v
+					}
+					last = v
+				}
+			}
+			require(!first.IsZero() && last.Sub(first) >= 5*time.Second, "missing two separated closed/unpaid observations")
+			d.evidence("independent_observations", rows)
+			t.finish(false)
+		})
+		return
+	}
+	t.step("两次观察之间迟付", func() {
+		waitFor("first independent closed/unpaid", time.Minute, func() bool {
+			rs := d.rows("reconciliation", "reconciliation_verification_evidence", obs, t.order)
+			count := 0
+			for _, r := range rs {
+				if r["outcome"] == "closed_unpaid" {
+					count++
+				}
+			}
+			require(count < 2, "second unpaid observation already occurred")
+			if count == 1 {
+				observed, e := time.Parse(time.RFC3339Nano, str(rs[len(rs)-1], "verified_at"))
+				check(e)
+				require(time.Now().Before(observed.Add(5*time.Second)), "late-payment window already closed")
+				d.evidence("first_observation", rs)
+				return true
+			}
+			return false
+		})
+		d.cashier(t.link, true)
+		waitFor("independent recheck after late payment", time.Minute, func() bool {
+			rs := d.rows("reconciliation", "reconciliation_verification_evidence", obs, t.order)
+			if len(rs) >= 2 && rs[len(rs)-1]["outcome"] == "paid" {
+				d.evidence("independent_observations", rs)
+				return true
+			}
+			return false
+		})
+		d.chainEvidence(t.order)
+		require(d.ledgerTrade(t.order)["status"] != "CANCELLED" && len(d.rows("ledger", "ledger_trade_authorizations", "SELECT source_event_id FROM ledger_trade_authorizations WHERE order_id=$1 AND event_type='TradeCancellationAuthorized'", t.order)) == 0, "late payment released escrow as unpaid")
+		d.evidence("after", d.balanceSnapshot(d.scope+"/late"))
+	})
+}
+func (d *driver) refund(after bool) {
+	t := d.trade("退款", "v2")
+	t.paid(1)
+	branch := "PRE_RELEASE"
+	if after {
+		t.release()
+		branch = "POST_RELEASE"
+	}
+	t.step("全额退款", func() {
+		h := d.ledgerTrade(t.order)
+		if !after {
+			require(h["released_seq"] == nil, "order already released")
+		}
+		d.epay("v2", "/api/pay/refund", url.Values{"out_trade_no": {t.number}, "out_refund_no": {t.number}, "money": {"1.00"}})
+	})
+	t.step("独立核实并核销", func() {
+		t.terminal("REFUNDED")
+		verified := d.rows("reconciliation", "reconciliation_verification_evidence", "SELECT id,verified_at FROM reconciliation_verification_evidence WHERE order_id=$1 AND eligible AND operation='query_refund' AND convert_from(record_json,'UTF8')::jsonb->>'Outcome'='refund_succeeded'", t.order)
+		require(len(verified) > 0, "missing independent successful refund query")
+		d.evidence("verified_refund", verified)
+		r := d.rows("ledger", "ledger_trade_refunds", "SELECT branch,reserved_usdt,reserve_seq FROM ledger_trade_refunds WHERE order_id=$1", t.order)
+		require(len(r) == 1 && r[0]["branch"] == branch, "wrong refund reservation branch")
+		if after {
+			require(num(r[0], "reserved_usdt") == num(d.ledgerTrade(t.order), "recipient_usdt"), "merchant reserve differs from N")
+		}
+		d.epay("v2", "/api/pay/refundquery", url.Values{"out_refund_no": {t.number}})
+		t.finish(false)
+	})
+	if after {
+		d.insufficient()
+	}
+}
+func (d *driver) dispute() {
+	t := d.trade("争议", "v1")
+	t.paid(1)
+	t.step("登记争议与双方举证", func() {
+		h := d.ledgerTrade(t.order)
+		require(h["released_seq"] == nil, "dispute needs original escrow")
+		recipient := d.bot("recipient-order", "/order "+d.required("app/v1")+" "+t.order)
+		r := d.browser("operations").write("dispute", "/disputes", func() object {
+			return object{"order_id": t.order, "escrow_reservation_id": str(h, "escrow_reservation_id"), "expected_control_version": num(h, "control_version"), "reason": "核对本单收款状态", "evidence": object{"recipient_evidence": b64.EncodeToString([]byte(recipient)), "investigation": "商户本人订单查询记录"}}
+		})
+		di := str(r, "dispute_id")
+		d.put("dispute/"+t.order, di)
+		b := d.browser("seller")
+		p := "/accounts/" + d.required("seller-account")
+		record := b.api("GET", p+"/orders/"+t.order, "", nil)
+		path := p + "/disputes/" + di
+		v := b.api("GET", path, "", nil)
+		b.write("seller-evidence", path+"/evidence", func() object {
+			return object{"expected_evidence_version": num(v, "evidence_version"), "evidence": b64.EncodeToString(encoded(record))}
+		})
+	})
+	t.step("裁决双批与复核", func() {
+		p := "/disputes/" + d.required("dispute/"+t.order)
+		d.browser("risk").approve("ruling", "payment", p+"/rulings", "/dispute-rulings", object{"expected_control_version": num(d.ledgerTrade(t.order), "control_version"), "outcome": "release_to_original_recipient", "reason": "双方真实订单记录一致"})
+		t.terminal("RELEASED")
+		t.finish(true)
+	})
+}
+func (d *driver) run(s string) {
+	var complete bool
+	if d.read("finished/"+s, &complete) && complete {
+		return
+	}
+	d.liveStep("场景会话与行情", func() {
+		d.required("seller-account")
+		d.required("merchant-account")
+		d.login("seller")
+		d.login("operations")
+		// IAM ends an idle Telegram session after 30 minutes. A merchant logs in
+		// again with /start, which is idempotent for an existing registration.
+		reply := d.bot(fmt.Sprintf("session/%s/%d", s, time.Now().UnixNano()), "/start")
+		require(strings.Contains(reply, "注册或登录已完成"), "merchant Telegram login refused")
+		d.stack("refresh-market")
+	})
+	switch s {
+	case "main", "duplicates":
+		t := d.trade("担保", "v1")
+		copies := 1
+		if s == "duplicates" {
+			copies = 3
+		}
+		t.paid(copies)
+		t.notify()
+		t.release()
+		if s == "duplicates" {
+			d.duplicateEnvelope()
+			d.staleAuthorization()
+		}
+	case "cancel":
+		d.cancel(false)
+		d.cancel(true)
+	case "refund-before-release", "refund-after-release":
+		d.refund(s == "refund-after-release")
+	case "dispute":
+		d.dispute()
+	}
+	d.put("finished/"+s, true)
+}
+
+// This branch can resume after an independently authorized spend of the recipient funds.
+func (d *driver) insufficient() {
+	t := d.trade("余额不足样本", "v2")
+	t.paid(1)
+	t.release()
+	t.step("可用不足时不先退法币", func() {
+		balance := d.bot("insufficient/balance/"+id(), "/balance")
+		available := micro(capture(`(?m)^可用 ([0-9]+\.[0-9]{6})$`, balance))
+		hold := d.ledgerTrade(t.order)
+		n := num(hold, "recipient_usdt")
+		d.evidence("required_N", n)
+		d.evidence("merchant_available", available)
+		require(str(hold, "status") == "RELEASED", "negative sample must still be released")
+		require(available < n, "merchant still has N; clean stack has no merchant spending/withdrawal entry. Resume this sample only after an independently authorized debit")
+		v := d.epay("v2", "/api/pay/refund", url.Values{"out_trade_no": {t.number}, "money": {"1.00"}, "out_refund_no": {t.number}})
+		require(v["msg"] == "结果待确认", "unexpected outcome for insufficient balance")
+		p := "/accounts/" + d.required("seller-account") + "/refunds?order_id=" + t.order
+		var refund string
+		waitFor("payment attempted the original refund reserve", 45*time.Second, func() bool {
+			list := d.browser("seller").api("GET", p, "", nil)
+			items, _ := list["items"].([]any)
+			for _, v := range items {
+				f := obj(v)
+				if f["order_id"] == t.order && f["status"] == "unknown" && f["upstream_refund_id"] == nil {
+					refund = str(f, "refund_id")
+					return true
+				}
+			}
+			return false
+		})
+		require(len(d.rows("ledger", "ledger_trade_refunds", "SELECT reserve_seq FROM ledger_trade_refunds WHERE order_id=$1", t.order)) == 0, "unexpected debit reservation")
+		var credentials map[string]string
+		decode(file(filepath.Join(d.root, "handoff/query.json")), &credentials)
+		fields := url.Values{"account_id": {"md5-demo"}, "operation": {"refund-query"}, "order_id": {t.order}, "refund_id": {refund}}
+		require(credentials["query_key"] != "", "missing independent query credential")
+		sum := md5.Sum([]byte(fields.Encode() + "&key=" + credentials["query_key"]))
+		fields.Set("sign", hex.EncodeToString(sum[:]))
+		resp, e := localHTTP.PostForm("http://127.0.0.1:9080/api/md5-demo/refund-query", fields)
+		require(e == nil, "sim refund-query unavailable")
+		defer resp.Body.Close()
+		var fact object
+		e = json.NewDecoder(resp.Body).Decode(&fact)
+		require(e == nil && resp.StatusCode == 200 && fact["result"] == "rejected" && fact["code"] == "not_found", "simulator has a fiat refund or the read was inconclusive")
+		d.evidence("sim_refund_query", object{"refund_id": refund, "code": "not_found"})
+		d.chainEvidence(t.order)
+	})
+}

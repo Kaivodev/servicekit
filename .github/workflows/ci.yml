@@ -33,9 +33,10 @@ jobs:
           go-version: "1.27.x"
       - run: test -z "$(gofmt -l .)"
       - name: Unit and transport checks
-        run: ./script/with-private-modules.sh make check
+        run: ./script/with-private-modules.sh make check build
         env:
           AIPAY_MODULES_TOKEN: ${{ secrets.AIPAY_MODULES_TOKEN }}
+      - run: python3 -B dev/native/test_stack.py -v
       - name: Storage, tracing and queue integration
         run: ./script/with-private-modules.sh make test-integration
         env:
