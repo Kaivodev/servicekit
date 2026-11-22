@@ -94,10 +94,13 @@ type result struct {
 }
 type report struct {
 	Scenario, Started, Logs string
+	Checks                  []string `json:"checks,omitempty"`
+	SourceNotes             []string `json:"source_notes,omitempty"`
 	Steps                   []*result
 }
 type driver struct {
 	root, repo, dir, scope string
+	output                 string
 	data                   map[string]json.RawMessage
 	history                report
 	active                 *result
@@ -140,6 +143,16 @@ func (d *driver) report() {
 	check(atomic(out+".json", b))
 	var md strings.Builder
 	fmt.Fprintf(&md, "# %s\n\n%s\n\n日志目录 %s\n", d.scope, d.history.Started, d.history.Logs)
+	if len(d.history.Checks) > 0 {
+		fmt.Fprint(&md, "\n## 验收步骤与证据\n\n")
+		for _, item := range d.history.Checks {
+			fmt.Fprintln(&md, "-", item)
+		}
+		fmt.Fprint(&md, "\n## 服务端源码疑点（待实测）\n\n")
+		for _, item := range d.history.SourceNotes {
+			fmt.Fprintln(&md, "-", item)
+		}
+	}
 	for _, s := range d.history.Steps {
 		fmt.Fprintf(&md, "\n## %s · %s\n\n", s.Name, s.Status)
 		for _, r := range s.Requests {
@@ -155,6 +168,13 @@ func (d *driver) report() {
 		}
 	}
 	check(atomic(out+".md", []byte(md.String())))
+	if d.output != "" {
+		data := []byte(md.String())
+		if strings.EqualFold(filepath.Ext(d.output), ".json") {
+			data = b
+		}
+		check(atomic(d.output, data))
+	}
 }
 func (d *driver) liveStep(name string, f func()) { d.executeStep(name, false, f) }
 func (d *driver) step(name string, f func())     { d.executeStep(name, true, f) }

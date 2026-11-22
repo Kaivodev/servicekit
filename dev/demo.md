@@ -27,14 +27,19 @@
 | refund-before-release | V2 收银付款后、放币前请求全额 /api/pay/refund。查核 ledger PRE_RELEASE 占用、reconciliation 查退款、最终分录、/api/pay/refundquery 和余额复原 | 已编排，待验证机 |
 | refund-after-release | V2 放币后先核对 N、F，再全额退款。ledger 的 POST_RELEASE 预留等于 N。核实后商户和费用冲销、卖方恢复 Q。第二笔单要求商户实际可用低于 N 才发退款，核对无预留及模拟器独立 refund-query 查无退款 | 正常分支待运行。干净栈缺少可让商户实际支用该余额的入口；驱动保存该笔样本供真实支用后续跑 |
 | dispute | 运营登记原单和商户 /order 证据，卖方在本人门户追加原单证据。风控人员提交放给原收款人的裁决，两名审批人签署，等待 reconciliation 复核与 ledger 落账 | 已编排，待验证机 |
+| dispute-refund-before-release | 已付款、未放币时登记争议，双方举证后双批退款。A118 将 DISPUTED 原子交接为 PRE_RELEASE 预留 Q。独立查退款成功并签发授权后，ledger 只核销一次，卖方恢复 Q，商户与费用余额不变 | 2026-11-22 本机进程栈通过 |
+| dispute-refund-after-release | 放币后通过平台登记争议，核对原收款账户按争议 ID 从可用冻结 N 到 user_risk_held。双方举证、双批退款后，A119 将冻结转为 POST_RELEASE 预留 N。核销时冲回三项费用 F、卖方恢复 Q，原冻结与退款预留均结清 | 2026-11-22 本机进程栈通过（N=137500、F=2777、Q=140277） |
 | duplicates | 原单三份相同回调，待放币核对一次资金效果。另让两个真实 ledger 拉取器读取同一 collection 签名信封，核对完整字节摘要、游标冲突和唯一分录。另一笔单暂缓 ledger 拉取 matches，真实授权签发后由运营登记争议，再恢复拉取，要求原授权因旧版本隔离。风控人员以当前版本提交裁决，两名审批人签署，只有新授权可入账 | 已编排，双读协调有单测；两副本对同一数据库的游标竞争和旧授权隔离待验证机 |
 
 ## 报告和取证
 
 - 报告记录真实步骤、入口、HTTP 状态、backend 业务码或协议错误、请求关联 ID、各步骤的余额和证据。错误时查状态目录 `logs/<服务>/process.log` 和 `logs/<服务>/runtime.log`。认证材料和模拟器收银令牌只进入私有状态。
-- 商户本人通过 bot /balance、/orders、/order 取证，卖方通过 `accounts/{seller_account_id}/balance`、`holds?order_id=…` 和订单详情取证。平台订单快照提供原收款账户和锁定报价 Q/N/F。退款查询使用签名的 V2 请求。
+- 商户本人通过 bot /balance、/orders、/order 取证，卖方通过 `accounts/{seller_account_id}/balance`、`holds?order_id=…` 和订单详情取证。平台订单快照提供原收款账户和锁定报价 Q/N/F。商户主动退款场景使用签名的 V2 退款查询。
 - 服务缺少对外读模型的证据在显式 PostgreSQL READ ONLY 事务中读取。payment_outbox 给出事件类型、ID 与 sequence。reconciliation_verification_evidence、reconciliation_authorizations、reconciliation_outbox 给出独立查单、签发时刻及 sequence。ledger_trade_authorizations、ledger_trade_refunds、ledger_trade_reservations 给出执行版本、预留与释放分录。ledger_balances 汇总原三项平台费用；预存另查 ledger_inbox、ledger_trade_deposits 和 ledger_trade_unmatched_receipts。IAM 封存摘要仅用于恢复同一次开通仪式。
-- 所有场景均待验证机 PostgreSQL 18 验收。本轮隔离实例在 initdb 的共享内存创建处被沙箱拒绝。
+- 争议退款的派发顺序使用同一 PostgreSQL 实例的数据库时钟。ledger 在写入预留后、同事务提交前记录交接成功审计。payment 的退款记录须持有同一预留 ID 和 seq，才能进入派发阶段。首次 `refund.dispatch_granted` 记录在上游调用之前，其时间必须严格晚于交接审计。PRE_RELEASE 的 reserve_seq 属于原担保，退款创建时间取自批准时间，两者都不能给出这次交接的时刻。
+- 单独记录 `DisputeRulingApproved` 的 disposition 和 reason，例如 `refund_execution_unsupported` 或 `no_matching_pre_release_dispute`。若读取时尚未处置，报告保留该状态。验收使用独立的 `query_refund` 记录、授权所引用的同一证据摘要、模拟器只读 `refund-query` 返回的原单号、退款号与全额，以及授权对应的唯一核销分录。放币后用风控冻结的 final_seq 和退款预留的 final_seq 分别核实转换与结清。
+- 每份争议退款报告附有可能影响执行的服务端源码位置和判断依据。放币后登记若返回 404、405 或 501，场景在平台入口以“缺入口”结束。404 也可能表示属主找不到原单，409 可能来自控制版本冲突，需结合报告里的订单状态、版本和请求 ID 定位。
+- 2026-11-20 原有场景的实测结果见[验证机记录](README.md#2026-11-20-阶段-2-演示验收)。本轮两个争议退款场景的资金终态和运行证据待验证机 PostgreSQL 18 采集。
 
 ## 卖方预存验收
 

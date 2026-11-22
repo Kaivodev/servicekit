@@ -119,7 +119,10 @@ type tradeRun struct {
 	name, proto, number, order, link string
 }
 
-func (t tradeRun) step(label string, f func()) { t.d.step(t.name+" "+label, f) }
+func (t tradeRun) step(label string, f func()) *result {
+	t.d.step(t.name+" "+label, f)
+	return t.d.active
+}
 func (d *driver) trade(name, proto string) tradeRun {
 	t := tradeRun{d: d, name: name, proto: proto, number: d.key(d.scope + "/" + name)}
 	k := d.scope + "/" + name
@@ -198,7 +201,7 @@ func (t tradeRun) terminal(status string) {
 	waitFor(status, 2*time.Minute, func() bool { return d.ledgerTrade(t.order)["status"] == status })
 	d.chainEvidence(t.order)
 }
-func (t tradeRun) finish(released bool) {
+func (t tradeRun) finish(released bool) object {
 	d := t.d
 	k := d.scope + "/" + t.name
 	var before object
@@ -211,10 +214,16 @@ func (t tradeRun) finish(released bool) {
 		q, n, f = 0, 0, 0
 	}
 	d.evidence("after", after)
-	require(num(after, "seller") == num(before, "seller")-q && num(after, "merchant") == num(before, "merchant")+n && num(after, "ledger_fee_accounts") == num(before, "ledger_fee_accounts")+f, "final seller, merchant or fee balance mismatch")
+	checkBalanceDelta(before, after, -q, n, f)
+	return after
 }
-func (t tradeRun) release() {
-	t.step("风控到期与独立放币", func() {
+
+func checkBalanceDelta(before, after object, seller, merchant, fees int64) {
+	require(num(after, "seller")-num(before, "seller") == seller && num(after, "merchant")-num(before, "merchant") == merchant &&
+		num(after, "ledger_fee_accounts")-num(before, "ledger_fee_accounts") == fees, "卖方可用、商户可用或三项费用余额变化不符")
+}
+func (t tradeRun) release() object {
+	step := t.step("风控到期与独立放币", func() {
 		t.terminal("RELEASED")
 		h := t.d.ledgerTrade(t.order)
 		require(h["risk_release_at"] != nil && num(h, "released_seq") > num(h, "reserve_seq"), "missing release journal")
@@ -230,6 +239,7 @@ func (t tradeRun) release() {
 		t.d.evidence("reconciliation_release", auth)
 		t.finish(true)
 	})
+	return obj(step.Evidence["after"])
 }
 func (t tradeRun) notify() {
 	t.step("商户验签回执", func() {
@@ -345,18 +355,23 @@ func (d *driver) refund(after bool) {
 		d.insufficient()
 	}
 }
-func (d *driver) dispute() {
-	t := d.trade("争议", "v1")
-	t.paid(1)
+func (t tradeRun) registerDispute(after bool) {
+	d := t.d
 	t.step("登记争议与双方举证", func() {
-		h := d.ledgerTrade(t.order)
-		require(h["released_seq"] == nil, "dispute needs original escrow")
-		recipient := d.bot("recipient-order", "/order "+d.required("app/v1")+" "+t.order)
 		r := d.browser("operations").write("dispute", "/disputes", func() object {
+			h := d.ledgerTrade(t.order)
+			d.evidence("登记前的订单担保", h)
+			if after {
+				require(h["status"] == "RELEASED" && num(h, "released_seq") > 0, "登记放币后争议需要已放币的原单")
+			} else {
+				require(h["released_seq"] == nil, "dispute needs original escrow")
+			}
+			recipient := d.bot("recipient-order", "/order "+d.required("app/"+t.proto)+" "+t.order)
 			return object{"order_id": t.order, "escrow_reservation_id": str(h, "escrow_reservation_id"), "expected_control_version": num(h, "control_version"), "reason": "核对本单收款状态", "evidence": object{"recipient_evidence": b64.EncodeToString([]byte(recipient)), "investigation": "商户本人订单查询记录"}}
 		})
 		di := str(r, "dispute_id")
 		d.put("dispute/"+t.order, di)
+		d.evidence("dispute_id", di)
 		b := d.browser("seller")
 		p := "/accounts/" + d.required("seller-account")
 		record := b.api("GET", p+"/orders/"+t.order, "", nil)
@@ -366,6 +381,11 @@ func (d *driver) dispute() {
 			return object{"expected_evidence_version": num(v, "evidence_version"), "evidence": b64.EncodeToString(encoded(record))}
 		})
 	})
+}
+func (d *driver) dispute() {
+	t := d.trade("争议", "v1")
+	t.paid(1)
+	t.registerDispute(false)
 	t.step("裁决双批与复核", func() {
 		p := "/disputes/" + d.required("dispute/"+t.order)
 		d.browser("risk").approve("ruling", "payment", p+"/rulings", "/dispute-rulings", object{"expected_control_version": num(d.ledgerTrade(t.order), "control_version"), "outcome": "release_to_original_recipient", "reason": "双方真实订单记录一致"})
@@ -373,6 +393,29 @@ func (d *driver) dispute() {
 		t.finish(true)
 	})
 }
+
+var scenarios = map[string]func(*driver){
+	"main": func(d *driver) { d.releasedTrade(1) },
+	"duplicates": func(d *driver) {
+		d.releasedTrade(3)
+		d.duplicateEnvelope()
+		d.staleAuthorization()
+	},
+	"cancel":                        func(d *driver) { d.cancel(false); d.cancel(true) },
+	"refund-before-release":         func(d *driver) { d.refund(false) },
+	"refund-after-release":          func(d *driver) { d.refund(true) },
+	"dispute":                       (*driver).dispute,
+	"dispute-refund-before-release": func(d *driver) { d.disputeRefund(false) },
+	"dispute-refund-after-release":  func(d *driver) { d.disputeRefund(true) },
+}
+
+func (d *driver) releasedTrade(copies int) {
+	t := d.trade("担保", "v1")
+	t.paid(copies)
+	t.notify()
+	t.release()
+}
+
 func (d *driver) run(s string) {
 	var complete bool
 	if d.read("finished/"+s, &complete) && complete {
@@ -389,28 +432,7 @@ func (d *driver) run(s string) {
 		require(strings.Contains(reply, "注册或登录已完成"), "merchant Telegram login refused")
 		d.stack("refresh-market")
 	})
-	switch s {
-	case "main", "duplicates":
-		t := d.trade("担保", "v1")
-		copies := 1
-		if s == "duplicates" {
-			copies = 3
-		}
-		t.paid(copies)
-		t.notify()
-		t.release()
-		if s == "duplicates" {
-			d.duplicateEnvelope()
-			d.staleAuthorization()
-		}
-	case "cancel":
-		d.cancel(false)
-		d.cancel(true)
-	case "refund-before-release", "refund-after-release":
-		d.refund(s == "refund-after-release")
-	case "dispute":
-		d.dispute()
-	}
+	scenarios[s](d)
 	d.put("finished/"+s, true)
 }
 
@@ -445,19 +467,40 @@ func (d *driver) insufficient() {
 			return false
 		})
 		require(len(d.rows("ledger", "ledger_trade_refunds", "SELECT reserve_seq FROM ledger_trade_refunds WHERE order_id=$1", t.order)) == 0, "unexpected debit reservation")
-		var credentials map[string]string
-		decode(file(filepath.Join(d.root, "handoff/query.json")), &credentials)
-		fields := url.Values{"account_id": {"md5-demo"}, "operation": {"refund-query"}, "order_id": {t.order}, "refund_id": {refund}}
-		require(credentials["query_key"] != "", "missing independent query credential")
-		sum := md5.Sum([]byte(fields.Encode() + "&key=" + credentials["query_key"]))
-		fields.Set("sign", hex.EncodeToString(sum[:]))
-		resp, e := localHTTP.PostForm("http://127.0.0.1:9080/api/md5-demo/refund-query", fields)
-		require(e == nil, "sim refund-query unavailable")
-		defer resp.Body.Close()
-		var fact object
-		e = json.NewDecoder(resp.Body).Decode(&fact)
-		require(e == nil && resp.StatusCode == 200 && fact["result"] == "rejected" && fact["code"] == "not_found", "simulator has a fiat refund or the read was inconclusive")
+		fact := d.simRefundQuery(t.order, refund)
+		require(fact.Result == "rejected" && fact.Code == "not_found", "simulator has a fiat refund or the read was inconclusive")
 		d.evidence("sim_refund_query", object{"refund_id": refund, "code": "not_found"})
 		d.chainEvidence(t.order)
 	})
+}
+
+// Only the simulator's public refund fields can reach either report.
+type simRefundResult struct {
+	Result string `json:"result"`
+	Code   string `json:"code"`
+	Refund *struct {
+		Account  string `json:"account_id"`
+		Order    string `json:"order_id"`
+		ID       string `json:"refund_id"`
+		Status   string `json:"status"`
+		Currency string `json:"currency"`
+		Amount   int64  `json:"amount"`
+	} `json:"refund,omitempty"`
+}
+
+func (d *driver) simRefundQuery(order, refund string) simRefundResult {
+	var credentials map[string]string
+	decode(file(filepath.Join(d.root, "handoff/query.json")), &credentials)
+	fields := url.Values{"account_id": {"md5-demo"}, "operation": {"refund-query"}, "order_id": {order}, "refund_id": {refund}}
+	require(credentials["query_key"] != "", "missing independent query credential")
+	sum := md5.Sum([]byte(fields.Encode() + "&key=" + credentials["query_key"]))
+	fields.Set("sign", hex.EncodeToString(sum[:]))
+	resp, e := localHTTP.PostForm("http://127.0.0.1:9080/api/md5-demo/refund-query", fields)
+	require(e == nil, "sim refund-query unavailable")
+	defer resp.Body.Close()
+	var fact simRefundResult
+	e = json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&fact)
+	d.trace(fmt.Sprintf("POST /api/md5-demo/refund-query → HTTP %d", resp.StatusCode))
+	require(e == nil && resp.StatusCode == 200, "模拟上游独立查退款失败")
+	return fact
 }

@@ -50,10 +50,14 @@ stack demo run cancel
 stack demo run refund-before-release
 stack demo run refund-after-release
 stack demo run dispute
+stack demo run dispute-refund-before-release -o ../.local/dev/native/demo/reports/dispute-refund-before-release.md
+stack demo run dispute-refund-after-release -o ../.local/dev/native/demo/reports/dispute-refund-after-release.md
 stack demo run duplicates
 ```
 
 - `demo setup [iam|registry|packages|seller|channels|merchant]` 可单独运行某个阶段。无参数时依次开通，首个真实失败会停止。独立制包只需已构建的驱动、同级 upstream-plugins 的 v0.2.1 和 go1.27.3 工具链。
+- 两个争议退款场景已于 2026-11-22 在本机进程栈通过。各使用一笔新订单。放币后场景也通过平台登记争议，登记失败会把现场状态写入报告。重跑同名场景沿用原单和已签材料。
+- `demo run 场景 -o 文件` 在每步结束时更新报告，失败时保留已有证据和错误。`.json` 输出 JSON，其他文件名输出 Markdown。默认的两份场景报告仍位于 `demo/reports/`。
 - `demo setup iam` 由管理员 1 邀请风控人员（`platform-risk`），管理员 2 批准，风控人员接受邀请后注册自己的 WebAuthn 凭据。风控人员提交 20 秒风控策略和争议裁决；运营登记争议，提交通道、方式、定价、插件和核验账户申请。每份审批材料都按提交人的 IAM 用户 ID 核对，再由两名已登记的审批人分别签署。
 - `demo setup seller` 以独立卖方私聊 `/start`、`/balance` 取得账户 ID，再按账户与 Telegram 用户在 IAM 只读事务中查询 `iam_telegram_bindings.user_id`。驱动把六项声明写入 `demo/declarations/seller.json`，用 `iam sellers activate` 登记，管理员 1 随后向同一账户和邮箱发邀请。卖方接受邀请并绑定 TOTP。报告将 `verification_ref` 和 `declared_by` 标为演示值。新栈的 `prepare` 和已有本机栈的 `demo-config` 都从 IAM 迁移属主连接生成私有的 `env/iam-sellers.env`，仅供卖方仪式读取。
 - 已在 IAM 登记的演示卖方可指定 `AIPAY_DEMO_SELLER_ACCOUNT_ID` 和 `AIPAY_DEMO_SELLER_EMAIL`。驱动用 `iam sellers list` 核对账户、邮箱并取得登记的用户 ID。已有网页资料的卖方可用私有文件 `AIPAY_DEMO_SELLER_PASSWORD_FILE` 和已绑定时的 `AIPAY_DEMO_SELLER_TOTP_FILE` 提供自己的因子。payment 的 `inputs/payment/seller-reviews.json` 仍需由审核方按 payment README 提供该卖方经核验的摘要、审核人和有效期。

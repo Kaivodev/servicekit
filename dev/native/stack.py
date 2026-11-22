@@ -173,6 +173,7 @@ def main():
     demo = sub.add_parser("demo")
     demo.add_argument("command", choices=("serve", "setup", "run"))
     demo.add_argument("target", nargs="?")
+    demo.add_argument("-o", dest="report", metavar="FILE")
     args = parser.parse_args()
     if args.action == "demo":
         # A demo may invoke controller commands. Never take controller.lock here.
@@ -181,6 +182,10 @@ def main():
         cmd = [str(ROOT / "bin/kaivo-demo"), str(ROOT), str(LIBRARY), args.command]
         if args.target:
             cmd.append(args.target)
+        if args.report is not None:
+            if args.command != "run" or not args.target:
+                parser.error("-o requires demo run SCENARIO")
+            cmd.extend(["-o", args.report])
         os.execve(cmd[0], cmd, os.environ | {"GOWORK": "off"})
     if args.action == "prepare":
         admin = os.environ.get("AIPAY_DEV_POSTGRES_ADMIN_URL")

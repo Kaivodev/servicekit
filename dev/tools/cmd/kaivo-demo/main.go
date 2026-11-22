@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"slices"
 	"syscall"
 )
 
@@ -18,7 +17,13 @@ func execute(args []string) (err error) {
 			panic(v)
 		}
 	}()
-	require(len(args) == 3 || len(args) == 4, "usage: kaivo-demo STATE SERVICEKIT serve|setup [phase]|run SCENARIO")
+	var output string
+	if len(args) == 6 && args[2] == "run" && args[4] == "-o" {
+		output = args[5]
+		require(output != "", "-o requires a report filename")
+		args = args[:4]
+	}
+	require(len(args) == 3 || len(args) == 4, "usage: kaivo-demo STATE SERVICEKIT serve|setup [phase]|run SCENARIO [-o FILE]")
 	root, repo, action := args[0], args[1], args[2]
 	target := ""
 	if len(args) == 4 {
@@ -26,7 +31,7 @@ func execute(args []string) (err error) {
 	}
 	scope := action
 	if action == "run" {
-		require(slices.Contains([]string{"main", "cancel", "refund-before-release", "refund-after-release", "dispute", "duplicates"}, target), "unknown scenario")
+		require(scenarios[target] != nil, "unknown scenario")
 		scope = target
 	}
 	dir := filepath.Join(root, "demo")
@@ -47,6 +52,11 @@ func execute(args []string) (err error) {
 	d := newDriver(root, repo, scope)
 	switch action {
 	case "run":
+		d.output = output
+		if target == "dispute-refund-before-release" || target == "dispute-refund-after-release" {
+			d.history.Checks, d.history.SourceNotes = disputeRefundPlan(target == "dispute-refund-after-release")
+		}
+		d.report()
 		d.run(target)
 	case "setup":
 		phases := []struct {
@@ -64,7 +74,10 @@ func execute(args []string) (err error) {
 	default:
 		stop("unknown command")
 	}
-	fmt.Println(filepath.Join(d.dir, "reports", scope+".md"))
+	if output == "" {
+		output = filepath.Join(d.dir, "reports", scope+".md")
+	}
+	fmt.Println(output)
 	return nil
 }
 

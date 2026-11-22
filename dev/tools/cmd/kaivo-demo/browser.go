@@ -109,8 +109,20 @@ func (b *browser) api(method, path, key string, body object) object {
 		Data    object
 		Message string `json:"msg"`
 	}
+	postReleaseEntry := b.d.scope == "dispute-refund-after-release" && method == "POST" && path == "/disputes"
+	if postReleaseEntry && (code == 404 || code == 405 || code == 501) {
+		stop("已放币争议登记缺入口：POST %s 返回 HTTP %d", label, code)
+	}
 	decode(out, &env)
 	if code != 200 || env.Code != 200 {
+		if postReleaseEntry {
+			switch env.Code {
+			case 404, 405, 501:
+				stop("已放币争议登记缺入口：POST %s 返回 HTTP %d，业务码 %d", label, code, env.Code)
+			case 409:
+				stop("已放币争议登记被拒绝（缺入口或订单控制状态冲突）：POST %s 返回 HTTP %d，业务码 %d", label, code, env.Code)
+			}
+		}
 		if env.Code == 401 || env.Code == 428 {
 			delete(b.d.data, "session-until/"+b.name)
 			b.d.save()
