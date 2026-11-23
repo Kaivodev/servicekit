@@ -15,6 +15,10 @@
 
 契约来自固定版本的 `github.com/Kaivodev/protobuf`：方法策略直接读取生成的 `aipay.authz.v1` 选项类型，新版本契约里本库尚不执行的策略字段会让加载失败；事件信封就是 `aipay.events.v1.SignedEvent`，`eventstream.Reader` 直接实现 `EventStreamServiceServer`（调用方取自授权上下文），`Puller` 直接使用生成的客户端；审批断言为 `aipay.approval.v1.WebAuthnAssertion`。签名事件与审批的测试使用 SDK 的 `testvectors`。`authz/authztest` 只为本库测试构造带策略的测试服务。
 
+自 `v0.6.0` 起，`authz.Claims` 支持 `CommandSHA256`、`SessionID`、`WebEntry`，已验签的 `Assertion` 通过同名只读方法返回。命令摘要为 64 位小写十六进制 SHA-256，会话 ID 为规范小写 UUIDv7，入口使用 `authz.WebEntryPlatformAdmin` / `authz.WebEntryUpstreamPortal`；旧证明可省略，访问器返回空值。签发与接收均检查格式，显式空值、null、错误类型或未知入口拒绝，不把未知入口默认为管理端。
+
+这些声明不自动开放业务：属主须按方法要求其存在，重算完整命令摘要并核对入口、认证方式、作用域与资源归属；`RequestFingerprint()` 不能代替命令摘要。公共库不读取会话数据库、不提供即时撤销、不编码 collection 请求，也不更改 MFA_RECENT/SINGLE_USE 策略。本地签发及真实 mTLS 测试只验证公共库，不代表平台登录或 collection 业务接通。
+
 组装根显式构造资源并注册业务 RPC；框架不自动发现业务。当前各私有服务仅注册标准 gRPC Health，空服务名表示进程及依赖就绪；不存在的业务服务返回 `NOT_FOUND`，不会报告业务可用。调用方身份仅证明服务身份，不能替代用户权限或资源范围检查。
 
 就绪检查覆盖数据库连接、schema 和已配置的 Redis。SIGINT/SIGTERM 后先标记不就绪，再排空 RPC，最后关闭连接池；到期强制退出并返回失败。unary 默认 5 秒、报文默认 1 MiB、停机默认 15 秒。流式 RPC 由调用者控制总时长，业务流必须传递并响应 context；健康 Watch 允许长期保持。客户端不配置应用层自动重试，业务重试必须结合幂等设计。

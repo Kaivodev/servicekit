@@ -43,8 +43,18 @@ const (
 	PrincipalService             = "service"
 )
 
+// WebEntry identifies the website entry IAM authenticated. An empty value
+// means the assertion carries no web_entry, not a default entry.
+type WebEntry string
+
+const (
+	WebEntryPlatformAdmin  WebEntry = "platform_admin"
+	WebEntryUpstreamPortal WebEntry = "upstream_portal"
+)
+
 // Claims is the JSON claim set. Times are NumericDate seconds; aud is always
-// written as an array and read as a string or an array.
+// written as an array and read as a string or an array. CommandSHA256, SessionID
+// and WebEntry are optional for compatibility; owners require them per method.
 type Claims struct {
 	Issuer        string   `json:"iss"`
 	Subject       string   `json:"sub"`
@@ -53,13 +63,19 @@ type Claims struct {
 	Audience      Audience `json:"aud"`
 	Permission    string   `json:"permission"`
 	// Base64url (no padding) SHA-256 request fingerprint computed by IAM.
-	RequestFingerprint string   `json:"request_fingerprint"`
-	AMR                []string `json:"amr"`
-	AuthTime           int64    `json:"auth_time,omitempty"`
-	IssuedAt           int64    `json:"iat"`
-	NotBefore          int64    `json:"nbf,omitempty"`
-	ExpiresAt          int64    `json:"exp"`
-	ID                 string   `json:"jti"`
+	RequestFingerprint string `json:"request_fingerprint"`
+	// Lowercase hex SHA-256 of the canonical command, including its full method.
+	// The receiving owner recomputes it; this is not RequestFingerprint.
+	CommandSHA256 string `json:"command_sha256,omitempty"`
+	// Canonical lowercase UUIDv7. This identifies a session, not a bearer token.
+	SessionID string   `json:"session_id,omitempty"`
+	WebEntry  WebEntry `json:"web_entry,omitempty"`
+	AMR       []string `json:"amr"`
+	AuthTime  int64    `json:"auth_time,omitempty"`
+	IssuedAt  int64    `json:"iat"`
+	NotBefore int64    `json:"nbf,omitempty"`
+	ExpiresAt int64    `json:"exp"`
+	ID        string   `json:"jti"`
 }
 
 type Audience []string
@@ -79,10 +95,12 @@ func (a *Audience) UnmarshalJSON(data []byte) error {
 }
 
 var (
-	idPattern    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
-	jtiPattern   = regexp.MustCompile(`^[A-Za-z0-9_-]{16,64}$`)
-	amrPattern   = regexp.MustCompile(`^[a-z0-9_]{1,32}$`)
-	errMalformed = errors.New("malformed identity assertion")
+	idPattern            = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
+	jtiPattern           = regexp.MustCompile(`^[A-Za-z0-9_-]{16,64}$`)
+	amrPattern           = regexp.MustCompile(`^[a-z0-9_]{1,32}$`)
+	commandSHA256Pattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	sessionIDPattern     = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
+	errMalformed         = errors.New("malformed identity assertion")
 )
 
 // validate checks the claim shapes independent of the clock and receiver.
@@ -99,6 +117,12 @@ func (c Claims) validate() error {
 		// Application credentials always act in their application scope.
 		return errMalformed
 	case err != nil || len(fingerprint) != sha256.Size:
+		return errMalformed
+	case c.CommandSHA256 != "" && !commandSHA256Pattern.MatchString(c.CommandSHA256):
+		return errMalformed
+	case c.SessionID != "" && !sessionIDPattern.MatchString(c.SessionID):
+		return errMalformed
+	case c.WebEntry != "" && c.WebEntry != WebEntryPlatformAdmin && c.WebEntry != WebEntryUpstreamPortal:
 		return errMalformed
 	case len(c.Audience) == 0 || len(c.AMR) == 0:
 		return errMalformed
@@ -142,6 +166,18 @@ func (a *Assertion) MFA() bool                  { return slices.Contains(a.claim
 func (a *Assertion) IssuedAt() time.Time        { return time.Unix(a.claims.IssuedAt, 0).UTC() }
 func (a *Assertion) ExpiresAt() time.Time       { return time.Unix(a.claims.ExpiresAt, 0).UTC() }
 func (a *Assertion) RequestFingerprint() []byte { return bytes.Clone(a.fingerprint) }
+
+// CommandSHA256 returns the verified canonical lowercase hex digest, or empty
+// when absent. The owner must require and compare it for command-bound methods.
+func (a *Assertion) CommandSHA256() string { return a.claims.CommandSHA256 }
+
+// SessionID returns the verified session identifier, or empty when absent.
+// Verification does not query IAM for the session's current revocation state.
+func (a *Assertion) SessionID() string { return a.claims.SessionID }
+
+// WebEntry returns the verified entry, or empty when absent. The owner checks
+// its required entry, authentication methods and scope; this grants no access.
+func (a *Assertion) WebEntry() WebEntry { return a.claims.WebEntry }
 
 // AuthTime is zero when the assertion carries no auth_time.
 func (a *Assertion) AuthTime() time.Time {
@@ -284,8 +320,14 @@ func (v *AssertionVerifier) Verify(token string) (*Assertion, error) {
 		return nil, deny("assertion_signature")
 	}
 	var claims Claims
-	if _, err = decodeObject(rawClaims, &claims); err != nil {
+	names, err = decodeObject(rawClaims, &claims)
+	if err != nil {
 		return nil, deny("assertion_malformed")
+	}
+	// Omission preserves old assertions; explicit null/empty is not a valid
+	// digest, session identifier or entry and must not masquerade as omission.
+	if names["command_sha256"] && claims.CommandSHA256 == "" || names["session_id"] && claims.SessionID == "" || names["web_entry"] && claims.WebEntry == "" {
+		return nil, deny("assertion_claims")
 	}
 	if err = claims.validate(); err != nil {
 		return nil, deny("assertion_claims")
