@@ -198,13 +198,6 @@ func (d *driver) ledgerTrade(order string) object {
 	}
 	return normalized(hold)
 }
-func (d *driver) balanceSnapshot(label string) object {
-	b := d.bot("snap/"+label+"/balance", "/balance")
-	require(strings.HasPrefix(b, "账户 "+d.required("merchant-account")+"\n"), "merchant scope mismatch")
-	s := d.sellerBalance()
-	fees := d.rows("ledger", "ledger_balances (three fee accounts)", "SELECT COALESCE(sum(b.balance_units),0)::bigint AS units FROM ledger_accounts a JOIN ledger_balances b ON b.account_id=a.id WHERE a.code IN ('merchant_trade_fee_revenue:USDT','channel_trade_fee_revenue:USDT','trade_spread_revenue:USDT')")
-	return object{"merchant_bot": b, "merchant": micro(capture(`(?m)^可用 ([0-9]+\.[0-9]{6})$`, b)), "seller_portal": s, "seller": units(s, "available_usdt_micro"), "ledger_fee_accounts": num(fees[0], "units"), "orders_bot": d.bot("snap/"+label+"/orders", "/orders")}
-}
 func (d *driver) chainEvidence(order string) {
 	d.evidence("seller_hold_platform_quote_and_ledger_posting", d.ledgerTrade(order))
 	d.evidence("payment_outbox", d.rows("payment", "payment_outbox", "SELECT event_type,event_id,sequence FROM payment_outbox WHERE order_id=$1 ORDER BY sequence", order))

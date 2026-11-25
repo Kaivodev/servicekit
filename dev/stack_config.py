@@ -240,6 +240,115 @@ def deposit_settings(root, name):
     return {}
 
 
+def address(peer, compose):
+    if not compose:
+        return f"127.0.0.1:{PORTS[peer]}"
+    host = "upstream-sim" if peer in ("payment", "reconciliation") else peer
+    return f"{host}:{PORTS[peer]}"
+
+
+def ensure_report_key(root, key=None):
+    key = key or root / "inputs/ledger/report.pem"
+    public = root / "handoff/ledger-report-public.pem"
+    if key.is_symlink() or public.is_symlink():
+        raise ValueError("ledger report material must be a regular file")
+    if key.exists():
+        if not key.is_file() or (key.stat().st_mode & 0o777) != 0o600:
+            raise ValueError("invalid ledger report key permissions")
+        pem = key.read_bytes()
+    else:
+        if public.exists():
+            raise ValueError("ledger report private key missing for published public key")
+        pem = subprocess.check_output(["openssl", "genpkey", "-algorithm", "EC", "-pkeyopt",
+                                       "ec_paramgen_curve:P-256"], stderr=subprocess.DEVNULL)
+    spki = subprocess.check_output(["openssl", "pkey", "-pubout", "-passin", "pass:"], input=pem,
+                                   stderr=subprocess.DEVNULL)
+    der = base64.b64decode(b"".join(spki.splitlines()[1:-1]), validate=True)
+    if (pem.count(b"-----BEGIN ") != 1 or not pem.startswith(b"-----BEGIN PRIVATE KEY-----") or
+            not pem.rstrip().endswith(b"-----END PRIVATE KEY-----") or len(der) != 91 or
+            not der.startswith(bytes.fromhex("3059301306072a8648ce3d020106082a8648ce3d03010703420004"))):
+        raise ValueError("ledger report key must be a P-256 PKCS#8 key")
+    if public.exists() and public.read_bytes() != spki:
+        raise ValueError("ledger report public key mismatch")
+    if not key.exists():
+        write(key, pem)
+    if not public.exists():
+        write(public, spki)
+
+
+def demo_settings(root, svc, compose):
+    public = Path("/run/kaivo/public") if compose else root / "certs/public"
+    if svc == "payment":
+        return {"AIPAY_PAYMENT_EVENTS": "on", "AIPAY_LEDGER_RPC_ADDRESS": address("ledger", compose),
+                "AIPAY_LEDGER_RPC_SERVER_NAME": "ledger",
+                "AIPAY_LEDGER_EVENT_KEYS_FILE": str(public / "ledger.jwks")}
+    if svc == "backend":
+        return {"AIPAY_ACCOUNT_NOTICES_ENABLED": "true", "AIPAY_ACCOUNT_NOTICES_GRPC_ADDR": address("payment", compose),
+                "AIPAY_ACCOUNT_NOTICES_SERVER_NAME": "payment", "AIPAY_PAYMENT_EVENT_KEYS_FILE": str(public / "payment.jwks"),
+                "AIPAY_ACCOUNT_NOTICES_PULL_INTERVAL": "1s"}
+    if svc == "ledger":
+        inputs = Path("/run/kaivo/inputs") if compose else root / "inputs/ledger"
+        return {"AIPAY_LEDGER_REPORT_KEY_ID": "ledger-report-dev", "AIPAY_LEDGER_REPORT_KEY_FILE": str(inputs / "report.pem"),
+                "AIPAY_LEDGER_JOBS": "on", "AIPAY_LEDGER_JOB_INTERVAL": "2s"}
+    return {}
+
+
+def upgrade_demo(root, compose=False):
+    def inputs(svc):
+        return Path("/run/kaivo/inputs") if compose else root / "inputs" / svc
+
+    public = Path("/run/kaivo/public") if compose else root / "certs/public"
+    ledger = read_env(root / "env/ledger.env")
+    configured_key = ledger.get("AIPAY_LEDGER_REPORT_KEY_FILE")
+    if configured_key:
+        path = Path(configured_key)
+        if compose:
+            path = root / "inputs/ledger" / path.relative_to(inputs("ledger"))
+        if not path.is_absolute() or (not path.exists() and path.parent != root / "inputs/ledger"):
+            raise ValueError("configured ledger report key must exist or use the ledger private input directory")
+        ensure_report_key(root, path)
+    else:
+        ensure_report_key(root)
+    seller_ceremony_env(root, read_env(root / "env/iam-migrate.env")["AIPAY_DATABASE_URL"])
+    table = root / "inputs/iam/routes.json"
+    current = json.loads(table.read_text())
+    by_path = {(r["method"], r["path"]): r for r in current}
+    for rule in routes():
+        key = rule["method"], rule["path"]
+        if key in by_path and by_path[key] != rule:
+            raise ValueError("conflicting IAM route: " + " ".join(key))
+        by_path[key] = rule
+    write(table, json.dumps(list(by_path.values()), separators=(",", ":")) + "\n")
+    review = root / "inputs/payment/seller-reviews.json"
+    if not review.exists():
+        write(review, "[]\n")
+    changes = {
+        "backend": {"AIPAY_RECONCILIATION_GRPC_ADDR": address("reconciliation", compose),
+                    "AIPAY_HTTP_MAX_BODY_BYTES": "23068672", "AIPAY_TELEGRAM_KEY_MESSAGE_TTL": "10s",
+                    "AIPAY_TELEGRAM_MONITOR_INTERVAL": "2s"},
+        "ledger": {"AIPAY_LEDGER_PAYMENT_EVENTS": "on", "AIPAY_LEDGER_PAYMENT_ADDR": address("payment", compose),
+                   "AIPAY_LEDGER_DEV_USD_RATES_FILE": str(inputs("ledger") / "usd-rates.json"),
+                   "AIPAY_LEDGER_PAYMENT_SERVER_NAME": "payment",
+                   "AIPAY_LEDGER_PAYMENT_JWKS_FILE": str(public / "payment.jwks")},
+        "payment": {"AIPAY_PAYMENT_DEV_SELLER_REVIEWS_FILE": str(inputs("payment") / "seller-reviews.json")},
+    }
+    for svc, additions in changes.items():
+        path = root / "env" / (svc + ".env")
+        values = read_env(path)
+        if svc == "payment" and values.get("AIPAY_PAYMENT_DEV_SELLER_REVIEWS_FILE"):
+            del additions["AIPAY_PAYMENT_DEV_SELLER_REVIEWS_FILE"]
+        settings = demo_settings(root, svc, compose)
+        if svc == "ledger":
+            for name in ("AIPAY_LEDGER_REPORT_KEY_ID", "AIPAY_LEDGER_REPORT_KEY_FILE"):
+                if values.get(name):
+                    settings[name] = values[name]
+        save_env(path, values | additions | settings)
+    path = root / "env/notifier.env"
+    values = read_env(path)
+    if values.get("AIPAY_NOTIFIER_ALLOWED_HOSTS") == "127.0.0.1":
+        save_env(path, values | {"AIPAY_NOTIFIER_ALLOWED_HOSTS": "localhost"})
+
+
 def prepare(root, admin, cache, queue, compose=False):
     """Callers supply only the fixed stack directory, and set umask 077."""
     root.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -247,6 +356,7 @@ def prepare(root, admin, cache, queue, compose=False):
     try:
         listen = "0.0.0.0" if compose else "127.0.0.1"
         generate_inputs(root, listen + ":9080")
+        ensure_report_key(root)
         passwords = {"STACK_ID": "kaivo-development-" + str(uuid.uuid4())}
         if not queue:
             queue_pass = secrets.token_hex(32)
@@ -277,12 +387,6 @@ def prepare(root, admin, cache, queue, compose=False):
             public = base / "public" if compose else base / "certs/public"
             data = base / "data" if compose else base / "data" / svc
             log = "/app/logs" if compose else str(root / "logs" / svc)
-            def address(peer):
-                if not compose:
-                    return f"127.0.0.1:{PORTS[peer]}"
-                # The two WASM hosts share the simulator's network namespace.
-                host = "upstream-sim" if peer in ("payment", "reconciliation") else peer
-                return f"{host}:{PORTS[peer]}"
             values = {"ENVIRONMENT": "development", "LOG_DIR": log}
             if compose:
                 values.update(TRACE_ENDPOINT="http://collector:4317", TRACE_ALLOW_INSECURE="true", TRACE_ENVIRONMENT="local")
@@ -312,23 +416,23 @@ def prepare(root, admin, cache, queue, compose=False):
             elif svc == "ledger":
                 values.update(LEDGER_JOBS="on", LEDGER_CHECKPOINT_KEY_ID="ledger-dev", LEDGER_ANCHOR_DIR=data / "anchors",
                               LEDGER_DEV_USD_RATES_FILE=inputs / "usd-rates.json",
-                              LEDGER_PAYMENT_EVENTS="on", LEDGER_PAYMENT_ADDR=address("payment"),
+                              LEDGER_PAYMENT_EVENTS="on", LEDGER_PAYMENT_ADDR=address("payment", compose),
                               LEDGER_PAYMENT_SERVER_NAME="payment", LEDGER_PAYMENT_JWKS_FILE=public / "payment.jwks",
                               LEDGER_APPROVAL_RP_ID=RP, LEDGER_APPROVAL_ORIGINS=ORIGIN, LEDGER_DEPOSITS="off",
                               LEDGER_COLLECTION_ADDR=("collection:9106" if compose else "127.0.0.1:9106"), LEDGER_COLLECTION_SERVER_NAME="collection",
-                              LEDGER_COLLECTION_JWKS_FILE=public / "collection.jwks", LEDGER_RECONCILIATION_ADDR=address("reconciliation"),
+                              LEDGER_COLLECTION_JWKS_FILE=public / "collection.jwks", LEDGER_RECONCILIATION_ADDR=address("reconciliation", compose),
                               LEDGER_RECONCILIATION_SERVER_NAME="reconciliation", LEDGER_RECONCILIATION_JWKS_FILE=public / "reconciliation.jwks")
             elif svc == "payment":
-                values.update(RPC_MAX_MESSAGE_BYTES="16777216", PAYMENT_EVENTS="on", IAM_RPC_ADDRESS=address("iam"),
-                              IAM_EVENT_KEYS_FILE=public / "iam.jwks", LEDGER_RPC_ADDRESS=address("ledger"),
+                values.update(RPC_MAX_MESSAGE_BYTES="16777216", IAM_RPC_ADDRESS=address("iam", compose),
+                              IAM_EVENT_KEYS_FILE=public / "iam.jwks",
                               PAYMENT_DISPATCHER_ENABLED="true", PAYMENT_WORKER_ENABLED="true",
                               PAYMENT_APPROVAL_RP_ID=RP, PAYMENT_APPROVAL_ORIGINS=ORIGIN, PAYMENT_DEV_RATE_FILE=inputs / "rate.json",
                               PAYMENT_DEV_SELLER_REVIEWS_FILE=inputs / "seller-reviews.json", PAYMENT_DEV_RATE_MAX_AGE="10m", PLUGIN_ENABLED="true", PLUGIN_CREDENTIALS_FILE=inputs / "plugins.json",
                               PLUGIN_EVIDENCE_DIRECTORY=data / "evidence", PLUGIN_TEST_ONLY_ALLOW_HTTP="true",
-                              PLUGIN_TEST_ONLY_ALLOW_LOOPBACK="true", PLUGIN_CALLBACK_URL=f"http://{address('backend')}/callback/sim_form_md5",
-                              PAYMENT_NOTIFICATION_IAM_ADDRESS=address("iam"), PAYMENT_NOTIFICATION_LOCAL_RSA_FILE=inputs / "epay.der")
+                              PLUGIN_TEST_ONLY_ALLOW_LOOPBACK="true", PLUGIN_CALLBACK_URL=f"http://{address('backend', compose)}/callback/sim_form_md5",
+                              PAYMENT_NOTIFICATION_IAM_ADDRESS=address("iam", compose), PAYMENT_NOTIFICATION_LOCAL_RSA_FILE=inputs / "epay.der")
             elif svc == "notifier":
-                values.update(NOTIFIER_GRPC_ADDR=f"{listen}:9115", NOTIFIER_PAYMENT_ADDRESS=address("payment"),
+                values.update(NOTIFIER_GRPC_ADDR=f"{listen}:9115", NOTIFIER_PAYMENT_ADDRESS=address("payment", compose),
                               NOTIFIER_TLS_CA_FILE=ca, NOTIFIER_TLS_CERT_FILE=cert / "tls.crt", NOTIFIER_TLS_KEY_FILE=cert / "tls.key",
                               NOTIFIER_TLS_TRUST_DOMAIN="aipay.test", NOTIFIER_TEST_ONLY_ALLOW_HTTP="true",
                               NOTIFIER_TEST_ONLY_ALLOW_LOOPBACK="true",
@@ -336,14 +440,14 @@ def prepare(root, admin, cache, queue, compose=False):
                               NOTIFIER_ALLOWED_HOSTS=os.getenv("AIPAY_NOTIFIER_ALLOWED_HOSTS", "localhost"))
             elif svc == "reconciliation":
                 values.update(RECONCILIATION_JOBS="on", RECONCILIATION_AUTHORIZATION_VALID_FOR="5m",
-                              LEDGER_RPC_ADDRESS=address("ledger"), PAYMENT_RPC_ADDRESS=address("payment"),
+                              LEDGER_RPC_ADDRESS=address("ledger", compose), PAYMENT_RPC_ADDRESS=address("payment", compose),
                               PAYMENT_EVENT_KEYS_FILE=public / "payment.jwks", RECONCILIATION_MARKET="on",
                               RECONCILIATION_MARKET_DEVELOPMENT_FILE=inputs / "market.json",
                               RECONCILIATION_COVERAGE_DEVELOPMENT_FILE=inputs / "coverage.json",
                               RECONCILIATION_VERIFICATION="on", RECONCILIATION_VERIFICATION_ALLOW_HTTP="on",
                               RECONCILIATION_VERIFICATION_ALLOW_LOOPBACK="on", RECONCILIATION_LATE_PAYMENT_WINDOW="5s",
                               RECONCILIATION_SECRET_SEALER="local", RECONCILIATION_SECRET_KEY_FILE=inputs / "sealer.key",
-                              RECONCILIATION_ADMIN="on", RECONCILIATION_ADMIN_PAYMENT_ADDRESS=address("payment"),
+                              RECONCILIATION_ADMIN="on", RECONCILIATION_ADMIN_PAYMENT_ADDRESS=address("payment", compose),
                               RECONCILIATION_ADMIN_RP_ID=RP, RECONCILIATION_ADMIN_ORIGINS=ORIGIN,
                               RECONCILIATION_DISPUTE_REGISTRY="on", RECONCILIATION_WEBAUTHN_RP_ID=RP, RECONCILIATION_WEBAUTHN_ORIGINS=ORIGIN,
                               RECONCILIATION_PLUGIN_CHANNELS='{"sim_form_md5_verify":"sim_form_md5"}', RECON_DEPOSITS="off",
@@ -351,10 +455,10 @@ def prepare(root, admin, cache, queue, compose=False):
                               RECON_COLLECTION_SERVER_NAME="collection", RECON_COLLECTION_JWKS_FILE=public / "collection.jwks")
             elif svc == "backend":
                 values.update(HTTP_ADDR=listen + ":8080", ADMIN_HTTP_ADDR=listen + ":8081", SELLER_HTTP_ADDR=listen + ":8082",
-                              IAM_GRPC_ADDR=address("iam"), PAYMENT_GRPC_ADDR=address("payment"),
-                              RECONCILIATION_GRPC_ADDR=address("reconciliation"), HTTP_MAX_BODY_BYTES="23068672",
+                              IAM_GRPC_ADDR=address("iam", compose), PAYMENT_GRPC_ADDR=address("payment", compose),
+                              RECONCILIATION_GRPC_ADDR=address("reconciliation", compose), HTTP_MAX_BODY_BYTES="23068672",
                               TELEGRAM_MONITOR_INTERVAL="2s", TELEGRAM_KEY_MESSAGE_TTL="10s",
-                              LEDGER_GRPC_ADDR=address("ledger"), PLATFORM_ORIGIN=ORIGIN, SELLER_ORIGIN="https://seller.aipay.test",
+                              LEDGER_GRPC_ADDR=address("ledger", compose), PLATFORM_ORIGIN=ORIGIN, SELLER_ORIGIN="https://seller.aipay.test",
                               PORTAL_COOKIE_KEY=secrets.token_urlsafe(32), EPAY_V2_LOCAL_RSA_FILE=inputs / "epay.der",
                               TOTP_ENROLLMENT_ORIGIN="https://merchant.aipay.test", TELEGRAM_ENABLED="true",
                               TELEGRAM_WEBHOOK_URL="https://merchant.aipay.test/telegram/webhook", TELEGRAM_BOT_TOKEN_FILE=inputs / "bot-token",
@@ -365,7 +469,7 @@ def prepare(root, admin, cache, queue, compose=False):
             elif svc == "cashier":
                 env = {"CASHIER_SIM_HOST": "upstream-sim" if compose else "127.0.0.1", "CASHIER_LISTEN_HOST": listen,
                        "CASHIER_CERT": cert / "tls.crt", "CASHIER_KEY": cert / "tls.key"}
-            save_env(root / "env" / (svc + ".env"), env)
+            save_env(root / "env" / (svc + ".env"), env | demo_settings(root, svc, compose))
         from verify import verify
         verify(root)
         write(root / "prepared", "1\n")

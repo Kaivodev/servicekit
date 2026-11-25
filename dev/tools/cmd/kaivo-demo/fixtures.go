@@ -19,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -32,7 +33,69 @@ type message struct {
 	ID, Chat int64
 	Text     string
 	Deleted  bool
+	Document *documentMeta `json:",omitempty"`
 }
+type documentMeta struct {
+	Filename, Caption, SHA256 string
+	Size                      int
+}
+
+// Read the multipart stream without spilling headers or form fields to temporary files.
+func parseDocument(r *http.Request) (int64, *documentMeta, []byte, bool) {
+	parts, err := r.MultipartReader()
+	if err != nil {
+		return 0, nil, nil, false
+	}
+	var chat int64
+	doc := &documentMeta{}
+	var data []byte
+	seen := map[string]bool{}
+	for {
+		p, err := parts.NextPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return 0, nil, nil, false
+		}
+		name := p.FormName()
+		if seen[name] {
+			return 0, nil, nil, false
+		}
+		seen[name] = true
+		limit := 4096
+		if name == "document" {
+			limit = 12 << 20
+		}
+		b, err := io.ReadAll(io.LimitReader(p, int64(limit+1)))
+		if err != nil || len(b) > limit {
+			return 0, nil, nil, false
+		}
+		switch name {
+		case "chat_id":
+			chat, err = strconv.ParseInt(string(b), 10, 64)
+			if err != nil || p.FileName() != "" {
+				return 0, nil, nil, false
+			}
+		case "caption":
+			if p.FileName() != "" {
+				return 0, nil, nil, false
+			}
+			doc.Caption = string(b)
+		case "document":
+			doc.Filename = p.FileName()
+			if doc.Filename == "" || len(b) == 0 {
+				return 0, nil, nil, false
+			}
+			doc.Size, doc.SHA256 = len(b), fmt.Sprintf("%x", sha256.Sum256(b))
+			data = b
+		default:
+			return 0, nil, nil, false
+		}
+	}
+	return chat, doc, data, chat != 0 && len(data) > 0
+}
+
 type receipt struct{ Trade, MerchantOrder, PID, Money, Status string }
 type fixtures struct {
 	dir, token, webhook string
@@ -63,7 +126,16 @@ func (f *fixtures) bot(w http.ResponseWriter, r *http.Request) {
 		ID   int64 `json:"message_id"`
 		Text string
 	}
-	if json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&in) != nil {
+	var doc *documentMeta
+	var document []byte
+	if method == "sendDocument" {
+		r.Body = http.MaxBytesReader(w, r.Body, (12<<20)+(64<<10))
+		in.Chat, doc, document, ok = parseDocument(r)
+		if !ok {
+			w.WriteHeader(400)
+			return
+		}
+	} else if json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&in) != nil {
 		w.WriteHeader(400)
 		return
 	}
@@ -79,20 +151,24 @@ func (f *fixtures) bot(w http.ResponseWriter, r *http.Request) {
 			status = "member"
 		}
 		result = object{"user": object{"id": in.User}, "status": status}
-	case "sendMessage", "deleteMessage":
+	case "sendMessage", "sendDocument", "deleteMessage":
 		p := filepath.Join(f.dir, "messages.json")
 		msgs, e := readRecords[message](p)
 		if e != nil {
 			w.WriteHeader(500)
 			return
 		}
-		if method == "sendMessage" {
-			if in.Chat == 0 || in.Text == "" {
+		if method != "deleteMessage" {
+			if in.Chat == 0 || (doc == nil && in.Text == "") {
 				w.WriteHeader(400)
 				return
 			}
 			i := int64(len(msgs) + 1)
-			msgs = append(msgs, message{ID: i, Chat: in.Chat, Text: in.Text})
+			if doc != nil && atomic(filepath.Join(f.dir, "documents", doc.SHA256), document) != nil {
+				w.WriteHeader(500)
+				return
+			}
+			msgs = append(msgs, message{ID: i, Chat: in.Chat, Text: in.Text, Document: doc})
 			result = object{"message_id": i}
 		} else {
 			if in.ID < 1 || in.ID > int64(len(msgs)) || msgs[in.ID-1].Chat != in.Chat {
@@ -101,6 +177,7 @@ func (f *fixtures) bot(w http.ResponseWriter, r *http.Request) {
 			}
 			msgs[in.ID-1].Deleted = true
 			msgs[in.ID-1].Text = ""
+			msgs[in.ID-1].Document = nil
 			result = true
 		}
 		if atomic(p, encoded(msgs)) != nil {

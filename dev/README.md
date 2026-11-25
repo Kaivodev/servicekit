@@ -30,7 +30,7 @@ python3 dev/native/stack.py down
 
 ## 阶段 2 演示驱动
 
-使用本机进程栈。工作目录为 servicekit。新栈按上节准备、构建和迁移。已有上一轮栈先执行 `down`、`provision`、`build`、`migrate`、`demo-config`。最后一条合并 IAM 路由，并补齐 ledger 汇率文件路径、payment 事件拉取、backend 核验服务地址、bot 和 notifier 演示配置。状态、数据库、证书与签名材料沿用原栈。
+使用本机进程栈。工作目录为 servicekit。新栈按上节准备、构建和迁移。已有上一轮栈先执行 `down`、`provision`、`build`、`migrate`、`demo-config`。最后一条合并 IAM 路由，补齐 ledger 报表签名器、汇率、payment 对 ledger.trades 的拉取、backend 对 payment.account_notices 的拉取，以及 bot 和 notifier 配置。第 11 轮需要 IAM 000012、payment 000014、ledger 000016 和 backend 000003 迁移。状态、数据库、证书与签名材料沿用原栈。
 
 先在一个终端启动模拟 Telegram API、商户接收端和 CONNECT 代理，并保持运行。
 
@@ -53,9 +53,14 @@ stack demo run dispute
 stack demo run dispute-refund-before-release -o ../.local/dev/native/demo/reports/dispute-refund-before-release.md
 stack demo run dispute-refund-after-release -o ../.local/dev/native/demo/reports/dispute-refund-after-release.md
 stack demo run duplicates
+stack demo run seller-offline
+stack demo run bot-notices
+stack demo run archived-work -o ../.local/dev/native/demo/reports/archived-work.md
+stack demo run statement -o ../.local/dev/native/demo/reports/statement.md
 ```
 
 - `demo setup [iam|registry|packages|seller|channels|merchant]` 可单独运行某个阶段。无参数时依次开通，首个真实失败会停止。独立制包只需已构建的驱动、同级 upstream-plugins 的 v0.2.1 和 go1.27.3 工具链。
+- 第 11 轮四个场景已于 2026-11-24 在本机进程栈通过，结果见[验证机记录](#2026-11-24-第-11-轮演示验收)。卖方场景会切换唯一通道，通知场景会绑定演示商户群。归档场景按 payment 的真实退避等待，可用 `AIPAY_DEMO_ARCHIVE_WAIT=0s` 立即检查并留待续跑。对账场景优先使用已有文件，新栈可能要等到下一次 UTC+8 零点。详见[步骤与证据](demo.md#第-11-轮运行条件)。
 - 两个争议退款场景已于 2026-11-22 在本机进程栈通过。各使用一笔新订单。放币后场景也通过平台登记争议，登记失败会把现场状态写入报告。重跑同名场景沿用原单和已签材料。
 - `demo run 场景 -o 文件` 在每步结束时更新报告，失败时保留已有证据和错误。`.json` 输出 JSON，其他文件名输出 Markdown。默认的两份场景报告仍位于 `demo/reports/`。
 - `demo setup iam` 由管理员 1 邀请风控人员（`platform-risk`），管理员 2 批准，风控人员接受邀请后注册自己的 WebAuthn 凭据。风控人员提交 20 秒风控策略和争议裁决；运营登记争议，提交通道、方式、定价、插件和核验账户申请。每份审批材料都按提交人的 IAM 用户 ID 核对，再由两名已登记的审批人分别签署。
@@ -107,6 +112,8 @@ dc ps -a
 dc down
 ```
 
+已有阶段 2 Compose 栈执行 `dc down`、`python3 -B dev/prepare.py --demo-config`、`dc up -d --build`，重新载入 env 并执行迁移。两种栈都将专用报表私钥存于 `inputs/ledger/report.pem`（0600），公钥发布到 `handoff/ledger-report-public.pem`。升级复用原密钥。
+
 运行中再次执行 `python3 dev/prepare.py --refresh-market` 后，用 `dc restart reconciliation` 载入新行情。ledger 会定期重读挂载目录中的汇率文件。
 
 **未在本机验证**。本轮仅静态解析 Compose 和交叉检查配置。新项目名为 `aipay-p2`，独占 `../.local/dev/compose/` 与独立命名卷，避免接管旧五服务栈的用户、卷或密钥。切换前应停止占用相同宿主端口的旧栈或本机进程。普通 `down` 保留卷，`down -v` 会删除数据库和队列卷。
@@ -139,3 +146,26 @@ dc down
 - 驱动在每个场景开头发 `/start`，刷新商户的 Telegram 会话（IAM 闲置 30 分钟后过期）。
 - IAM 对每个账户的 TOTP 校验（含成功）按 5 分钟 5 次计数，驱动每个窗口最多使用 4 次。
 - 卖方审核资料由审核方写入 `inputs/payment/seller-reviews.json`，演示中由操作者代行。
+
+### 2026-11-24 第 11 轮演示验收
+
+同一验证机与本机进程栈，在已有开通数据上升级到 protobuf v0.15.1 与各属主当日的工作区版本，先迁移再重启服务和 `demo serve`，没有重新开通。
+
+| 场景 | 结果 |
+| --- | --- |
+| `main` | 通过 |
+| `seller-offline` | 通过：下线期间新单被拒，下线前已付款的订单照常放币，重新上线后新单成功；`seller_online_version` 加一，`control_version` 不变 |
+| `bot-notices` | 通过：私聊和已绑定群各收到一次"已收款"和"资金已可用"，开通时的审核结果有投递记录 |
+| `statement` | 通过：UTC+8 零点日结后私聊收到 zip，清单用 ledger 报表公钥验签，三个文件的 SHA-256 与 4 条分录逐行一致；群内命令只引导私聊 |
+| `archived-work` | 通过：订单任务 11 次尝试后归档，运维再认证后填原因恢复，审计和 worker 重新领取均有记录，约 2 小时 26 分钟 |
+| `cancel` | 通过：迟付一单现在等到放币，并按该单基线核对卖方 −Q、商户 +N、费用 +F |
+| `refund-before-release` | 通过 |
+| `refund-after-release` | 主流程通过；余额不足样本仍按已知限制停止，随 M5 |
+| `dispute` | 通过 |
+| `duplicates` | 通过 |
+| `dispute-refund-before-release`、`dispute-refund-after-release` | 2026-11-22 通过，本轮未重跑 |
+
+运行中发现并已在驱动修复：
+- 连续运行多个场景时，商户 `/start` 超过 IAM 每用户 5 分钟 3 次的注册限速而被拒。驱动现在按发送者排队，达到上限时打印预计等待时间。
+- `cancel` 的迟付一单原先在风控持有时就结束场景，随后自动放币，落进下一个场景的余额测量区间。现在迟付一单要等到放币；每个担保样本取余额基线前，也先等卖方和商户的在途持有归零，2 分钟不归零就停止并列出遗留订单。
+- 商户 bot 的 `/orders` 按订单 ID 升序、每页 20 条。演示商户累计超过 20 单后，新单不在第一页。驱动改为按商户单号在 payment 只读查到订单 ID，再用 `/order` 核对 bot 视图。

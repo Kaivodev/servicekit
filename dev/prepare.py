@@ -9,7 +9,7 @@ import shutil
 import sys
 
 sys.dont_write_bytecode = True
-from stack_config import STATE, prepare, refresh, write
+from stack_config import STATE, prepare, refresh, upgrade_demo, write
 
 root = STATE / "compose"
 
@@ -41,12 +41,21 @@ def main():
     os.umask(0o077)
     parser = argparse.ArgumentParser(description=__doc__)
     group = parser.add_mutually_exclusive_group()
+    group.add_argument("--demo-config", action="store_true", help="upgrade the prepared Compose demo configuration")
     group.add_argument("--refresh-market", action="store_true")
     group.add_argument("--add-missing-credentials", "--add-queue-credentials", action="store_true",
                        help="extend only the legacy five-service stack")
     args = parser.parse_args()
     if args.add_missing_credentials:
         extend_legacy()
+        return
+    if args.demo_config:
+        if not (root / "prepared").is_file():
+            raise ValueError("run prepare first")
+        with (root / "refresh.lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            upgrade_demo(root, compose=True)
+        print("Updated Compose demo configuration. Recreate the service containers to load it.")
         return
     if args.refresh_market:
         with (root / "refresh.lock").open("a") as lock:

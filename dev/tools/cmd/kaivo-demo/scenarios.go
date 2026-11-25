@@ -25,6 +25,20 @@ import (
 )
 
 func (d *driver) epay(version, path string, v url.Values) object {
+	code, r := d.signedEPay(version, path, v)
+	if version == "v1" {
+		require(code == 200 && num(r, "code") == 1, fmt.Sprintf("%s HTTP %d EPay code %v", path, code, r["code"]))
+	} else {
+		pending := (path == "/api/pay/refund" || path == "/api/pay/close") && num(r, "code") == -1 && r["msg"] == "结果待确认"
+		if pending {
+			d.trace("EPay signed pending result; await owner evidence")
+		}
+		require(num(r, "code") == 0 || pending, fmt.Sprintf("%s EPay code %v", path, r["code"]))
+	}
+	return r
+}
+
+func (d *driver) signedEPay(version, path string, v url.Values) (int, object) {
 	v.Set("pid", d.required("pid/"+version))
 	if version == "v1" {
 		var keys struct{ Key string }
@@ -44,9 +58,7 @@ func (d *driver) epay(version, path string, v url.Values) object {
 	code, body := d.browser("merchant").http("POST", path, path, "application/x-www-form-urlencoded", form(v), nil)
 	var r object
 	decode(body, &r)
-	if version == "v1" {
-		require(code == 200 && num(r, "code") == 1, fmt.Sprintf("%s HTTP %d EPay code %v", path, code, r["code"]))
-	} else {
+	if version == "v2" {
 		if code != 200 || r["sign"] == nil {
 			stop("%s HTTP %d EPay code %v", path, code, r["code"])
 		}
@@ -63,13 +75,8 @@ func (d *driver) epay(version, path string, v url.Values) object {
 		check(e)
 		pk, ok := key.(*rsa.PublicKey)
 		require(ok && rsa.VerifyPKCS1v15(pk, crypto.SHA256, h[:], standard(str(r, "sign"))) == nil, "invalid platform signature")
-		pending := (path == "/api/pay/refund" || path == "/api/pay/close") && num(r, "code") == -1 && r["msg"] == "结果待确认"
-		if pending {
-			d.trace("EPay signed pending result; await owner evidence")
-		}
-		require(num(r, "code") == 0 || pending, fmt.Sprintf("%s EPay code %v", path, r["code"]))
 	}
-	return r
+	return code, r
 }
 func (d *driver) sim(method, path string, data object) []byte {
 	var cfg object
@@ -123,16 +130,19 @@ func (t tradeRun) step(label string, f func()) *result {
 	t.d.step(t.name+" "+label, f)
 	return t.d.active
 }
+func createParams(number string) url.Values {
+	return url.Values{"out_trade_no": {number}, "type": {"alipay"}, "name": {"阶段二担保"}, "money": {"1.00"}, "notify_url": {notifyOrigin + "/notify"}, "return_url": {"https://merchant.aipay.test/return"}, "clientip": {"127.0.0.1"}, "method": {"web"}}
+}
 func (d *driver) trade(name, proto string) tradeRun {
 	t := tradeRun{d: d, name: name, proto: proto, number: d.key(d.scope + "/" + name)}
 	k := d.scope + "/" + name
 	t.step("余额基线", func() {
-		snap := d.balanceSnapshot(k + "/before")
+		snap := d.balanceSnapshotFrom(k+"/before", d.waitForIdleBalances())
 		d.put("balances/"+k, snap)
 		d.evidence("before", snap)
 	})
 	t.step("下单与冻结", func() {
-		v := url.Values{"out_trade_no": {t.number}, "type": {"alipay"}, "name": {"阶段二担保"}, "money": {"1.00"}, "notify_url": {notifyOrigin + "/notify"}, "return_url": {"https://merchant.aipay.test/return"}, "clientip": {"127.0.0.1"}, "method": {"web"}}
+		v := createParams(t.number)
 		path := "/mapi.php"
 		link := "payurl"
 		if proto == "v2" {
@@ -147,8 +157,14 @@ func (d *driver) trade(name, proto string) tradeRun {
 		d.put("cashier/"+k, str(r, link))
 		d.evidence("trade_no", str(r, "trade_no"))
 		d.cashier(str(r, link), false)
-		orders := d.bot(k+"/orders", "/orders "+d.required("business")+" "+d.required("app/"+proto))
-		order := capture("(?m)^("+uuidPattern+") · [^\n]*商户单号 "+regexp.QuoteMeta(t.number)+" ·", orders)
+		// /orders pages oldest first, so a long-lived demo merchant cannot find a
+		// new order there. Resolve the ID by merchant number, then check the bot view.
+		app := d.required("app/" + proto)
+		ids := d.rows("payment", "payment_orders", "SELECT id::text AS order_id FROM payment_orders WHERE account_id=$1 AND application_id=$2 AND out_trade_no=$3", d.required("merchant-account"), app, t.number)
+		require(len(ids) == 1, "order for merchant number not found")
+		order := str(ids[0], "order_id")
+		view := d.bot(k+"/order", "/order "+app+" "+order)
+		require(regexp.MustCompile("^"+regexp.QuoteMeta(order)+" · 应用 "+regexp.QuoteMeta(app)+" · 业务 "+regexp.QuoteMeta(d.required("business"))+" · 商户单号 "+regexp.QuoteMeta(t.number)+" · 平台单号 "+regexp.QuoteMeta(str(r, "trade_no"))+" · ").MatchString(view), "bot order view differs from the created order")
 		d.put("order/"+k, order)
 		hold := d.ledgerTrade(order)
 		require(hold != nil && str(hold, "status") == "RESERVED" && str(hold, "seller_account_id") == d.required("seller-account") && str(hold, "account_id") == d.required("merchant-account"), "not the expected frozen order")
@@ -322,6 +338,7 @@ func (d *driver) cancel(late bool) {
 		require(d.ledgerTrade(t.order)["status"] != "CANCELLED" && len(d.rows("ledger", "ledger_trade_authorizations", "SELECT source_event_id FROM ledger_trade_authorizations WHERE order_id=$1 AND event_type='TradeCancellationAuthorized'", t.order)) == 0, "late payment released escrow as unpaid")
 		d.evidence("after", d.balanceSnapshot(d.scope+"/late"))
 	})
+	t.release()
 }
 func (d *driver) refund(after bool) {
 	t := d.trade("退款", "v2")
@@ -395,7 +412,11 @@ func (d *driver) dispute() {
 }
 
 var scenarios = map[string]func(*driver){
-	"main": func(d *driver) { d.releasedTrade(1) },
+	"seller-offline": (*driver).sellerOffline,
+	"bot-notices":    (*driver).botNotices,
+	"statement":      (*driver).statement,
+	"archived-work":  (*driver).archivedWork,
+	"main":           func(d *driver) { d.releasedTrade(1) },
 	"duplicates": func(d *driver) {
 		d.releasedTrade(3)
 		d.duplicateEnvelope()

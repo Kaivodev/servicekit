@@ -202,6 +202,9 @@ func (d *driver) executeStep(name string, checkpoint bool, f func()) {
 			if reason, ok := v.(failure); ok {
 				r.Error = reason.reason
 				r.Status = "failed"
+				if strings.HasPrefix(reason.reason, "缺样本：") {
+					r.Status = "缺样本"
+				}
 				d.report()
 			}
 			panic(v)
@@ -267,13 +270,18 @@ func (d *driver) declaration(name string, v any) string {
 	return p
 }
 func waitFor(why string, limit time.Duration, f func() bool) {
+	if !pollUntil(limit, f) {
+		stop("timed out waiting for %s", why)
+	}
+}
+func pollUntil(limit time.Duration, f func() bool) bool {
 	end := time.Now().Add(limit)
 	for {
 		if f() {
-			return
+			return true
 		}
 		if !time.Now().Before(end) {
-			stop("timed out waiting for %s", why)
+			return false
 		}
 		time.Sleep(400 * time.Millisecond)
 	}

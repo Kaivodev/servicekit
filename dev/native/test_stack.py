@@ -26,7 +26,14 @@ class Configuration(unittest.TestCase):
         by_key = {(r["method"], r["path"]): r for r in routes}
         self.assertEqual(len(by_key), len(routes))
         bot = [r for r in routes if r["path"].startswith("/bot/")]
-        self.assertEqual(len(bot), 19)
+        self.assertEqual(len(bot), 21)
+        for method, path, permission, owner in (
+            ("GET", "/api/v1/platform/archived-work", "payment.work.read", "payment"),
+            ("POST", "/api/v1/platform/archived-work/:kind/:object_id/requeue", "payment.work.requeue", "payment"),
+            ("GET", "/bot/statements", "ledger.statement.read", "ledger"),
+            ("GET", "/bot/statements/:date", "ledger.statement.read", "ledger"),
+        ):
+            self.assertEqual(by_key[method, path], dict(method=method, path=path, permission=permission, audiences=[owner]))
         contract = cfg.WORKSPACE / "backend/docs/examples/telegram-routes.json"
         if contract.exists():
             self.assertEqual(bot, json.loads(contract.read_text()))
@@ -79,6 +86,7 @@ class Configuration(unittest.TestCase):
                     self.assertIn(name, cert_calls[0][cert_calls[0].index("--services") + 1].split(","))
                 envs = {name: dict(line.split("=", 1) for line in files[root / "env" / (name + ".env")].splitlines())
                         for name in cfg.SERVICES}
+                self.assert_demo_settings(envs, root, compose)
                 issuer = files[root / "env/iam-sellers.env"]
                 owner = files[root / "env/iam-migrate.env"].removeprefix("AIPAY_DATABASE_URL=")
                 self.assertEqual(issuer, "AIPAY_IAM_SELLERS_DATABASE_URL=" + owner)
@@ -108,23 +116,65 @@ class Configuration(unittest.TestCase):
                 self.assertTrue(subprocess.check_output(["openssl", "pkey", "-inform", "DER", "-pubout"], input=der)
                                 == files[root / "handoff/platform-public.pem"])
 
-    def test_upgrade_seller_ceremony_env(self):
-        with tempfile.TemporaryDirectory() as tmp, patch.object(stack, "request", return_value=None):
-            root = Path(tmp)
-            for folder in ("env", "inputs/iam", "inputs/payment"):
-                (root / folder).mkdir(parents=True)
-            cfg.dump(root / "inputs/iam/routes.json", [])
-            for name in ("backend", "payment", "ledger", "notifier"):
-                cfg.save_env(root / "env" / (name + ".env"), {})
-            cfg.save_env(root / "env/iam-migrate.env", {"AIPAY_DATABASE_URL": "iam-owner"})
-            cfg.save_env(root / "env/iam.env", {"AIPAY_DATABASE_URL": "iam-runtime"})
-            for _ in range(2):
-                stack.demo_config(root)
-                self.assertEqual(cfg.read_env(root / "env/iam-sellers.env"),
-                                 {"AIPAY_IAM_SELLERS_DATABASE_URL": "iam-owner"})
-                self.assertEqual(cfg.read_env(root / "env/iam.env"), {"AIPAY_DATABASE_URL": "iam-runtime"})
-                self.assertEqual(cfg.read_env(root / "env/ledger.env")["AIPAY_LEDGER_DEV_USD_RATES_FILE"],
-                                 str(root / "inputs/ledger/usd-rates.json"))
+    def assert_demo_settings(self, envs, root, compose):
+        public = Path("/run/kaivo/public") if compose else root / "certs/public"
+        inputs = Path("/run/kaivo/inputs") if compose else root / "inputs/ledger"
+        self.assertEqual(envs["payment"]["AIPAY_PAYMENT_EVENTS"], "on")
+        self.assertEqual(envs["payment"]["AIPAY_LEDGER_EVENT_KEYS_FILE"], str(public / "ledger.jwks"))
+        self.assertEqual(envs["payment"]["AIPAY_LEDGER_RPC_ADDRESS"], "ledger:9102" if compose else "127.0.0.1:9102")
+        self.assertEqual(envs["payment"]["AIPAY_LEDGER_RPC_SERVER_NAME"], "ledger")
+        self.assertEqual(envs["backend"]["AIPAY_PAYMENT_EVENT_KEYS_FILE"], str(public / "payment.jwks"))
+        self.assertEqual(envs["backend"]["AIPAY_ACCOUNT_NOTICES_ENABLED"], "true")
+        self.assertEqual(envs["backend"]["AIPAY_ACCOUNT_NOTICES_GRPC_ADDR"], "upstream-sim:9105" if compose else "127.0.0.1:9105")
+        self.assertEqual(envs["backend"]["AIPAY_ACCOUNT_NOTICES_SERVER_NAME"], "payment")
+        self.assertEqual(envs["backend"]["AIPAY_ACCOUNT_NOTICES_PULL_INTERVAL"], "1s")
+        self.assertEqual(envs["ledger"]["AIPAY_LEDGER_REPORT_KEY_FILE"], str(inputs / "report.pem"))
+        self.assertEqual(envs["ledger"]["AIPAY_LEDGER_REPORT_KEY_ID"], "ledger-report-dev")
+
+    def test_demo_config_upgrade_and_key_reuse(self):
+        for compose in (False, True):
+            with tempfile.TemporaryDirectory() as tmp, patch.object(stack, "request", return_value=None):
+                root = Path(tmp)
+                for folder in ("env", "inputs/iam", "inputs/payment", "inputs/ledger", "handoff"):
+                    (root / folder).mkdir(parents=True)
+                cfg.dump(root / "inputs/iam/routes.json", [])
+                for name in ("backend", "payment", "ledger", "notifier"):
+                    cfg.save_env(root / "env" / (name + ".env"), {})
+                cfg.save_env(root / "env/iam-migrate.env", {"AIPAY_DATABASE_URL": "iam-owner"})
+                cfg.save_env(root / "env/iam.env", {"AIPAY_DATABASE_URL": "iam-runtime"})
+                cfg.save_env(root / "env/payment.env", {"AIPAY_PAYMENT_DEV_SELLER_REVIEWS_FILE": "custom-review.json"})
+                seed = None
+                for _ in range(2):
+                    if compose:
+                        cfg.upgrade_demo(root, compose=True)
+                    else:
+                        stack.demo_config(root)
+                    key = root / "inputs/ledger/report.pem"
+                    self.assertEqual(key.stat().st_mode & 0o777, 0o600)
+                    if seed is None:
+                        seed = key.read_bytes()
+                    self.assertTrue(seed == key.read_bytes())
+                    self.assertTrue(seed.startswith(b"-----BEGIN PRIVATE KEY-----"))
+                    self.assertTrue((root / "handoff/ledger-report-public.pem").read_bytes() ==
+                                    subprocess.check_output(["openssl", "pkey", "-in", key, "-pubout"]))
+                    envs = {s: cfg.read_env(root / "env" / (s + ".env")) for s in ("backend", "ledger", "payment")}
+                    self.assert_demo_settings(envs, root, compose)
+                    self.assertEqual(envs["payment"]["AIPAY_PAYMENT_DEV_SELLER_REVIEWS_FILE"], "custom-review.json")
+                    self.assertEqual(json.loads((root / "inputs/iam/routes.json").read_bytes()), cfg.routes())
+                    self.assertEqual(cfg.read_env(root / "env/iam-sellers.env"),
+                                     {"AIPAY_IAM_SELLERS_DATABASE_URL": "iam-owner"})
+                    self.assertEqual(cfg.read_env(root / "env/iam.env"), {"AIPAY_DATABASE_URL": "iam-runtime"})
+                    self.assertEqual(cfg.read_env(root / "env/ledger.env")["AIPAY_LEDGER_DEV_USD_RATES_FILE"],
+                                     "/run/kaivo/inputs/usd-rates.json" if compose else str(root / "inputs/ledger/usd-rates.json"))
+
+                renamed = root / "inputs/ledger/custom.pem"
+                key.rename(renamed)
+                ledger = envs["ledger"] | {"AIPAY_LEDGER_REPORT_KEY_FILE": "/run/kaivo/inputs/custom.pem" if compose else str(renamed),
+                                          "AIPAY_LEDGER_REPORT_KEY_ID": "existing-report-id"}
+                cfg.save_env(root / "env/ledger.env", ledger)
+                cfg.upgrade_demo(root, compose)
+                self.assertEqual(ledger, cfg.read_env(root / "env/ledger.env"))
+                self.assertFalse(key.exists())
 
     def test_deposit_phase(self):
         seller = "019ab233-4567-7890-8123-456789abcdef"

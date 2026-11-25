@@ -20,16 +20,31 @@
 
 ## 资金场景清单
 
+每个担保样本取余额基线前都会等待卖方和商户的在途持有归零，上一场景遗留的风控持有会先自然放币。若 2 分钟内仍未归零，驱动会停止，并在报告中列出非零余额、待释放笔数和卖方冻结订单。
+
 | 场景 | 真实操作与验收条件 | 当前状态 |
 |---|---|---|
-| main | V1 /mapi.php 下单。卖方门户冻结 Q 后显示模拟收银页，HTTPS POST 付款，模拟器向 backend 回调。payment 主动查单产生 OrderPaid，商户验签并回 success。风险到期后 reconciliation 独立查单、签授权，ledger 放币。卖方减少 Q，商户增加 N，三项费用合计增加 F，Q=N+F | 已编排，待取得完整运行报告 |
-| cancel | V2 /api/pay/create、/api/pay/close。两笔独立订单，首次需两条间隔至少五秒的 closed/unpaid 才归还 Q。第二笔对原单开启模拟器 late_payment，在首条核验后收银付款，要求观察到 paid 且没有取消授权 | 已编排，待验证机 |
-| refund-before-release | V2 收银付款后、放币前请求全额 /api/pay/refund。查核 ledger PRE_RELEASE 占用、reconciliation 查退款、最终分录、/api/pay/refundquery 和余额复原 | 已编排，待验证机 |
-| refund-after-release | V2 放币后先核对 N、F，再全额退款。ledger 的 POST_RELEASE 预留等于 N。核实后商户和费用冲销、卖方恢复 Q。第二笔单要求商户实际可用低于 N 才发退款，核对无预留及模拟器独立 refund-query 查无退款 | 正常分支待运行。干净栈缺少可让商户实际支用该余额的入口；驱动保存该笔样本供真实支用后续跑 |
-| dispute | 运营登记原单和商户 /order 证据，卖方在本人门户追加原单证据。风控人员提交放给原收款人的裁决，两名审批人签署，等待 reconciliation 复核与 ledger 落账 | 已编排，待验证机 |
+| main | V1 /mapi.php 下单。卖方门户冻结 Q 后显示模拟收银页，HTTPS POST 付款，模拟器向 backend 回调。payment 主动查单产生 OrderPaid，商户验签并回 success。风险到期后 reconciliation 独立查单、签授权，ledger 放币。卖方减少 Q，商户增加 N，三项费用合计增加 F，Q=N+F | 2026-11-20、2026-11-24 本机进程栈通过 |
+| cancel | V2 /api/pay/create、/api/pay/close。两笔独立订单，首次需两条间隔至少五秒的 closed/unpaid 才归还 Q。第二笔对原单开启模拟器 late_payment，在首条核验后收银付款，要求观察到 paid 且没有取消授权，再等待放币，按该单基线核对卖方 −Q、商户 +N、三项费用 +F | 2026-11-24 本机进程栈通过 |
+| refund-before-release | V2 收银付款后、放币前请求全额 /api/pay/refund。查核 ledger PRE_RELEASE 占用、reconciliation 查退款、最终分录、/api/pay/refundquery 和余额复原 | 2026-11-20、2026-11-24 本机进程栈通过 |
+| refund-after-release | V2 放币后先核对 N、F，再全额退款。ledger 的 POST_RELEASE 预留等于 N。核实后商户和费用冲销、卖方恢复 Q。第二笔单要求商户实际可用低于 N 才发退款，核对无预留及模拟器独立 refund-query 查无退款 | 正常分支 2026-11-20、2026-11-24 通过。干净栈缺少可让商户实际支用该余额的入口；驱动保存该笔样本供真实支用后续跑 |
+| dispute | 运营登记原单和商户 /order 证据，卖方在本人门户追加原单证据。风控人员提交放给原收款人的裁决，两名审批人签署，等待 reconciliation 复核与 ledger 落账 | 2026-11-20、2026-11-24 本机进程栈通过 |
 | dispute-refund-before-release | 已付款、未放币时登记争议，双方举证后双批退款。A118 将 DISPUTED 原子交接为 PRE_RELEASE 预留 Q。独立查退款成功并签发授权后，ledger 只核销一次，卖方恢复 Q，商户与费用余额不变 | 2026-11-22 本机进程栈通过 |
 | dispute-refund-after-release | 放币后通过平台登记争议，核对原收款账户按争议 ID 从可用冻结 N 到 user_risk_held。双方举证、双批退款后，A119 将冻结转为 POST_RELEASE 预留 N。核销时冲回三项费用 F、卖方恢复 Q，原冻结与退款预留均结清 | 2026-11-22 本机进程栈通过（N=137500、F=2777、Q=140277） |
-| duplicates | 原单三份相同回调，待放币核对一次资金效果。另让两个真实 ledger 拉取器读取同一 collection 签名信封，核对完整字节摘要、游标冲突和唯一分录。另一笔单暂缓 ledger 拉取 matches，真实授权签发后由运营登记争议，再恢复拉取，要求原授权因旧版本隔离。风控人员以当前版本提交裁决，两名审批人签署，只有新授权可入账 | 已编排，双读协调有单测；两副本对同一数据库的游标竞争和旧授权隔离待验证机 |
+| duplicates | 原单三份相同回调，待放币核对一次资金效果。另让两个真实 ledger 拉取器读取同一 collection 签名信封，核对完整字节摘要、游标冲突和唯一分录。另一笔单暂缓 ledger 拉取 matches，真实授权签发后由运营登记争议，再恢复拉取，要求原授权因旧版本隔离。风控人员以当前版本提交裁决，两名审批人签署，只有新授权可入账 | 2026-11-20、2026-11-24 本机进程栈通过 |
+| seller-offline | 卖方 TOTP 再认证后切换唯一通道。两端意愿版本各加一，平台 control_version 保持原值；下线期间新单收到签名拒绝，原已付款订单仍放币，上线后另一下单成功 | 2026-11-24 本机进程栈通过 |
+| bot-notices | 用新单触发已收款、资金已可用。按事件 ID 和序号核对 backend 的 sent 投递，按两个单号及法币/USDT 金额核对私聊和群的四个消息 ID，并检查开通审核投递 | 2026-11-24 本机进程栈通过 |
+| statement | 私聊列业务日并收 zip，核对说明、发布公钥、清单签名、三个文件摘要及 CSV/JSON 与当日分录。已绑定群两条命令均引导私聊 | 2026-11-24 本机进程栈通过 |
+| archived-work | 让本单查单持续返回 unknown，平台运维从归档清单选中原任务。WebAuthn 再认证后恢复，按操作人、版本、原次数、原因和 worker 重新领取记录验收 | 2026-11-24 本机进程栈通过 |
+
+## 第 11 轮运行条件
+
+- 驱动会按 IAM 的每用户注册限速自动给 `/start` 排队，连续运行多个场景时可能需要等待几分钟。
+- 按 README 升级后重启新版 `demo serve`。报表附件按 SHA-256 保存在私有 `demo/documents/`，用于解压收到的原始字节。`messages.json` 与报告记录文件名、大小、摘要和说明。
+- `seller-offline` 在收银前取得绑定下线命令的 TOTP 证明，随后用两端的 `seller_online_changed_at`、ledger 的付款时间与放币分录核对先后。场景中断时原通道可能仍处于下线状态；继续运行同名场景会沿用原命令、订单和版本。
+- `bot-notices` 与 `statement` 单独运行时都会核对 IAM 中的实际群绑定。尚未绑定时，先在群内发 `/bind_group`，再由商户本人私聊确认。
+- `archived-work` 会邀请平台 SRE。payment 默认 11 次尝试，十次退避合计约 2 小时 25 分钟。驱动默认最多等 3 小时，可用 `AIPAY_DEMO_ARCHIVE_WAIT=0s python3 -B dev/native/stack.py demo run archived-work` 创建样本并立即检查。若本单尚未归档，报告以“缺样本”结束，列出次数和下次可领取时间；保持 worker、模拟上游和模拟 Bot API 运行，稍后重跑。分页时只恢复本场景的订单任务。
+- `statement` 优先选择最近的已发布商户文件。没有可结算的商户分录时先完成一笔新担保收款；当天分录等 UTC+8 零点后由 ledger 发布，任务每 2 秒检查。旧版本已成功日结但没有文件的日期不会自动补发。等待中可中断并重跑。报告中的 `matched_journal_lines` 是对账当天全部匹配分录的行数。
 
 ## 报告和取证
 
@@ -39,7 +54,7 @@
 - 争议退款的派发顺序使用同一 PostgreSQL 实例的数据库时钟。ledger 在写入预留后、同事务提交前记录交接成功审计。payment 的退款记录须持有同一预留 ID 和 seq，才能进入派发阶段。首次 `refund.dispatch_granted` 记录在上游调用之前，其时间必须严格晚于交接审计。PRE_RELEASE 的 reserve_seq 属于原担保，退款创建时间取自批准时间，两者都不能给出这次交接的时刻。
 - 单独记录 `DisputeRulingApproved` 的 disposition 和 reason，例如 `refund_execution_unsupported` 或 `no_matching_pre_release_dispute`。若读取时尚未处置，报告保留该状态。验收使用独立的 `query_refund` 记录、授权所引用的同一证据摘要、模拟器只读 `refund-query` 返回的原单号、退款号与全额，以及授权对应的唯一核销分录。放币后用风控冻结的 final_seq 和退款预留的 final_seq 分别核实转换与结清。
 - 每份争议退款报告附有可能影响执行的服务端源码位置和判断依据。放币后登记若返回 404、405 或 501，场景在平台入口以“缺入口”结束。404 也可能表示属主找不到原单，409 可能来自控制版本冲突，需结合报告里的订单状态、版本和请求 ID 定位。
-- 2026-11-20 原有场景的实测结果见[验证机记录](README.md#2026-11-20-阶段-2-演示验收)。本轮两个争议退款场景的资金终态和运行证据待验证机 PostgreSQL 18 采集。
+- 2026-11-20 原有场景的实测结果见[验证机记录](README.md#2026-11-20-阶段-2-演示验收)。两个争议退款场景 2026-11-22 通过，第 11 轮各场景 2026-11-24 的结果见[验证机记录](README.md#2026-11-24-第-11-轮演示验收)。
 
 ## 卖方预存验收
 
@@ -85,7 +100,8 @@ ORDER BY w.code;
 | collection.deposits | 9106 的开发生产者签发回执；ledger 与 reconciliation 拉取，后者还从独立 EVM RPC 核对原转账 |
 | payment.orders、payment.pricing | ledger 和 reconciliation 均配置 payment 地址、签名公钥与拉取开关 |
 | reconciliation.matches | ledger 与 collection.deposits 一起启用拉取。迟到回执、并发投递和旧授权样本分别核对两条流的游标与入账结果 |
-| ledger.trades、ledger.journal、ledger.checkpoints | ledger 提供资金事件与分录、签名检查点读取；本演示以授权的账户与冻结查询、属主分录证据核对。payment 的恢复走账本查询 |
+| ledger.trades、ledger.journal、ledger.checkpoints | ledger 提供资金事件与分录、签名检查点读取；本演示以授权的账户与冻结查询、属主分录证据核对。payment 消费 ledger.trades 的放币事实生成账户通知，订单恢复仍可查询账本 |
+| payment.account_notices | 仅 backend 拉取，按事件与 chat_id 投递到商户私聊和已绑定群 |
 | iam.business_ownership、iam.security | 前者的归属转移和 payment 拉取、后者的 settlement 消费仍待属主接入 |
 | collection.sweeps、settlement.wallets、settlement.withdrawals、reconciliation.attestations | 这些流仍待生产端或消费端接线，阶段 2 演示覆盖模拟收款、预存及担保资金流 |
 

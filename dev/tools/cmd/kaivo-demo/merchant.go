@@ -66,11 +66,21 @@ func (d *driver) deliver(label string, user, chat int64, command func() string) 
 	if route == "" {
 		route = "/telegram/webhook"
 	}
-	code, _ := d.browser("merchant").http("POST", route, route+" "+strings.Fields(t.Command)[0], "application/json", encoded(t.update()), map[string]string{"X-Telegram-Bot-Api-Secret-Token": env["AIPAY_TELEGRAM_WEBHOOK_SECRET"]})
+	b := d.browser("merchant")
+	cmd := strings.Fields(t.Command)[0]
+	req := b.request("POST", route, "application/json", encoded(t.update()), map[string]string{"X-Telegram-Bot-Api-Secret-Token": env["AIPAY_TELEGRAM_WEBHOOK_SECRET"]})
+	if cmd == "/start" {
+		d.queueStart(t.User)
+	}
+	code, _ := b.send(req, route+" "+cmd)
 	require(code == 200, "webhook delivery failed")
 	var msg message
 	for _, m := range d.messages() {
-		if m.ID > t.After && (m.Chat == chat || chat < 0 && m.Chat == user) {
+		replyChat := chat
+		if t.Command == "/bind_group" {
+			replyChat = user
+		}
+		if m.ID > t.After && m.Chat == replyChat && !accountNoticeText(m.Text) {
 			msg = m
 			break
 		}
@@ -85,7 +95,7 @@ func (d *driver) deliver(label string, user, chat int64, command func() string) 
 		d.save()
 		stop("backend bot rejected %s", strings.Fields(t.Command)[0])
 	}
-	require(msg.Text != "", "bot reply was deleted before delivery could be confirmed")
+	require(msg.Text != "" || msg.Document != nil, "bot reply was deleted before delivery could be confirmed")
 	d.put(key+"/reply", msg)
 	return msg
 }

@@ -25,6 +25,7 @@ func (d *driver) duplicateEnvelope() {
 		delta = num(obj(sample), "units")
 	}
 	d.step("并发投递基线", func() {
+		balances := d.waitForIdleBalances()
 		head := strings.Fields(string(d.stack("head")))
 		require(len(head) == 2, "invalid collection head")
 		seq, e := strconv.ParseInt(head[0], 10, 64)
@@ -33,7 +34,7 @@ func (d *driver) duplicateEnvelope() {
 		rows := d.rows("ledger", "ledger_trade_unmatched_receipts", "SELECT posting_seq FROM ledger_trade_unmatched_receipts WHERE chain='BSC' AND transaction_id=$1 AND transfer_index=$2", str(receipt, "chain_transaction_id"), num(receipt, "transfer_index"))
 		require((op == "add" && len(rows) == 0) || (op == "replay" && len(rows) == 1), "duplicate sample does not match existing deposit history")
 		d.put("overlap-start", time.Now().UTC().Format(time.RFC3339Nano))
-		d.put("overlap-base", object{"next": seq + 1, "wallet": d.wallet(d.required("wallet")), "seller": units(d.sellerBalance(), "available_usdt_micro"), "previous_postings": rows})
+		d.put("overlap-base", object{"next": seq + 1, "wallet": d.wallet(d.required("wallet")), "seller": units(balances.seller, "available_usdt_micro"), "previous_postings": rows})
 	})
 	var base object
 	d.read("overlap-base", &base)
@@ -130,8 +131,8 @@ func movedCursor(path, since string) bool {
 	return false
 }
 func (d *driver) staleAuthorization() {
-	d.step("暂缓授权拉取", func() { d.stack("ledger-matches", "pause") })
 	t := d.trade("旧授权", "v1")
+	d.step("暂缓授权拉取", func() { d.stack("ledger-matches", "pause") })
 	t.paid(1)
 	t.step("签发后推进冻结版本", func() {
 		var old object

@@ -14,7 +14,7 @@ import tempfile
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from stack_config import (DEPOSIT_SERVICES, LIBRARY, OWNERS, SERVICES, STATE, WORKSPACE,
-                          native_deposit_inputs, prepare, read_env, refresh, routes, save_env, seller_ceremony_env, write)
+                          native_deposit_inputs, prepare, read_env, refresh, save_env, upgrade_demo, write)
 from deposit_scenario import SPEC, generate
 from verify import verify
 from processes import health, request, service_env, services, start, stop, supervise
@@ -117,39 +117,7 @@ def demo_config(root):
     """Upgrade the previous native stack without regenerating credentials or database roles."""
     if any(request(name, "pid") for name in services(root)):
         raise ValueError("run down before updating the native demo configuration")
-    seller_ceremony_env(root, read_env(root / "env/iam-migrate.env")["AIPAY_DATABASE_URL"])
-    table = root / "inputs/iam/routes.json"
-    current = json.loads(table.read_text())
-    by_path = {(r["method"], r["path"]): r for r in current}
-    for rule in routes():
-        key = rule["method"], rule["path"]
-        if key in by_path and by_path[key] != rule:
-            raise ValueError("conflicting IAM route: " + " ".join(key))
-        by_path[key] = rule
-    write(table, json.dumps(list(by_path.values()), separators=(",", ":")) + "\n")
-    review = root / "inputs/payment/seller-reviews.json"
-    if not review.exists():
-        write(review, "[]\n")
-    changes = {
-        "backend": {"AIPAY_RECONCILIATION_GRPC_ADDR": "127.0.0.1:9104",
-                    "AIPAY_HTTP_MAX_BODY_BYTES": "23068672", "AIPAY_TELEGRAM_KEY_MESSAGE_TTL": "10s",
-                    "AIPAY_TELEGRAM_MONITOR_INTERVAL": "2s"},
-        "ledger": {"AIPAY_LEDGER_PAYMENT_EVENTS": "on", "AIPAY_LEDGER_PAYMENT_ADDR": "127.0.0.1:9105",
-                   "AIPAY_LEDGER_DEV_USD_RATES_FILE": str(root / "inputs/ledger/usd-rates.json"),
-                   "AIPAY_LEDGER_PAYMENT_SERVER_NAME": "payment",
-                   "AIPAY_LEDGER_PAYMENT_JWKS_FILE": str(root / "certs/public/payment.jwks")},
-        "payment": {"AIPAY_PAYMENT_DEV_SELLER_REVIEWS_FILE": str(review)},
-    }
-    for svc, additions in changes.items():
-        path = root / "env" / (svc + ".env")
-        values = read_env(path)
-        if svc == "payment" and values.get("AIPAY_PAYMENT_DEV_SELLER_REVIEWS_FILE"):
-            continue
-        save_env(path, values | additions)
-    path = root / "env/notifier.env"
-    values = read_env(path)
-    if values.get("AIPAY_NOTIFIER_ALLOWED_HOSTS") == "127.0.0.1":
-        save_env(path, values | {"AIPAY_NOTIFIER_ALLOWED_HOSTS": "localhost"})
+    upgrade_demo(root)
 
 
 def main():

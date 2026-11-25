@@ -48,6 +48,8 @@
   {"method": "POST", "path": "/api/v1/platform/dispute-rulings/approvals/:id/assertions", "permission": "payment.dispute.approve", "audiences": ["payment"]},
   {"method": "GET", "path": "/api/v1/platform/disputes", "permission": "payment.dispute.read", "audiences": ["payment"]},
   {"method": "GET", "path": "/api/v1/platform/disputes/:id", "permission": "payment.dispute.read", "audiences": ["payment"]},
+  {"method": "GET", "path": "/api/v1/platform/archived-work", "permission": "payment.work.read", "audiences": ["payment"]},
+  {"method": "POST", "path": "/api/v1/platform/archived-work/:kind/:object_id/requeue", "permission": "payment.work.requeue", "audiences": ["payment"]},
   {"method": "GET", "path": "/api/v1/platform/orders", "permission": "payment.order.read", "audiences": ["payment"]},
   {"method": "GET", "path": "/api/v1/platform/orders/:id", "permission": "payment.order.read", "audiences": ["payment"]},
   {"method": "GET", "path": "/api/v1/platform/refunds", "permission": "payment.refund.read", "audiences": ["payment"]},
@@ -115,5 +117,7 @@
   {"method": "POST", "path": "/bot/payment-access/:id/enabled", "permission": "payment.access.manage", "audiences": ["payment"]},
   {"method": "GET", "path": "/bot/orders", "permission": "payment.order.read", "audiences": ["payment"]},
   {"method": "GET", "path": "/bot/orders/:id", "permission": "payment.order.read", "audiences": ["payment"]},
-  {"method": "GET", "path": "/bot/balance", "permission": "ledger.balance.read", "audiences": ["ledger"]}
+  {"method": "GET", "path": "/bot/balance", "permission": "ledger.balance.read", "audiences": ["ledger"]},
+  {"method": "GET", "path": "/bot/statements", "permission": "ledger.statement.read", "audiences": ["ledger"]},
+  {"method": "GET", "path": "/bot/statements/:date", "permission": "ledger.statement.read", "audiences": ["ledger"]}
 ]

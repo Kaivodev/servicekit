@@ -44,6 +44,10 @@ func (d *driver) browser(name string) *browser {
 var localHTTP = &http.Client{Timeout: 35 * time.Second, Transport: &http.Transport{Proxy: nil}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 
 func (b *browser) http(method, path, label, ctype string, body []byte, headers map[string]string) (int, []byte) {
+	return b.send(b.request(method, path, ctype, body, headers), label)
+}
+
+func (b *browser) request(method, path, ctype string, body []byte, headers map[string]string) *http.Request {
 	req, e := http.NewRequest(method, "http://"+b.addr+path, bytes.NewReader(body))
 	check(e)
 	req.Host = strings.TrimPrefix(b.origin, "https://")
@@ -64,10 +68,14 @@ func (b *browser) http(method, path, label, ctype string, body []byte, headers m
 		}
 		req.AddCookie(&http.Cookie{Name: k, Value: v})
 	}
+	return req
+}
+
+func (b *browser) send(req *http.Request, label string) (int, []byte) {
 	// The client has one fixed listener and cookie scope per browser. It never follows redirects.
 	res, e := localHTTP.Do(req)
 	if e != nil {
-		stop("%s %s transport failed", method, label)
+		stop("%s %s transport failed", req.Method, label)
 	}
 	defer res.Body.Close()
 	out, e := io.ReadAll(io.LimitReader(res.Body, 20<<20))
@@ -83,12 +91,18 @@ func (b *browser) http(method, path, label, ctype string, body []byte, headers m
 	if len(res.Cookies()) > 0 {
 		b.d.put("cookies/"+b.name, b.cookies)
 	}
-	b.d.trace(fmt.Sprintf("%s %s → HTTP %d · request %s", method, label, res.StatusCode, res.Header.Get("X-Request-ID")))
+	b.d.trace(fmt.Sprintf("%s %s → HTTP %d · request %s", req.Method, label, res.StatusCode, res.Header.Get("X-Request-ID")))
 	return res.StatusCode, out
 }
 func (b *browser) api(method, path, key string, body object) object {
+	return b.apiGrant(method, path, key, body, "")
+}
+func (b *browser) apiGrant(method, path, key string, body object, grant string) object {
 	var data []byte
 	h := map[string]string{}
+	if grant != "" {
+		h["X-Reauthentication-ID"] = grant
+	}
 	if method != "GET" {
 		csrf := b.api("GET", "/auth/csrf", "", nil)
 		h["X-CSRF-Token"] = str(csrf, "token")
@@ -98,7 +112,14 @@ func (b *browser) api(method, path, key string, body object) object {
 		h["Idempotency-Key"] = key
 		data = encoded(body)
 	}
-	label := b.prefix + path
+	displayPath, _, _ := strings.Cut(path, "?")
+	label := b.prefix + displayPath
+	if strings.HasPrefix(displayPath, "/auth/challenges/") {
+		label = b.prefix + "/auth/challenges/{id}"
+		if strings.HasSuffix(displayPath, "/verify") {
+			label += "/verify"
+		}
+	}
 	if method != "GET" {
 		keys := slices.Sorted(maps.Keys(body))
 		b.d.trace(fmt.Sprintf("%s %s · fields %s · idempotency %s", method, label, strings.Join(keys, ","), h["Idempotency-Key"]))
@@ -127,7 +148,7 @@ func (b *browser) api(method, path, key string, body object) object {
 			delete(b.d.data, "session-until/"+b.name)
 			b.d.save()
 		}
-		stop("%s %s → HTTP %d, backend code %d (%s)", method, b.prefix+path, code, env.Code, env.Message)
+		stop("%s %s → HTTP %d, backend code %d (%s)", method, label, code, env.Code, env.Message)
 	}
 	return env.Data
 }
@@ -227,26 +248,7 @@ func (d *driver) login(name string) {
 		r = login()
 	}
 	require(str(r, "state") == "mfa_required", "expected IAM MFA challenge")
-	p := "/auth/challenges/" + str(r, "challenge_id")
-	o := b.api("GET", p, "", nil)
-	var answer object
-	if name == "seller" {
-		answer = object{"method": "totp", "code": d.freshTOTP(name)}
-	} else {
-		opt := options(str(o, "options_json"))
-		require(str(opt, "rpId") == rp, "login RP mismatch")
-		if allowed, ok := opt["allowCredentials"].([]any); ok && len(allowed) > 0 {
-			offered := false
-			for _, entry := range allowed {
-				if obj(entry)["id"] == b64.EncodeToString(d.credential(name).ID) {
-					offered = true
-				}
-			}
-			require(offered, "credential not offered by IAM")
-		}
-		answer = object{"assertion": d.assert(name, raw(str(opt, "challenge")))}
-	}
-	r = b.post(p+"/verify", answer)
+	r = b.verifyMFA(r)
 	require(str(r, "state") == "authenticated", "IAM did not grant full session")
 	s := obj(r["session"])
 	require(s["restricted"] == false, "restricted session")
@@ -271,6 +273,30 @@ func (d *driver) login(name string) {
 		require(str(s, "seller_account_id") == d.required("seller-account"), "seller scope mismatch")
 	}
 }
+func (b *browser) verifyMFA(r object) object {
+	d, name := b.d, b.name
+	p := "/auth/challenges/" + str(r, "challenge_id")
+	o := b.api("GET", p, "", nil)
+	var answer object
+	if name == "seller" {
+		answer = object{"method": "totp", "code": d.freshTOTP(name)}
+	} else {
+		opt := options(str(o, "options_json"))
+		require(str(opt, "rpId") == rp, "login RP mismatch")
+		if allowed, ok := opt["allowCredentials"].([]any); ok && len(allowed) > 0 {
+			offered := false
+			for _, entry := range allowed {
+				if obj(entry)["id"] == b64.EncodeToString(d.credential(name).ID) {
+					offered = true
+				}
+			}
+			require(offered, "credential not offered by IAM")
+		}
+		answer = object{"assertion": d.assert(name, raw(str(opt, "challenge")))}
+	}
+	return b.post(p+"/verify", answer)
+}
+
 func (d *driver) mail(name, subject string) string {
 	var token string
 	waitFor("IAM mail for "+name, 90*time.Second, func() bool {

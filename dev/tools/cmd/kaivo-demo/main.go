@@ -53,11 +53,12 @@ func execute(args []string) (err error) {
 	switch action {
 	case "run":
 		d.output = output
+		d.history.Checks, d.history.SourceNotes = round11Plan(target)
 		if target == "dispute-refund-before-release" || target == "dispute-refund-after-release" {
 			d.history.Checks, d.history.SourceNotes = disputeRefundPlan(target == "dispute-refund-after-release")
 		}
 		d.report()
-		d.run(target)
+		d.stepGroup(target, func() { d.run(target) })
 	case "setup":
 		phases := []struct {
 			name string
@@ -86,7 +87,7 @@ func (d *driver) stepGroup(name string, run func()) {
 	d.active = nil
 	defer func() {
 		if v := recover(); v != nil {
-			if f, ok := v.(failure); ok && (d.active == nil || d.active.Status != "failed") {
+			if f, ok := v.(failure); ok && (d.active == nil || d.active.Status != "failed" && d.active.Status != "缺样本") {
 				d.history.Steps = append(d.history.Steps, &result{Name: name, Status: "failed", Error: f.reason})
 				d.report()
 			}
