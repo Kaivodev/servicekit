@@ -51,7 +51,22 @@ type Options struct {
 	Now func() time.Time
 }
 
-type Authorizer struct{ options Options }
+type Authorizer struct {
+	options Options
+	observe func(context.Context, string, string, string)
+}
+
+// ObservedInterceptors returns interceptors private to one server. The observer
+// receives the full method, verified caller (empty if unavailable), and reason.
+// A nil Authorizer uses exactly the DenyUndeclared policy.
+func (a *Authorizer) ObservedInterceptors(observe func(ctx context.Context, fullMethod, verifiedPeer, reason string)) (grpc.UnaryServerInterceptor, grpc.StreamServerInterceptor) {
+	if a == nil {
+		return denyUndeclared(observe)
+	}
+	clone := *a
+	clone.observe = observe
+	return clone.Unary(), clone.Stream()
+}
 
 func New(options Options) (*Authorizer, error) {
 	if !config.ValidService(options.Service) || options.Peer == nil || options.Log == nil || options.Policies.byMethod == nil {
@@ -237,6 +252,9 @@ func (a *Authorizer) authorize(ctx context.Context, method string) (context.Cont
 }
 
 func (a *Authorizer) reject(ctx context.Context, method, caller string, r rejection) error {
+	if a.observe != nil {
+		a.observe(ctx, method, caller, denialReason(r.reason))
+	}
 	a.options.Log.WarnContext(ctx, "rpc authorization denied", "method", method, "peer_service", caller, "reason", r.reason, "code", r.code.String())
 	return status.Error(r.code, r.message)
 }
@@ -271,14 +289,35 @@ func (a *Authorizer) Stream() grpc.StreamServerInterceptor {
 // DenyUndeclared is the fallback when a server has no Authorizer: only the
 // health service is reachable, every other method is PermissionDenied.
 func DenyUndeclared() (grpc.UnaryServerInterceptor, grpc.StreamServerInterceptor) {
+	return denyUndeclared(nil)
+}
+
+func denialReason(reason string) string {
+	switch reason {
+	case errService.reason, errNoPolicy.reason, errCaller.reason, errUnexpected.reason, errMissing.reason,
+		errPermission.reason, errMFA.reason, errRecentAuth.reason, errReplayed.reason, errReplayStore.reason,
+		"assertion_invalid", "assertion_malformed", "assertion_header", "assertion_unknown_key", "assertion_signature",
+		"assertion_claims", "assertion_issuer", "assertion_audience", "assertion_not_yet_valid", "assertion_expired":
+		return reason
+	}
+	return "other"
+}
+
+func denyUndeclared(observe func(context.Context, string, string, string)) (grpc.UnaryServerInterceptor, grpc.StreamServerInterceptor) {
 	denied := status.Error(codes.PermissionDenied, "Caller is not authorized for this method")
 	return func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
 			if !strings.HasPrefix(info.FullMethod, healthPrefix) {
+				if observe != nil {
+					observe(ctx, info.FullMethod, "", "undeclared")
+				}
 				return nil, denied
 			}
 			return handler(ctx, req)
 		}, func(server any, stream grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
 			if !strings.HasPrefix(info.FullMethod, healthPrefix) {
+				if observe != nil {
+					observe(stream.Context(), info.FullMethod, "", "undeclared")
+				}
 				return denied
 			}
 			return handler(server, stream)

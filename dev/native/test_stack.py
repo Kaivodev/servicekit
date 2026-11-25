@@ -14,6 +14,7 @@ from unittest.mock import patch
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import telemetry
 import processes
 import stack
 import deposit_scenario as fixture
@@ -79,13 +80,14 @@ class Configuration(unittest.TestCase):
                     self.assertEqual(tool["AIPAY_SIGNING_KEY_ID"], "collection-dev")
                     self.assertEqual(tool["AIPAY_SIGNING_KEY_FILE"], str(root / "certs/collection/signing.pem"))
                     self.assertIn("COLLECTION_DEV_DB_PASSWORD=", files[root / "env/provision.env"])
-                    self.assertEqual(files[root / "env/devchain.env"].count("AIPAY_"), 2)
+                    self.assertIn("AIPAY_LOG_OUTPUT=file", files[root / "env/devchain.env"])
                 else:
                     self.assertNotIn(root / "env/devcollection.env", files)
                 for name in ("notifier", "collection", "iam", "payment", "reconciliation"):
                     self.assertIn(name, cert_calls[0][cert_calls[0].index("--services") + 1].split(","))
                 envs = {name: dict(line.split("=", 1) for line in files[root / "env" / (name + ".env")].splitlines())
                         for name in cfg.SERVICES}
+                self.assertTrue(all(env["AIPAY_LOG_OUTPUT"] == "file" for env in envs.values()))
                 self.assert_demo_settings(envs, root, compose)
                 issuer = files[root / "env/iam-sellers.env"]
                 owner = files[root / "env/iam-migrate.env"].removeprefix("AIPAY_DATABASE_URL=")
@@ -325,6 +327,87 @@ class Configuration(unittest.TestCase):
             cfg.database_url("postgres://host/postgres?user=postgres", "iam_app", "", "iam")
         with self.assertRaises(ValueError):
             cfg.redis_db("redis://host/0?db=0", 5)
+
+
+class Telemetry(unittest.TestCase):
+    def test_local_binaries_config_and_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            for name in ("otelcol", "prometheus", "custom-collector"):
+                exe = root / name
+                exe.touch(mode=0o700)
+            with patch.dict(os.environ, {"PATH": tmp}, clear=True):
+                stack.change_mode(root, "telemetry", "on")
+                config = telemetry.state(root)
+                self.assertEqual(config, {"mode": "local", "endpoint": telemetry.LOCAL_ENDPOINT,
+                                          "otelcol": str(root / "otelcol"), "prometheus": str(root / "prometheus")})
+                self.assertEqual((root / "telemetry.json").stat().st_mode & 0o777, 0o600)
+                (root / "otelcol-contrib").touch(mode=0o700)
+                stack.change_mode(root, "telemetry", "on")
+                self.assertEqual(telemetry.state(root)["otelcol"], str(root / "otelcol-contrib"))
+                with patch.dict(os.environ, {"AIPAY_DEV_OTELCOL_BIN": str(root / "custom-collector"),
+                                             "AIPAY_DEV_PROMETHEUS_BIN": str(root / "prometheus"), "PATH": ""}):
+                    stack.change_mode(root, "telemetry", "on")
+                self.assertEqual(processes.command(root, "otelcol")[0], str(root / "custom-collector"))
+                (root / "prometheus").unlink()
+                with self.assertRaisesRegex(ValueError, "install prometheus"):
+                    stack.change_mode(root, "telemetry", "on")
+                self.assertEqual(telemetry.state(root)["otelcol"], str(root / "custom-collector"))
+            self.assertEqual(processes.services(root)[:2], telemetry.PROCESSES)
+            self.assertTrue((root / "data/prometheus").is_dir())
+            self.assertIn("--web.enable-otlp-receiver", processes.command(root, "prometheus"))
+            self.assertIn("--storage.tsdb.retention.time=2d", processes.command(root, "prometheus"))
+            self.assertIn("metrics_endpoint: http://127.0.0.1:9090/api/v1/otlp/v1/metrics",
+                          (root / "telemetry/collector.yaml").read_text())
+            self.assertIn("[deployment.environment.name, kaivo.domain]", (root / "telemetry/prometheus.yaml").read_text())
+            self.assertNotIn("AIPAY_METRICS_ENDPOINT", processes.service_env(root, "otelcol"))
+            self.assertNotIn("AIPAY_METRICS_ALLOW_INSECURE", telemetry.environment(root))
+            stack.change_mode(root, "telemetry", "off")
+            self.assertEqual(telemetry.state(root), {"mode": "off"})
+            self.assertNotIn("otelcol", processes.services(root))
+
+    def test_external_and_logs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "env").mkdir()
+            for name in (*cfg.SERVICES, *cfg.DEPOSIT_SERVICES):
+                cfg.save_env(root / "env" / (name + ".env"), {"AIPAY_LOG_OUTPUT": "file"})
+            for endpoint, insecure in (("http://127.0.0.9:4317", False), ("http://[::1]:4317", False),
+                                       ("http://localhost:4317", False), ("https://remote:4317", False),
+                                       ("http://collector.ns:4317", True)):
+                with self.subTest(endpoint=endpoint), patch("shutil.which", side_effect=AssertionError):
+                    stack.change_mode(root, "telemetry", "on", endpoint)
+                    self.assertNotIn("prometheus", processes.services(root))
+                    for name in (*cfg.OWNERS, *cfg.DEPOSIT_SERVICES, "notifier", "ledger-reader", "upstream-sim"):
+                        env = processes.service_env(root, name)
+                        self.assertEqual(env["AIPAY_METRICS_ENDPOINT"], endpoint)
+                        self.assertEqual(env["AIPAY_METRICS_ENVIRONMENT"], "local")
+                        self.assertEqual(env["AIPAY_METRICS_INTERVAL"], "5s")
+                        self.assertEqual(env["AIPAY_METRICS_EXPORT_TIMEOUT"], "3s")
+                        self.assertEqual(env.get("AIPAY_METRICS_ALLOW_INSECURE"), "true" if insecure else None)
+            stack.change_mode(root, "logs", "stdout")
+            self.assertEqual(processes.service_env(root, "notifier")["AIPAY_LOG_OUTPUT"], "stdout")
+            self.assertEqual(cfg.read_env(root / "env/notifier.env"), {"AIPAY_LOG_OUTPUT": "file"})
+            stack.change_mode(root, "logs", "file")
+            stack.change_mode(root, "telemetry", "off")
+            self.assertEqual(processes.service_env(root, "ledger-reader")["AIPAY_LOG_OUTPUT"], "file")
+            self.assertNotIn("AIPAY_METRICS_ENDPOINT", processes.service_env(root, "notifier"))
+            self.assertFalse((root / "telemetry").exists())
+
+    def test_requires_down_and_valid_url(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with patch.object(stack, "request", side_effect=lambda name, _: "123" if name == "ledger-reader" else None):
+                for action, mode in (("telemetry", "on"), ("telemetry", "off"), ("logs", "stdout"), ("logs", "file")):
+                    with self.assertRaisesRegex(ValueError, "down"):
+                        stack.change_mode(root, action, mode)
+            for value in ("", "collector:4317", "ftp://host:1", "http://host", "http://host:0",
+                          "http://host:65536", "http://host:foo", "http://user:private@host:12", "http://host:1/",
+                          "http://host:1/path", "https://host:42?", "http://host:1#x", "http://[::1]suffix:1",
+                          "http://[bad]:1", "http://two words:1", "http://host..name:12"):
+                with self.subTest(value=value), self.assertRaisesRegex(ValueError, "^metrics endpoint requires"):
+                    telemetry.configure(root, "on", value)
+            self.assertFalse((root / "telemetry.json").exists())
 
 
 @unittest.skipUnless(os.getenv("AIPAY_TEST_SIM_BINARY"), "supply the built upstream-sim binary for process tests")

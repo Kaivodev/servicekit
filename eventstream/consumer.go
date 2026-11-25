@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	eventsv1 "github.com/Kaivodev/protobuf/gen/go/aipay/events/v1"
@@ -26,6 +27,8 @@ var (
 // transaction; any verification failure stores the verified prefix and stops
 // the stream with its reason.
 type Puller struct {
+	lag          atomic.Uint64
+	hasLag       atomic.Bool
 	db           Pool
 	source       eventsv1.EventStreamServiceClient
 	verifier     Verifier
@@ -221,7 +224,10 @@ func (p *Puller) CheckHead(ctx context.Context) (uint64, error) {
 	case head.GetSequence() == cursor.Sequence && !bytes.Equal(head.GetEventDigest(), cursor.Digest[:]):
 		return 0, p.stopAfter(ctx, cursor, &StopError{Reason: ReasonHeadForked, Sequence: head.GetSequence()})
 	}
-	return head.GetSequence() - cursor.Sequence, nil
+	lag := head.GetSequence() - cursor.Sequence
+	p.lag.Store(lag)
+	p.hasLag.Store(true)
+	return lag, nil
 }
 
 // Outcome is the one-time processing result of an inbox envelope.

@@ -18,6 +18,8 @@ import (
 	"github.com/Kaivodev/servicekit/config"
 	"github.com/Kaivodev/servicekit/mtls"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
+	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/metric/noop"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc"
@@ -41,6 +43,7 @@ const (
 type Check func(context.Context) error
 
 type ServerOptions struct {
+	MeterProvider  metric.MeterProvider
 	TracerProvider trace.TracerProvider
 	// Authorizer enforces each method's (aipay.authz.v1.policy). Without one,
 	// every method except the health service is denied.
@@ -52,6 +55,7 @@ type ServerOptions struct {
 }
 
 type Server struct {
+	metrics      *serverMetrics
 	grpc         *grpc.Server
 	listener     net.Listener
 	health       *health.Server
@@ -102,19 +106,30 @@ func NewServer(options ServerOptions, material *mtls.Material, access, runtime *
 		s.checks[name] = check
 	}
 	s.health.SetServingStatus("", healthpb.HealthCheckResponse_NOT_SERVING)
-	unaryAuthz, streamAuthz := authz.DenyUndeclared()
-	if options.Authorizer != nil {
-		unaryAuthz, streamAuthz = options.Authorizer.Unary(), options.Authorizer.Stream()
+	var report func(context.Context, string, string, string)
+	if options.MeterProvider != nil {
+		s.metrics = newServerMetrics(options.MeterProvider)
+		report = s.metrics.denials(material.Peer)
+	}
+	unaryAuthz, streamAuthz := options.Authorizer.ObservedInterceptors(report)
+	unary := []grpc.UnaryServerInterceptor{observer.Unary(), s.unaryGuard(), unaryAuthz}
+	streams := []grpc.StreamServerInterceptor{s.streamGuard(access, material.Peer), streamAuthz}
+	if s.metrics != nil {
+		unary = append([]grpc.UnaryServerInterceptor{s.metrics.unary}, unary...)
+		streams = append([]grpc.StreamServerInterceptor{s.metrics.stream}, streams...)
 	}
 	grpcOptions := []grpc.ServerOption{grpc.Creds(credentials.NewTLS(tlsConfig)),
 		grpc.ConnectionTimeout(options.RPC.CallTimeout), grpc.MaxRecvMsgSize(options.RPC.MaxMessageBytes), grpc.MaxSendMsgSize(options.RPC.MaxMessageBytes), grpc.MaxConcurrentStreams(options.RPC.MaxConcurrentStreams),
-		grpc.ChainUnaryInterceptor(observer.Unary(), s.unaryGuard(), unaryAuthz), grpc.ChainStreamInterceptor(s.streamGuard(access, material.Peer), streamAuthz),
+		grpc.ChainUnaryInterceptor(unary...), grpc.ChainStreamInterceptor(streams...),
 		// Bounded connection lifetime: clients reconnect and present, and verify,
 		// the current short-lived certificates instead of the handshake-time ones.
 		grpc.KeepaliveParams(keepalive.ServerParameters{MaxConnectionAge: maxAge, MaxConnectionAgeGrace: grace}),
 	}
+	if s.metrics != nil {
+		grpcOptions = append(grpcOptions, grpc.StatsHandler(unknownRPCStats{s.metrics}))
+	}
 	if options.TracerProvider != nil {
-		grpcOptions = append(grpcOptions, grpc.StatsHandler(otelgrpc.NewServerHandler(otelgrpc.WithTracerProvider(options.TracerProvider), otelgrpc.WithPropagators(propagation.TraceContext{}))))
+		grpcOptions = append(grpcOptions, grpc.StatsHandler(otelgrpc.NewServerHandler(otelgrpc.WithMeterProvider(noop.NewMeterProvider()), otelgrpc.WithTracerProvider(options.TracerProvider), otelgrpc.WithPropagators(propagation.TraceContext{}))))
 	}
 	s.grpc = grpc.NewServer(grpcOptions...)
 	healthpb.RegisterHealthServer(s.grpc, s.health)
@@ -125,6 +140,9 @@ func NewServer(options ServerOptions, material *mtls.Material, access, runtime *
 	if err != nil {
 		s.grpc.Stop()
 		return nil, errors.New("bind RPC listener failed; check address and port availability")
+	}
+	if s.metrics != nil {
+		s.metrics.observeServer(s)
 	}
 	return s, nil
 }
@@ -141,6 +159,7 @@ func (s *Server) ShutdownDeadline() time.Time {
 
 // Close releases a server that was constructed but not run, for startup cleanup.
 func (s *Server) Close() {
+	defer s.metrics.close()
 	s.beginDrain()
 	s.grpc.Stop()
 	_ = s.listener.Close()
@@ -150,6 +169,7 @@ func (s *Server) Run(ctx context.Context) error {
 	if !s.started.CompareAndSwap(false, true) {
 		return errors.New("RPC server can only run once")
 	}
+	defer s.metrics.close()
 	defer s.listener.Close()
 	if ctx.Err() != nil {
 		s.Close()
@@ -211,6 +231,9 @@ func (s *Server) monitor(ctx context.Context) {
 			return
 		}
 		ready := len(failed) == 0
+		if s.metrics != nil {
+			s.metrics.recordDependencies(ctx, s.checks, failed)
+		}
 		s.ready.Store(ready)
 		value := healthpb.HealthCheckResponse_NOT_SERVING
 		if ready {

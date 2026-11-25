@@ -11,16 +11,21 @@ import subprocess
 import sys
 import time
 
+import telemetry
+
 from stack_config import DEPOSIT_SERVICES, LIBRARY, PORTS, SERVICES, deposit_settings, read_env, write
 
 
 def service_env(root, name):
     # In particular do not inherit admin DSNs, module tokens or another service's keys.
     env = {k: os.environ[k] for k in ("PATH", "LANG", "TZ", "TMPDIR") if k in os.environ}
-    if name != "queue-redis":
+    if name not in ("queue-redis", *telemetry.PROCESSES):
         owner = "ledger" if name == "ledger-reader" else name
         env.update(read_env(root / "env" / (owner + ".env")))
         env.update(deposit_settings(root, owner))
+        env["AIPAY_LOG_OUTPUT"] = "stdout" if (root / "logs.stdout").exists() else "file"
+        if name != "cashier":
+            env.update(telemetry.environment(root))
     if name == "ledger-reader":
         env.update(AIPAY_GRPC_ADDR="127.0.0.1:9122", AIPAY_LEDGER_JOBS="off",
                    AIPAY_LEDGER_PAYMENT_EVENTS="off", AIPAY_LOG_DIR=str(root / "logs/ledger-reader"))
@@ -31,10 +36,13 @@ def service_env(root, name):
 
 def services(root):
     deposits = DEPOSIT_SERVICES if (root / "deposits.enabled").is_file() else ()
-    return (("queue-redis",) if (root / "data/queue-redis/redis.conf").exists() else ()) + deposits + SERVICES
+    managed = telemetry.PROCESSES if telemetry.state(root)["mode"] == "local" else ()
+    return managed + (("queue-redis",) if (root / "data/queue-redis/redis.conf").exists() else ()) + deposits + SERVICES
 
 
 def command(root, name):
+    if name in telemetry.PROCESSES:
+        return telemetry.command(root, name)
     if name == "cashier":
         return [sys.executable, "-B", str(LIBRARY / "dev/cashier.py")]
     if name == "queue-redis":
@@ -49,6 +57,16 @@ def command(root, name):
 def health(root, name):
     env = service_env(root, name)
     try:
+        if name == "otelcol":
+            with socket.create_connection(("127.0.0.1", 4317), timeout=3):
+                return True
+        if name == "prometheus":
+            conn = http.client.HTTPConnection("127.0.0.1", 9090, timeout=3)
+            try:
+                conn.request("GET", "/-/ready")
+                return conn.getresponse().status == 200
+            finally:
+                conn.close()
         if name == "devchain":
             conn = http.client.HTTPConnection("127.0.0.1", PORTS[name], timeout=3)
             try:

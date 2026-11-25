@@ -20,13 +20,40 @@ python3 dev/native/stack.py down
 - `prepare` 独占创建 `../.local/dev/native/`，检查证书、公钥、签名器和权限，再建六个业务库及独立的 `collection_dev` 开发库。已有目录会拒绝覆盖。只生成配置可用 `prepare --files-only`，之后用相同管理员连接执行 `provision`。数据库步骤失败时保留生成材料，用 `provision` 重试。角色带本栈标记，遇到同名旧角色或他栈库会拒绝接管。管理员 URL 不持久化。
 - 数据库名为 `aipay_<服务>`，迁移角色为服务名。IAM、ledger、payment、reconciliation 以迁移脚本授权的 `<服务>_app` 非 owner 身份运行。backend、settlement 使用各自独立的开发角色。notifier 使用 payment 的二进制和自己的 mTLS 身份，upstream-sim 使用内存存储；两者都没有数据库或迁移。
 - 缓存 Redis 的 DB 0–5 依次分配给 backend、IAM、ledger、settlement、reconciliation、payment，传入 URL 的 DB 部分由栈替换。队列有独立实例，IAM 和 payment 分别用 DB 1、5。提供 `AIPAY_DEV_QUEUE_REDIS_URL` 会使用已有的持久化、noeviction 队列实例；仅有缓存 URL 时，栈用本机 `redis-server` 和 `redis-cli` 在 127.0.0.1:6389 管理第二个实例，启用 AOF 并将队列数据保存在状态目录。
-- `build` 以 `GOWORK=off` 构建七个业务二进制、两个预存开发工具和演示驱动，继承调用方的 Go 构建缓存。可先用 `build --bin-dir <目录>` 仅做构建。联调构建对 IAM、payment 在临时 modfile 中选用含 file signer 的已发布 v0.5.0。其他服务使用自身依赖。部署时各属主应自行确认并升级固定版本。
+- `build` 以 `GOWORK=off` 构建七个业务二进制、两个预存开发工具和演示驱动，继承调用方的 Go 构建缓存。可先用 `build --bin-dir <目录>` 仅做构建。联调构建对 IAM、payment 在临时 modfile 中选用含 file signer 的已发布 v0.5.0。其他服务使用自身依赖。部署时各属主应自行确认并升级固定版本。发版前要验证尚未打标签的 observability、servicekit 改动时，用 `build --workspace` 按工作区根目录的 go.work 构建六个属主服务（upstream-sim 和开发工具不变）；新的校验和只写入 go.work.sum，不改各仓库。
 - 监听地址均为 127.0.0.1。IAM、ledger、settlement、reconciliation、payment、notifier 的 gRPC 端口分别为 9101、9102、9103、9104、9105、9115。backend 公网、平台与卖方监听分别为 8080、8081、8082。模拟上游 API 为 9080，浏览器收银链接用 HTTPS 9443，客户端仅需信任本栈的 `certs/ca.crt`。upstream-sim 重启后原模拟订单与收银链接失效。
 - `up` 逐个等待服务就绪；gRPC 使用属主 CLI（含 `notifier healthcheck`），backend 使用 `/health/ready`，upstream-sim 使用 `/healthz`，收银入口通过 HTTPS 转发该探针。失败时仅回收本次成功启动的进程。日志在 `logs/<service>/`，子 PID 在 `run/<service>.pid`。停机指令通过私有 Unix socket 交给持有子进程句柄的父进程。外部 PostgreSQL、缓存与自备队列不会收到停止指令。`status` 在有服务未就绪时返回非零。
 - 私有 env、7 天证书、持久化 ES256 签名密钥与公钥、EPay 平台 RSA、密封密钥、上游凭据分别存于 `env/`、`certs/`、`inputs/`、`handoff/`。目录 0700、文件 0600。保留整组状态以继续开发；证书过期应协调重签和重启。原有签名链、密封数据仍依赖原业务密钥。不要打印 env、私钥、数据库 URL、整个 Compose 配置或模拟器凭据接口的响应。
 - `prepare` 会生成首份行情。随后先运行一次 `refresh-market`，再生成预存数据集或发布任何资金事件。每次刷新使用刚结束的 UTC 分钟，生成 payment 的十分钟报价、reconciliation 的双来源行情和一小时覆盖事实。payment 每次报价重读文件，命令会重启已运行的 reconciliation 以载入新行情。演示中报价或覆盖即将过期时可再次刷新。
 - ledger 启动时从 `AIPAY_LEDGER_DEV_USD_RATES_FILE` 载入 `inputs/ledger/usd-rates.json`，默认每 30 秒重读。文件是 JSON 数组，每个行情分钟追加一条 USDT/USD 观测，`observed_at` 取该分钟的 UTC 起点，`dev-a` 和 `dev-b` 分别报价 `1.0000` 和 `0.9999`。同一分钟重复刷新沿用原记录。追加后超过 64 KiB 时会报错并保留原文件，可归档已登记的旧观测后再刷新。
 - 商户通知若要实际投递，在 prepare 前提供 `AIPAY_NOTIFIER_EGRESS_PROXY` 和 `AIPAY_NOTIFIER_ALLOWED_HOSTS`，并提供匹配商户地址的回执端。原生演示使用本地 CONNECT 代理 3128 和精确主机 localhost。开发 bot 已配置本地测试 token 和 webhook secret，Bot API 测试端预留 9081。本机驱动提供这两个测试端，浏览器 Cookie 处理方式见下文。
+
+## 本机遥测与日志
+
+准备好的栈默认使用文件日志，遥测关闭。先 `down`，选择模式，再 `up`。切换即时写入栈状态，可以复用已经生成的服务 env 文件。
+
+```sh
+stack() { python3 -B dev/native/stack.py "$@"; }
+stack down
+stack telemetry on
+stack telemetry status
+stack up
+stack status
+```
+
+本机模式需要已安装的 `otelcol-contrib` 或 `otelcol`，以及支持 OTLP 接收端和资源属性提升的 Prometheus。可在调用 `telemetry on` 时用 `AIPAY_DEV_OTELCOL_BIN` 与 `AIPAY_DEV_PROMETHEUS_BIN` 指定可执行文件。控制器将解析出的路径写入私有的 `native/telemetry.json`。Collector 和 Prometheus 先于业务进程启动，分别监听回环端口 4317 和 9090。配置见 `native/telemetry/`，Prometheus 数据保存在 `native/data/prometheus/`，保留两天。
+
+外部模式使用 `stack telemetry on --endpoint https://collector.example:4317`，端点须包含主机和端口。栈向 Go 服务注入指标端点、`local` 环境、`5s` 导出周期与 `3s` 导出超时（超时须小于周期）。仅对外部非回环 HTTP 端点添加明文许可。通过 `stack telemetry off` 关闭。所有切换均在停机时执行，`telemetry status` 可随时查看。
+
+接入指标 provider 的服务运行并收到调用后，可在本机 Prometheus 的 `http://127.0.0.1:9090` 执行以下 PromQL。
+
+```promql
+kaivo_service_ready{deployment_environment_name="local"}
+sum by (rpc_service, grpc_code) (rate(kaivo_rpc_server_duration_seconds_count[5m]))
+kaivo_queue_tasks{state="pending"}
+```
+
+`stack logs stdout` 切到标准输出验证模式，`stack logs file` 恢复文件模式。支持该日志配置的服务在 stdout 模式下将 JSON 随 supervisor 写入 `native/logs/<服务>/process.log`。本机与 Compose 的新 env 文件均默认使用 `AIPAY_LOG_OUTPUT=file`。输出效果取决于各服务二进制接入的日志与指标版本。
 
 ## 阶段 2 演示驱动
 

@@ -17,20 +17,30 @@ from stack_config import (DEPOSIT_SERVICES, LIBRARY, OWNERS, SERVICES, STATE, WO
                           native_deposit_inputs, prepare, read_env, refresh, save_env, upgrade_demo, write)
 from deposit_scenario import SPEC, generate
 from verify import verify
+import telemetry
 from processes import health, request, service_env, services, start, stop, supervise
 
 ROOT = STATE / "native"
 
 
-def build(out):
+def build(out, workspace=False):
     out.mkdir(mode=0o700, parents=True, exist_ok=True)
     env = os.environ | {"GOWORK": "off"}
+    work = WORKSPACE / "go.work"
+    if workspace and not work.is_file():
+        raise ValueError("--workspace requires go.work in the workspace root")
     for name in (*DEPOSIT_SERVICES, "demo"):
         binary = "kaivo-" + name
         subprocess.run(["go", "build", "-mod=readonly", "-o", str(out / binary), "./cmd/" + binary],
                        cwd=LIBRARY / "dev/tools", env=env, check=True)
     for svc in (*OWNERS, "upstream-sim"):
         repo = WORKSPACE / svc
+        if workspace and svc != "upstream-sim":
+            # Pre-release verification only: unreleased sibling libraries come from
+            # the workspace. Go records new checksums in go.work.sum, not the repos.
+            subprocess.run(["go", "build", "-o", str(out / svc), "."], cwd=repo, env=os.environ | {"GOWORK": str(work)}, check=True)
+            print(f"built {svc} (workspace)", flush=True)
+            continue
         with tempfile.TemporaryDirectory() as tmp:
             # Even module resolution must not update the read-only sibling repos.
             mod = Path(tmp) / "go.mod"
@@ -113,6 +123,17 @@ def deposits(root, seller, finalized, spec=None, delay_collection=False):
     write(marker, "" if finalized is None else str(finalized))
 
 
+def change_mode(root, action, mode, endpoint=None):
+    if any(request(name, "pid") for name in (*telemetry.PROCESSES, "queue-redis", *DEPOSIT_SERVICES, *SERVICES, "ledger-reader")):
+        raise ValueError(f"run down before changing {action}")
+    if action == "telemetry":
+        telemetry.configure(root, mode, endpoint)
+    elif mode == "stdout":
+        write(root / "logs.stdout", "")
+    else:
+        (root / "logs.stdout").unlink(missing_ok=True)
+
+
 def demo_config(root):
     """Upgrade the previous native stack without regenerating credentials or database roles."""
     if any(request(name, "pid") for name in services(root)):
@@ -125,7 +146,15 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="action", required=True)
     sub.add_parser("prepare").add_argument("--files-only", action="store_true", help="defer database provisioning")
-    sub.add_parser("build").add_argument("--bin-dir", type=Path, help="build separately before prepare")
+    build_parser = sub.add_parser("build")
+    build_parser.add_argument("--bin-dir", type=Path, help="build separately before prepare")
+    build_parser.add_argument("--workspace", action="store_true",
+                              help="build the service repositories with the workspace go.work (pre-release checks)")
+    modes = sub.add_parser("telemetry").add_subparsers(dest="mode", required=True)
+    modes.add_parser("on").add_argument("--endpoint")
+    modes.add_parser("off")
+    modes.add_parser("status")
+    sub.add_parser("logs").add_argument("mode", choices=("stdout", "file"))
     enable = sub.add_parser("deposits-on")
     enable.add_argument("--seller-account-id", required=True)
     enable.add_argument("--finalized", type=int)
@@ -165,7 +194,7 @@ def main():
             provision()
         return
     if args.action == "build" and args.bin_dir:
-        build(args.bin_dir.resolve())
+        build(args.bin_dir.resolve(), args.workspace)
         return
     if not (ROOT / "prepared").is_file():
         raise ValueError("run prepare first")
@@ -174,7 +203,12 @@ def main():
     with open("controller.lock", "a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         names = services(ROOT)
-        if args.action == "ledger-reader":
+        if args.action == "telemetry" and args.mode == "status":
+            config = telemetry.state(ROOT)
+            print(config["mode"], config.get("endpoint", ""))
+        elif args.action in ("telemetry", "logs"):
+            change_mode(ROOT, args.action, args.mode, getattr(args, "endpoint", None))
+        elif args.action == "ledger-reader":
             if args.mode == "off":
                 stop("ledger-reader")
             else:
@@ -201,7 +235,7 @@ def main():
             cmd = ["receipt", args.operation, str(ROOT / "deposits/scenario.json"), args.key] if args.action == "receipt" else ["head"]
             subprocess.run([str(ROOT / "bin/kaivo-devcollection"), *cmd], env=service_env(ROOT, "devcollection"), check=True)
         elif args.action == "build":
-            build(ROOT / "bin")
+            build(ROOT / "bin", args.workspace)
         elif args.action == "demo-config":
             demo_config(ROOT)
         elif args.action == "provision":
@@ -226,6 +260,9 @@ def main():
                 stop(name)
         elif args.action == "status":
             ready = True
+            for name in telemetry.PROCESSES:
+                if name not in names:
+                    print(f"{name:16} disabled")
             for name in names:
                 pid = request(name, "pid")
                 state = "stopped" if not pid else "ready" if health(ROOT, name) else "unready"
@@ -245,7 +282,7 @@ def main():
 
 if __name__ == "__main__":
     try:
-        if len(sys.argv) == 3 and sys.argv[1] == "_run" and sys.argv[2] in (*SERVICES, *DEPOSIT_SERVICES, "queue-redis", "ledger-reader"):
+        if len(sys.argv) == 3 and sys.argv[1] == "_run" and sys.argv[2] in (*SERVICES, *DEPOSIT_SERVICES, *telemetry.PROCESSES, "queue-redis", "ledger-reader"):
             os.umask(0o077)
             supervise(Path.cwd().parent, sys.argv[2])
         else:

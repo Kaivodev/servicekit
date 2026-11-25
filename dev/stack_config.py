@@ -19,7 +19,7 @@ SERVICES = ("iam", "ledger", "payment", "notifier", "reconciliation", "settlemen
 OWNERS = tuple(s for s in SERVICES if s not in ("notifier", "upstream-sim", "cashier"))
 APP_ROLES = ("iam", "ledger", "payment", "reconciliation")
 DEPOSIT_SERVICES = ("devchain", "devcollection")
-PORTS = {"devchain": 8545, "devcollection": 9106, "iam": 9101, "ledger": 9102, "settlement": 9103, "reconciliation": 9104, "payment": 9105,
+PORTS = {"otelcol": 4317, "prometheus": 9090, "devchain": 8545, "devcollection": 9106, "iam": 9101, "ledger": 9102, "settlement": 9103, "reconciliation": 9104, "payment": 9105,
          "notifier": 9115, "upstream-sim": 9080, "cashier": 9443, "backend": 8080}
 CACHE_DB = {"backend": 0, "iam": 1, "ledger": 2, "settlement": 3, "reconciliation": 4, "payment": 5}
 PEERS = {"iam": "backend,payment,settlement", "ledger": "backend,payment,reconciliation,settlement",
@@ -210,7 +210,7 @@ def native_deposit_inputs(root, admin, passwords):
     password = passwords.setdefault("COLLECTION_DEV_DB_PASSWORD", secrets.token_hex(24))
     cert = root / "certs/collection"
     save_env(root / "env/devcollection.env", {
-        "AIPAY_ENVIRONMENT": "development", "AIPAY_DEVCOLLECTION_CHAIN_ID": "31337",
+        "AIPAY_ENVIRONMENT": "development", "AIPAY_LOG_OUTPUT": "file", "AIPAY_DEVCOLLECTION_CHAIN_ID": "31337",
         "AIPAY_DATABASE_URL": database_url(admin, "collection_dev", password, "collection_dev", prefix=""),
         "AIPAY_GRPC_ADDR": f"127.0.0.1:{PORTS['devcollection']}", "AIPAY_GRPC_SERVER_NAME": "collection",
         "AIPAY_RPC_ALLOWED_PEERS": "ledger,reconciliation", "AIPAY_TLS_TRUST_DOMAIN": "aipay.test",
@@ -219,7 +219,7 @@ def native_deposit_inputs(root, admin, passwords):
         "AIPAY_SIGNING_KEY_ID": "collection-dev", "AIPAY_SIGNING_KEY_FILE": cert / "signing.pem",
         "AIPAY_DEVCOLLECTION_JWKS_FILE": root / "certs/public/collection.jwks",
     })
-    save_env(root / "env/devchain.env", {"AIPAY_ENVIRONMENT": "development",
+    save_env(root / "env/devchain.env", {"AIPAY_ENVIRONMENT": "development", "AIPAY_LOG_OUTPUT": "file",
              "AIPAY_DEVCHAIN_DATASET": root / "deposits/chain.json"})
 
 
@@ -469,6 +469,7 @@ def prepare(root, admin, cache, queue, compose=False):
             elif svc == "cashier":
                 env = {"CASHIER_SIM_HOST": "upstream-sim" if compose else "127.0.0.1", "CASHIER_LISTEN_HOST": listen,
                        "CASHIER_CERT": cert / "tls.crt", "CASHIER_KEY": cert / "tls.key"}
+            env["AIPAY_LOG_OUTPUT"] = "file"
             save_env(root / "env" / (svc + ".env"), env | demo_settings(root, svc, compose))
         from verify import verify
         verify(root)

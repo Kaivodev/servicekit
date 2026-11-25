@@ -10,6 +10,8 @@ import (
 	"github.com/Kaivodev/servicekit/config"
 	"github.com/Kaivodev/servicekit/mtls"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
+	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/metric/noop"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc"
@@ -18,6 +20,7 @@ import (
 )
 
 type ClientOptions struct {
+	MeterProvider   metric.MeterProvider
 	TracerProvider  trace.TracerProvider
 	Address         string
 	ServerName      string
@@ -46,11 +49,11 @@ func Connect(ctx context.Context, material *mtls.Material, options ClientOptions
 	dialOptions := []grpc.DialOption{
 		grpc.WithTransportCredentials(transport), grpc.WithDisableRetry(),
 		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(options.MaxMessageBytes), grpc.MaxCallSendMsgSize(options.MaxMessageBytes)),
-		grpc.WithChainUnaryInterceptor(clientDeadline(options.CallTimeout), grpcobs.UnaryClient()),
+		grpc.WithChainUnaryInterceptor(clientMetrics(options.MeterProvider), clientDeadline(options.CallTimeout), grpcobs.UnaryClient()),
 		grpc.WithStreamInterceptor(streamClientCorrelation()),
 	}
 	if options.TracerProvider != nil {
-		dialOptions = append(dialOptions, grpc.WithStatsHandler(otelgrpc.NewClientHandler(otelgrpc.WithTracerProvider(options.TracerProvider), otelgrpc.WithPropagators(propagation.TraceContext{}))))
+		dialOptions = append(dialOptions, grpc.WithStatsHandler(otelgrpc.NewClientHandler(otelgrpc.WithMeterProvider(noop.NewMeterProvider()), otelgrpc.WithTracerProvider(options.TracerProvider), otelgrpc.WithPropagators(propagation.TraceContext{}))))
 	}
 	connection, err := grpc.NewClient("passthrough:///"+options.Address, dialOptions...)
 	if err != nil {

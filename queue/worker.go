@@ -4,13 +4,16 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/Kaivodev/observability/asynqobs"
+	"github.com/Kaivodev/servicekit/internal/instruments"
 	"github.com/hibiken/asynq"
 	"github.com/redis/go-redis/v9"
+	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -19,10 +22,13 @@ var ErrShutdownTimeout = errors.New("queue shutdown exceeded its drain deadline"
 // WorkerOptions holds owner-selected retry policy. A nil function uses Asynq's
 // exponential backoff; retry scheduling never changes task identity or payload.
 type WorkerOptions struct {
-	RetryDelay asynq.RetryDelayFunc
+	MeterProvider metric.MeterProvider
+	TaskTypes     []string
+	RetryDelay    asynq.RetryDelayFunc
 }
 
 type Worker struct {
+	metrics   metric.Registration
 	server    *asynq.Server
 	client    *redis.Client
 	handler   asynq.Handler
@@ -49,9 +55,9 @@ func NewWorker(ctx context.Context, cfg Config, provider trace.TracerProvider, a
 	if len(options) > 1 {
 		return nil, errors.New("queue worker accepts at most one options value")
 	}
-	var retryDelay asynq.RetryDelayFunc
+	var opts WorkerOptions
 	if len(options) == 1 {
-		retryDelay = options[0].RetryDelay
+		opts = options[0]
 	}
 	pool, err := open(ctx, cfg)
 	if err != nil {
@@ -65,8 +71,15 @@ func NewWorker(ctx context.Context, cfg Config, provider trace.TracerProvider, a
 	// A termination signal first stops new admissions; it must not immediately
 	// cancel already-running tasks. Asynq keeps each task's own deadline.
 	base, cancel := context.WithCancel(context.Background())
-	server := asynq.NewServerFromRedisClient(pool, asynq.Config{Concurrency: cfg.Concurrency, Queues: map[string]int{cfg.Name: 1}, BaseContext: func() context.Context { return observer.BaseContext(base) }, ShutdownTimeout: cfg.ShutdownTimeout, Logger: asynqobs.NewFrameworkLogger(runtime), ErrorHandler: observer, RetryDelayFunc: retryDelay})
-	return &Worker{server: server, client: pool, handler: observer.Middleware(handler), config: cfg, log: runtime, cancel: cancel, closed: make(chan struct{})}, nil
+	server := asynq.NewServerFromRedisClient(pool, asynq.Config{Concurrency: cfg.Concurrency, Queues: map[string]int{cfg.Name: 1}, BaseContext: func() context.Context { return observer.BaseContext(base) }, ShutdownTimeout: cfg.ShutdownTimeout, Logger: asynqobs.NewFrameworkLogger(runtime), ErrorHandler: observer, RetryDelayFunc: opts.RetryDelay})
+	observed := observer.Middleware(handler)
+	var reg metric.Registration
+	if opts.MeterProvider != nil {
+		m := instruments.Meter(opts.MeterProvider, "queue")
+		observed = observeAttempts(m, taskLabels{cfg.Name, slices.Clone(opts.TaskTypes)}, observer, handler)
+		reg = observeQueue(base, m, cfg.Name, asynq.NewInspectorFromRedisClient(pool).GetQueueInfo)
+	}
+	return &Worker{metrics: reg, server: server, client: pool, handler: observed, config: cfg, log: runtime, cancel: cancel, closed: make(chan struct{})}, nil
 }
 
 func (w *Worker) Run(ctx context.Context) error {
@@ -129,5 +142,12 @@ func (w *Worker) Close() {
 	}
 }
 func (w *Worker) release() {
-	w.closeOnce.Do(func() { w.cancel(); _ = w.client.Close(); close(w.closed) })
+	w.closeOnce.Do(func() {
+		w.cancel()
+		if w.metrics != nil {
+			_ = w.metrics.Unregister()
+		}
+		_ = w.client.Close()
+		close(w.closed)
+	})
 }

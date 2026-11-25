@@ -67,6 +67,38 @@ python3 script/test-tracing.py --collector /path/to/otelcol-contrib --jaeger /pa
 
 集成测试使用专属临时 schema/队列与仅测试可见的 RPC，覆盖 HTTP → mTLS RPC → PostgreSQL outbox → Asynq 重试 → 下游 RPC/HTTP，校验 trace/span 父子关系、资源、日志及数据库幂等；另测 panic、超时、SkipRetry/RevokeTask、未知任务、实例重建、独立 OS 进程重启和正常/强制排空。测试重启会发送 SIGTERM 并等待退出；不等同于 SIGKILL/断电及租约恢复验证，也不代表真实业务 outbox 或生产部署已经实现。
 
+## 指标
+
+组装根将同一个 OTel `metric.MeterProvider` 显式传给各组件。传入 nil 时不产生指标，采样器也不会执行数据库查询。服务负责创建和关闭 provider。本版使用 observability v0.3.0，`config.Config` 的指标环境变量接入留待下一步。
+
+| 接入点 | OTel 仪表名 | 属性 |
+| --- | --- | --- |
+| `rpc.ServerOptions.MeterProvider` | `kaivo.service.ready` | 无 |
+| 注册的就绪检查 | `kaivo.service.dependency.ready` | `dependency` |
+| 一元服务端、流结束 | `kaivo.rpc.server.duration`、`kaivo.rpc.server.streams` | `rpc_service`、`rpc_method`、`grpc_code` |
+| 正在处理的 RPC | `kaivo.rpc.server.active` | `rpc_service` |
+| 服务端授权拦截器，含缺省拒绝 | `kaivo.authz.denied` | `rpc_service`、`rpc_method`、`peer_service`、`reason` |
+| `rpc.ClientOptions.MeterProvider` | `kaivo.rpc.client.duration` | `rpc_service`、`rpc_method`、`grpc_code` |
+| `postgres.ObservePool(mp, "primary", pool)` | `kaivo.db.pool.connections` | `pool`、`state` |
+| 同一池的 `Stat()` | `kaivo.db.pool.max_connections`、`kaivo.db.pool.acquires`、`kaivo.db.pool.empty_acquires`、`kaivo.db.pool.empty_acquire.wait`、`kaivo.db.pool.canceled_acquires` | `pool` |
+| `queue.ProducerOptions`、`queue.WorkerOptions` 的 `MeterProvider` 和 `TaskTypes` | `kaivo.queue.enqueued`、`kaivo.queue.task.duration` | `queue`、`task_type`、`result` |
+| Worker 自带的 Inspector | `kaivo.queue.tasks`、`kaivo.queue.latency` | 前者为 `queue`、`state`，后者为 `queue` |
+| `puller.ObserveLag(mp)` | `kaivo.eventstream.lag.events` | `stream` |
+| `eventstream.RegisterReceiverSamples(s, db, tables, stream)` | `kaivo.eventstream.stopped`、`kaivo.eventstream.inbox.pending`、`kaivo.eventstream.inbox.oldest_pending` | `stream` |
+| `eventstream.RegisterOutboxSamples(s, db, outbox)` | `kaivo.outbox.pending`、`kaivo.outbox.oldest_pending` | `outbox` |
+| `telemetry.NewSampler(mp, telemetry.Options{Log: runtimeLog})` | `kaivo.metrics.sample.failures` | `sampler` |
+
+RPC 耗时取秒，状态码使用 gRPC 的名称。健康服务从 RPC 与授权指标中排除。服务端按注册表限定方法，客户端按完整方法路径的格式校验。无法识别时两个方法标签均为 `other`。流计数使用注册描述符，grpc-go 直接拒绝的未知方法计入 `other/other` 耗时。任务类型取属主登记的固定值，其余归入 `other`。连接池名使用最多 32 字符的小写标识符，以字母开头。
+
+每进程创建一个采样器，先登记各流、outbox 和业务仪表，再随服务生命周期启动 `go s.Run(ctx)`。业务使用 `RegisterInt64` 或 `RegisterSeconds`，返回 `[]telemetry.Point[int64]` 或 `[]telemetry.Point[float64]`。采样器名、属性键和点分仪表名的每段均匹配 `[a-z][a-z0-9_]*`。每个点提供全部已登记的属性键，属性值只用固定枚举或部署配置。查询使用传入的 context。默认立即采样，此后每 30 秒一次，每次最多 5 秒，可通过 `Options.Interval` 和 `Timeout` 调整。导出只读缓存，查询失败会撤下该项旧值并计数。
+
+每个活跃的流和 outbox 只登记一次。在已有的流头检查计划里调用 `CheckHead`，首次成功后才有 lag 值。关闭连接池、替换 puller 前，调用 `ObservePool`、`ObserveLag` 返回的注销函数。停止采样器后再关闭它使用的数据库。
+
+## v0.7.0（待发布）
+
+- 合入 v0.6.0 的 command digest 能力，包括可选的 `CommandSHA256`、`SessionID` 和 `WebEntry` 声明及其格式校验。
+- 新增可选的 gRPC、连接池、Asynq、签名事件流指标和业务采样器，以及本机遥测和日志开关。现有构造调用可继续使用，授权、就绪和排空语义兼容。原有 otelgrpc 追踪显式使用空的指标 provider。
+
 ## 名称与兼容性
 
 项目品牌统一为 **Kaivo**，GitHub 组织为 **Kaivodev**。Go module 已迁到 `github.com/Kaivodev/servicekit`，`GOPRIVATE` 使用同样大小写的 `github.com/Kaivodev/*`；协议/签名标识及现有配置键暂时保留原值，属于兼容接口；改名不修改历史账本或协议语义。范围与迁移规则见[命名约定](https://github.com/Kaivodev/docs/blob/main/design/naming.md)。

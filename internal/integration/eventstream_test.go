@@ -517,11 +517,18 @@ func TestUnknownEventTypeStopsStream(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if lag, err := puller.CheckHead(ctx); err != nil || lag != 3 {
+		t.Fatalf("initial head %d: %v", lag, err)
+	}
 	pulled, err := puller.Pull(ctx)
 	var stopErr *eventstream.StopError
 	if pulled != 2 || !errors.As(err, &stopErr) || stopErr.Reason != eventstream.ReasonUnknownEvent {
 		t.Fatalf("pulled=%d err=%v", pulled, err)
 	}
+	if _, err := puller.CheckHead(ctx); !errors.Is(err, eventstream.ErrStopped) {
+		t.Fatal(err)
+	}
+	checkEventSamples(t, producer, receiver, puller)
 }
 
 func TestReplayGuardOnPostgres(t *testing.T) {
