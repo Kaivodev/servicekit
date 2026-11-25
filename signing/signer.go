@@ -1,7 +1,7 @@
 // Package signing provides business signers and public key registries for
-// cross-domain assertions such as signed events. Every signature is ECDSA P-256
-// over SHA-256 of the message, ASN.1 DER encoded. Production keys stay in a
-// KMS/HSM; the in-memory signer exists only for local development.
+// cross-domain assertions. Signer uses DER-encoded ECDSA P-256 signatures and
+// RSASigner uses PKCS#1 v1.5. Both hash messages with SHA-256. Production
+// keys stay in a KMS or HSM.
 package signing
 
 import (
@@ -18,6 +18,7 @@ import (
 	"io"
 	"os"
 	"regexp"
+	"unicode/utf8"
 
 	"github.com/Kaivodev/servicekit/config"
 )
@@ -41,9 +42,8 @@ type Signer interface {
 	Sign(ctx context.Context, message []byte) ([]byte, error)
 }
 
-// KMSKey is one asymmetric ECDSA P-256 key held by a cloud KMS or HSM. The
-// adapter binds the provider's key resource and returns DER signatures; the
-// private key never leaves the provider.
+// KMSKey binds one provider key to a SHA-256 digest signing operation. It
+// returns DER for P-256 or PKCS#1 v1.5 signature bytes for RSA.
 type KMSKey interface {
 	PublicKey(ctx context.Context) (crypto.PublicKey, error)
 	SignDigest(ctx context.Context, digest []byte) ([]byte, error)
@@ -54,16 +54,28 @@ type Config struct {
 	Backend     string
 	KeyID       string
 	KeyFile     string
+	KMSKey      string
 }
 
-// Load reads AIPAY_ENVIRONMENT, AIPAY_SIGNING_BACKEND (default kms) and
-// AIPAY_SIGNING_KEY_ID. It does not open the key.
+// Load reads the default AIPAY_SIGNING configuration.
 func Load(get func(string) string) (Config, error) {
+	return LoadPrefixed(get, "AIPAY_SIGNING")
+}
+
+// LoadPrefixed reads AIPAY_ENVIRONMENT and the signing backend, key ID, key
+// file and KMS key under prefix. The default backend is kms.
+func LoadPrefixed(get func(string) string, prefix string) (Config, error) {
 	environment, err := config.LoadEnvironment(get)
 	if err != nil {
 		return Config{}, err
 	}
-	cfg := Config{Environment: environment, Backend: get("AIPAY_SIGNING_BACKEND"), KeyID: get("AIPAY_SIGNING_KEY_ID"), KeyFile: get("AIPAY_SIGNING_KEY_FILE")}
+	cfg := Config{
+		Environment: environment,
+		Backend:     get(prefix + "_BACKEND"),
+		KeyID:       get(prefix + "_KEY_ID"),
+		KeyFile:     get(prefix + "_KEY_FILE"),
+		KMSKey:      get(prefix + "_KMS_KEY"),
+	}
 	if cfg.Backend == "" {
 		cfg.Backend = BackendKMS
 	}
@@ -72,10 +84,13 @@ func Load(get func(string) string) (Config, error) {
 
 func (c Config) Validate() error {
 	if !ValidKeyID(c.KeyID) {
-		return errors.New("AIPAY_SIGNING_KEY_ID must name the signing key")
+		return errors.New("a valid signing key ID is required")
 	}
 	switch c.Backend {
 	case BackendKMS:
+		if c.KMSKey == "" || utf8.RuneCountInString(c.KMSKey) > 512 {
+			return errors.New("a KMS key resource of at most 512 characters is required")
+		}
 		return nil
 	case BackendMemory:
 		if c.Environment != config.Development {
@@ -84,11 +99,11 @@ func (c Config) Validate() error {
 		return nil
 	case BackendFile:
 		if c.Environment != config.Development || c.KeyFile == "" {
-			return errors.New("the file signer requires AIPAY_ENVIRONMENT=development and AIPAY_SIGNING_KEY_FILE")
+			return errors.New("the file signer requires AIPAY_ENVIRONMENT=development and a key file")
 		}
 		return nil
 	default:
-		return errors.New("AIPAY_SIGNING_BACKEND must be kms, memory or file")
+		return errors.New("signing backend must be kms, memory or file")
 	}
 }
 
@@ -112,6 +127,19 @@ func Open(ctx context.Context, cfg Config, key KMSKey) (Signer, error) {
 }
 
 func openDevelopmentFile(keyID, path string) (Signer, error) {
+	parsed, err := readDevelopmentKey(path, false)
+	if err != nil {
+		return nil, err
+	}
+	private, ok := parsed.(*ecdsa.PrivateKey)
+	if !ok || private.Curve != elliptic.P256() {
+		return nil, errors.New("development signing key must be ECDSA P-256")
+	}
+	return &memorySigner{id: keyID, key: private}, nil
+}
+
+// readDevelopmentKey accepts one PKCS#8 PEM block, or binary DER when enabled.
+func readDevelopmentKey(path string, allowDER bool) (any, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, errors.New("open development signing key failed")
@@ -121,24 +149,29 @@ func openDevelopmentFile(keyID, path string) (Signer, error) {
 	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 {
 		return nil, errors.New("development signing key must be a private regular file")
 	}
-	data, err := io.ReadAll(io.LimitReader(f, 4097))
-	if err != nil || len(data) > 4096 {
+	limit := 4096
+	if allowDER {
+		limit = 64 << 10
+	}
+	data, err := io.ReadAll(io.LimitReader(f, int64(limit)+1))
+	defer clear(data)
+	if err != nil || len(data) > limit {
 		return nil, errors.New("read development signing key failed")
 	}
-	defer clear(data)
-	block, rest := pem.Decode(data)
-	if block == nil || block.Type != "PRIVATE KEY" || len(bytes.TrimSpace(rest)) != 0 {
-		return nil, errors.New("development signing key must be one PKCS#8 PEM block")
+	der := data
+	if !allowDER || bytes.HasPrefix(bytes.TrimSpace(data), []byte("-----BEGIN")) {
+		block, rest := pem.Decode(data)
+		if block == nil || block.Type != "PRIVATE KEY" || len(bytes.TrimSpace(rest)) != 0 {
+			return nil, errors.New("development signing key must be one PKCS#8 PEM block")
+		}
+		der = block.Bytes
+		defer clear(der)
 	}
-	parsed, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+	parsed, err := x509.ParsePKCS8PrivateKey(der)
 	if err != nil {
 		return nil, errors.New("parse development signing key failed")
 	}
-	private, ok := parsed.(*ecdsa.PrivateKey)
-	if !ok || private.Curve != elliptic.P256() {
-		return nil, errors.New("development signing key must be ECDSA P-256")
-	}
-	return &memorySigner{id: keyID, key: private}, nil
+	return parsed, nil
 }
 
 // NewKMS checks that the KMS key is P-256 before any signature is requested.
@@ -151,7 +184,7 @@ func NewKMS(ctx context.Context, keyID string, key KMSKey) (Signer, error) {
 		return nil, errors.New("read KMS public key failed")
 	}
 	ec, ok := public.(*ecdsa.PublicKey)
-	if !ok || ec.Curve != elliptic.P256() {
+	if !ok || ec == nil || ec.Curve != elliptic.P256() {
 		return nil, errors.New("KMS key must be ECDSA P-256")
 	}
 	return &kmsSigner{id: keyID, key: key, public: ec}, nil

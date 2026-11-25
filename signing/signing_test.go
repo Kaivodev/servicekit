@@ -63,7 +63,7 @@ func TestMemorySignerRefusedOutsideDevelopment(t *testing.T) {
 }
 
 func TestDefaultBackendIsKMS(t *testing.T) {
-	cfg, err := Load(env(map[string]string{"AIPAY_SIGNING_KEY_ID": "payment-events-1"}))
+	cfg, err := Load(env(map[string]string{"AIPAY_SIGNING_KEY_ID": "payment-events-1", "AIPAY_SIGNING_KMS_KEY": "resource"}))
 	if err != nil || cfg.Backend != BackendKMS || cfg.Environment != config.Production {
 		t.Fatalf("cfg=%+v err=%v", cfg, err)
 	}
@@ -170,7 +170,7 @@ func TestKMSSigner(t *testing.T) {
 	other, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	p384, _ := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
 	ctx := context.Background()
-	signer, err := Open(ctx, Config{Environment: config.Production, Backend: BackendKMS, KeyID: "ledger-checkpoints-1"}, fakeKMS{key: key, public: &key.PublicKey})
+	signer, err := Open(ctx, Config{Environment: config.Production, Backend: BackendKMS, KeyID: "ledger-checkpoints-1", KMSKey: "resource"}, fakeKMS{key: key, public: &key.PublicKey})
 	if err != nil {
 		t.Fatal(err)
 	}

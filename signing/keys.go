@@ -162,3 +162,19 @@ func MarshalJWKS(keys map[string]*ecdsa.PublicKey) ([]byte, error) {
 	}
 	return out.Bytes(), nil
 }
+
+// CheckRegistered verifies the signer's key ID and public key before startup.
+func CheckRegistered(signer Signer, registry *PublicKeys) error {
+	if signer == nil || registry == nil {
+		return ErrUnknownKey
+	}
+	key, ok := registry.keys[signer.KeyID()]
+	if !ok {
+		return ErrUnknownKey
+	}
+	public := signer.PublicKey()
+	if public == nil || public.X == nil || public.Y == nil || !key.Equal(public) {
+		return errors.New("registered public key differs from the signing key")
+	}
+	return nil
+}
