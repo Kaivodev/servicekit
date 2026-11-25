@@ -456,11 +456,11 @@ func TestGeneratedContractPolicies(t *testing.T) {
 		t.Fatalf("Authorize policy %+v", authorize)
 	}
 	list, ok := policies.Lookup("/aipay.events.v1.EventStreamService/ListEvents")
-	if _, admitted := list.Rule("payment"); !ok || admitted {
+	if _, admitted := list.Rule("backend"); !ok || admitted {
 		t.Fatal("ListEvents admits a non-receiver")
 	}
-	for _, receiver := range []string{"ledger", "reconciliation", "settlement"} {
-		if _, admitted := list.Rule(receiver); !admitted {
+	for _, receiver := range []string{"payment", "ledger", "reconciliation", "settlement"} {
+		if rule, admitted := list.Rule(receiver); !admitted || rule.Requirement != NotRequired {
 			t.Fatalf("ListEvents does not admit %s", receiver)
 		}
 	}
@@ -521,6 +521,98 @@ func signRaw(t *testing.T, signer interface {
 		t.Fatal(err)
 	}
 	return input + "." + base64.RawURLEncoding.EncodeToString(derToRaw(t, der))
+}
+
+func TestCommandClaims(t *testing.T) {
+	f := newFixture(t)
+	// Synthetic values; the command digest is deliberately not the request fingerprint.
+	const digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	const session = "019a3142-4000-7000-8000-00000000abcd"
+	for _, tc := range []struct {
+		name    string
+		command string
+		session string
+		entry   WebEntry
+	}{
+		{name: "legacy omission"},
+		{name: "bot command without website", command: digest},
+		{name: "session without website", session: session},
+		{name: "platform command", command: digest, session: session, entry: WebEntryPlatformAdmin},
+		{name: "portal read without command", session: session, entry: WebEntryUpstreamPortal},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			claims := validClaims()
+			claims.CommandSHA256, claims.SessionID, claims.WebEntry = tc.command, tc.session, tc.entry
+			token, err := SignAssertion(context.Background(), f.iam, claims)
+			if err != nil {
+				t.Fatal(err)
+			}
+			call, md, err := f.call("Recent", "backend", token)
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertion, ok := call.Assertion()
+			if !ok || assertion.CommandSHA256() != tc.command || assertion.SessionID() != tc.session || assertion.WebEntry() != tc.entry {
+				t.Fatal("verified command/session/entry differs from signed claims")
+			}
+			claims.CommandSHA256, claims.SessionID, claims.WebEntry = "changed", "changed", "changed"
+			if assertion.CommandSHA256() != tc.command || assertion.SessionID() != tc.session || assertion.WebEntry() != tc.entry || len(md.Get(MetadataKey)) != 0 {
+				t.Fatal("assertion view changed or raw credential reached handler")
+			}
+		})
+	}
+	legacy, err := json.Marshal(validClaims())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"command_sha256", "session_id", "web_entry"} {
+		if bytes.Contains(legacy, []byte(`"`+name+`"`)) {
+			t.Fatal("optional claim changed legacy wire output")
+		}
+	}
+	// Sign raw JSON to bypass issuer validation: rejection must happen at the
+	// receiver as well, not just when using our SignAssertion implementation.
+	for name, extra := range map[string]string{
+		"short digest":      `"command_sha256":"` + digest[:63] + `"`,
+		"long digest":       `"command_sha256":"` + digest + `0"`,
+		"uppercase digest":  `"command_sha256":"` + strings.ToUpper(digest) + `"`,
+		"nonhex digest":     `"command_sha256":"g` + digest[1:] + `"`,
+		"uuid version":      `"session_id":"019a3142-4000-4000-8000-00000000abcd"`,
+		"uuid variant":      `"session_id":"019a3142-4000-7000-c000-00000000abcd"`,
+		"uppercase session": `"session_id":"` + strings.ToUpper(session) + `"`,
+		"unknown entry":     `"web_entry":"merchant_portal"`,
+		"empty digest":      `"command_sha256":""`,
+		"null digest":       `"command_sha256":null`,
+		"nonstring digest":  `"command_sha256":123`,
+		"empty session":     `"session_id":""`,
+		"null session":      `"session_id":null`,
+		"nonstring session": `"session_id":{}`,
+		"empty entry":       `"web_entry":""`,
+		"null entry":        `"web_entry":null`,
+		"nonstring entry":   `"web_entry":true`,
+		"duplicate digest":  `"command_sha256":"` + digest + `","command_sha256":"` + digest + `"`,
+		"duplicate session": `"session_id":"` + session + `","session_id":"` + session + `"`,
+		"conflicting entry": `"web_entry":"platform_admin","web_entry":"upstream_portal"`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			body := string(legacy[:len(legacy)-1]) + "," + extra + "}"
+			_, _, err := f.call("Recent", "backend", signRaw(t, f.iam, body))
+			expect(t, err, codes.Unauthenticated)
+		})
+	}
+	for name, edit := range map[string]func(*Claims){
+		"digest":  func(c *Claims) { c.CommandSHA256 = strings.ToUpper(digest) },
+		"session": func(c *Claims) { c.SessionID = "session-1" },
+		"entry":   func(c *Claims) { c.WebEntry = "merchant_portal" },
+	} {
+		t.Run("issuer rejects "+name, func(t *testing.T) {
+			claims := validClaims()
+			edit(&claims)
+			if _, err := SignAssertion(context.Background(), f.iam, claims); err == nil {
+				t.Fatal("malformed optional claim signed")
+			}
+		})
+	}
 }
 
 func TestActingScopeVerification(t *testing.T) {

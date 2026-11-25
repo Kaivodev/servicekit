@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -69,6 +70,9 @@ func register(service string, methods ...string) rpc.Register {
 					}
 					if account, ok := call.Account(); ok {
 						_ = grpc.SetHeader(ctx, metadata.Pairs("x-test-account", account.ID))
+					}
+					if assertion, ok := call.Assertion(); ok {
+						_ = grpc.SetHeader(ctx, metadata.Pairs("x-test-command", assertion.CommandSHA256(), "x-test-session", assertion.SessionID(), "x-test-entry", string(assertion.WebEntry())))
 					}
 					return &emptypb.Empty{}, nil
 				})
@@ -201,6 +205,40 @@ func TestAuthorizationOverMutualTLS(t *testing.T) {
 	account, err := invoke(backend, "CreateWithdrawal", token)
 	if err != nil || account != "account-1" {
 		t.Fatalf("account=%q err=%v", account, err)
+	}
+	// A real mTLS request carries signed optional claims through the verifier
+	// and authorization context. This is a transport fixture, not a web login.
+	const command = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+	const session = "019a3142-4000-7000-8000-00000000abcd"
+	webToken := issue(func(c *authz.Claims) {
+		c.Permission = "settlement.withdrawal.read"
+		c.CommandSHA256, c.SessionID, c.WebEntry = command, session, authz.WebEntryPlatformAdmin
+		c.ActingScope.Type = authz.ScopePlatform
+		c.AMR = []string{"webauthn", "mfa"}
+	})
+	var headers metadata.MD
+	webCtx := metadata.AppendToOutgoingContext(context.Background(), authz.MetadataKey, webToken)
+	if err := backend.Invoke(webCtx, "/"+name+"/GetWithdrawal", &emptypb.Empty{}, &emptypb.Empty{}, grpc.Header(&headers)); err != nil {
+		t.Fatal(err)
+	}
+	for key, want := range map[string]string{"x-test-command": command, "x-test-session": session, "x-test-entry": "platform_admin"} {
+		if got := headers.Get(key); len(got) != 1 || got[0] != want {
+			t.Fatalf("verified header %s differs from signed claim", key)
+		}
+	}
+	parts := strings.Split(webToken, ".")
+	body, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	for old, replacement := range map[string]string{command: strings.Repeat("0", 64), session: "019a3142-4000-7000-8000-00000000abce", "platform_admin": "upstream_portal"} {
+		changed := strings.Replace(string(body), old, replacement, 1)
+		if changed == string(body) {
+			t.Fatal("tamper fixture did not change the signed claim")
+		}
+		forged := parts[0] + "." + base64.RawURLEncoding.EncodeToString([]byte(changed)) + "." + parts[2]
+		_, err := invoke(backend, "GetWithdrawal", forged)
+		expect("tampered optional claim", err, codes.Unauthenticated)
 	}
 	// A business role of the same account cannot reach account-wide funds.
 	businessScope := authz.Scope{Type: authz.ScopeBusiness, AccountID: "account-1", AccountType: authz.AccountOrganization, BusinessID: "business-1"}
