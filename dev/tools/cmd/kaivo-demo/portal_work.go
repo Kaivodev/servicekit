@@ -100,7 +100,7 @@ func (d *driver) sellerOffline() {
 	})
 	d.step("下线期间拒绝新订单", func() {
 		number := d.key("offline/rejected")
-		code, r := d.signedEPay("v2", "/api/pay/create", createParams(number))
+		code, r := d.signedEPay("v2", "/api/pay/create", d.createParams(number))
 		require(code == 200 && num(r, "code") == -1 && r["msg"] == "支付通道不可用" && r["pay_info"] == nil, "expected signed no-channel rejection")
 		rows := d.rows("payment", "payment_orders", "SELECT id FROM payment_orders WHERE application_id=$1 AND out_trade_no=$2", d.required("app/v2"), number)
 		require(len(rows) == 0, "offline order was inserted")
@@ -145,7 +145,7 @@ func (d *driver) archivedWork() {
 			if sample["archived_at"] != nil || sample["completed_at"] != nil || !time.Now().Before(end) {
 				break
 			}
-			time.Sleep(min(10*time.Second, time.Until(end)))
+			d.sleep(min(10*time.Second, time.Until(end)))
 		}
 		d.login("sre")
 		path := "/archived-work?kind=order&page_size=100"
@@ -196,7 +196,7 @@ func (d *driver) archivedWork() {
 	t.step("关闭已验收的未付样本", func() {
 		d.login("seller")
 		d.login("operations")
-		d.stack("refresh-market")
+		d.refreshMarket()
 		d.epay("v2", "/api/pay/close", url.Values{"out_trade_no": {t.number}})
 		t.terminal("CANCELLED")
 	})

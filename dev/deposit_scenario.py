@@ -29,7 +29,7 @@ def ledger_units(raw):
     return units
 
 
-def generate(out, account_id, spec_path=SPEC):
+def generate(out, account_id, spec_path=SPEC, *, rpc_url=None, bindings_file=None):
     seller = uuid.UUID(account_id)
     if seller.version != 7 or str(seller) != account_id:
         raise ValueError("expected canonical seller account UUIDv7")
@@ -97,9 +97,9 @@ def generate(out, account_id, spec_path=SPEC):
             dict(**binding, valid_from_block=1, valid_to_block=latest)]))
         save_env(stage / "reconciliation.env", {
             "AIPAY_RECON_POLL_INTERVAL": "1s", "AIPAY_RECON_BATCH": "100",
-            "AIPAY_RECON_EVM_RPC_URL": f"http://127.0.0.1:{PORTS['devchain']}", "AIPAY_RECON_EVM_TIMEOUT": "5s",
+            "AIPAY_RECON_EVM_RPC_URL": rpc_url or f"http://127.0.0.1:{PORTS['devchain']}", "AIPAY_RECON_EVM_TIMEOUT": "5s",
             "AIPAY_RECON_EVM_CHAIN_ID": "31337", "AIPAY_RECON_EVM_REGISTRY_VERSION": "bsc-usdt-v1",
-            "AIPAY_RECON_BINDINGS_FILE": out.resolve() / "bindings.json",
+            "AIPAY_RECON_BINDINGS_FILE": bindings_file or out.resolve() / "bindings.json",
             "AIPAY_RECON_SCREENING_MODE": "development_allow", "AIPAY_RECON_SCREENING_POLICY": "seller-deposit-v1"})
         stage.rename(out)
 
@@ -110,5 +110,7 @@ if __name__ == "__main__":
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--seller-account-id", required=True)
     parser.add_argument("--spec", type=Path, default=SPEC)
+    parser.add_argument("--rpc-url")
+    parser.add_argument("--bindings-file")
     args = parser.parse_args()
-    generate(args.out, args.seller_account_id, args.spec)
+    generate(args.out, args.seller_account_id, args.spec, rpc_url=args.rpc_url, bindings_file=args.bindings_file)

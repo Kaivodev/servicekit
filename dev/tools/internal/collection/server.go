@@ -9,7 +9,6 @@ import (
 	eventsv1 "github.com/Kaivodev/protobuf/gen/go/aipay/events/v1"
 	"github.com/Kaivodev/servicekit/authz"
 	"github.com/Kaivodev/servicekit/config"
-	"github.com/Kaivodev/servicekit/mtls"
 	"github.com/Kaivodev/servicekit/rpc"
 	"github.com/Kaivodev/servicekit/signing"
 	"google.golang.org/grpc"
@@ -38,7 +37,7 @@ func FileSigner(ctx context.Context, get func(string) string) (signing.Signer, e
 	return signer, nil
 }
 
-func NewServer(cfg config.Config, material *mtls.Material, reader eventsv1.EventStreamServiceServer, check rpc.Check) (*rpc.Server, error) {
+func NewServer(cfg config.Config, material rpc.Transport, reader eventsv1.EventStreamServiceServer, check rpc.Check) (*rpc.Server, error) {
 	peers := slices.Clone(cfg.RPC.AllowedPeers)
 	slices.Sort(peers)
 	if !slices.Equal(peers, []string{"ledger", "reconciliation"}) {
@@ -59,7 +58,7 @@ func NewServer(cfg config.Config, material *mtls.Material, reader eventsv1.Event
 		HealthTimeout: cfg.HealthTimeout, HealthInterval: cfg.HealthInterval,
 		ShutdownTimeout: cfg.ShutdownTimeout,
 	}
-	return rpc.NewServer(options, material, log, log, map[string]rpc.Check{"collection": check, "tls": material.Check}, func(server grpc.ServiceRegistrar) {
+	return rpc.NewServer(options, material, log, log, map[string]rpc.Check{"collection": check, "transport": material.Check}, func(server grpc.ServiceRegistrar) {
 		eventsv1.RegisterEventStreamServiceServer(server, reader)
 	})
 }

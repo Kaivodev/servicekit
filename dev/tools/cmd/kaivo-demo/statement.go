@@ -77,7 +77,7 @@ func (d *driver) statement() {
 		d.evidence("close_eligible_at", cutoff.Format(time.RFC3339))
 		d.report()
 		if delay := time.Until(cutoff); delay > 0 {
-			time.Sleep(delay)
+			d.sleep(delay)
 		}
 		waitFor("已结束业务日的商户日结（检查日结任务与迁移 000016）", 2*time.Minute, func() bool {
 			if selectFile() {
@@ -105,7 +105,7 @@ func (d *driver) statement() {
 		manifestHash := str(published, "manifest_sha256")
 		require(doc.Caption == "业务日 "+date+"\nmanifest_sha256 "+manifestHash, "document caption differs from published manifest")
 		require(len(doc.SHA256) == 64 && filepath.Base(doc.SHA256) == doc.SHA256, "invalid stored document digest")
-		archive := file(filepath.Join(d.dir, "documents", doc.SHA256))
+		archive := d.fixtureRecord("documents/" + doc.SHA256)
 		require(len(archive) == doc.Size && hexDigest(archive) == doc.SHA256, "received document size or digest mismatch")
 		d.evidence("document", doc)
 		journal := d.rows("ledger", "ledger_lines", `SELECT t.seq,l.line_no,t.tx_id AS transaction_id,t.recorded_at,
@@ -122,7 +122,7 @@ func (d *driver) statement() {
                     OR close_seq=t.seq AND t.kind='trade_released_dispute_released') ref ON true
             LEFT JOIN ledger_trade_reservations tr ON tr.order_id=ref.order_id`+merchantLines+`
             AND (t.recorded_at AT TIME ZONE 'Asia/Shanghai')::date=$2::date ORDER BY t.recorded_at,t.seq,l.line_no`, account, date)
-		key := file(filepath.Join(d.root, "handoff/ledger-report-public.pem"))
+		key := d.input("handoff/ledger-report-public.pem")
 		checked := verifyStatement(archive, key, account, date, d.env("ledger")["AIPAY_LEDGER_REPORT_KEY_ID"], manifestHash, num(published, "checkpoint_id"), journal)
 		d.evidence("verification", checked)
 	})

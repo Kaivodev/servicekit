@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
@@ -99,6 +100,8 @@ type report struct {
 	Steps                   []*result
 }
 type driver struct {
+	ctx context.Context
+	demoEnvironment
 	root, repo, dir, scope string
 	output                 string
 	data                   map[string]json.RawMessage
@@ -142,7 +145,11 @@ func (d *driver) report() {
 	check(e)
 	check(atomic(out+".json", b))
 	var md strings.Builder
-	fmt.Fprintf(&md, "# %s\n\n%s\n\n日志目录 %s\n", d.scope, d.history.Started, d.history.Logs)
+	logLabel := "日志目录"
+	if !d.native() {
+		logLabel = "服务日志"
+	}
+	fmt.Fprintf(&md, "# %s\n\n%s\n\n%s %s\n", d.scope, d.history.Started, logLabel, d.history.Logs)
 	if len(d.history.Checks) > 0 {
 		fmt.Fprint(&md, "\n## 验收步骤与证据\n\n")
 		for _, item := range d.history.Checks {
@@ -176,10 +183,10 @@ func (d *driver) report() {
 		check(atomic(d.output, data))
 	}
 }
-func (d *driver) liveStep(name string, f func()) { d.executeStep(name, false, f) }
-func (d *driver) step(name string, f func())     { d.executeStep(name, true, f) }
-func (d *driver) executeStep(name string, checkpoint bool, f func()) {
-	k := "step/" + d.scope + "/" + name
+func (d *driver) liveStep(name string, f func()) { d.executeStep(name, "", f) }
+func (d *driver) step(name string, f func())     { d.executeStep(name, d.scope, f) }
+func (d *driver) executeStep(name, checkpointScope string, f func()) {
+	k := "step/" + checkpointScope + "/" + name
 	r := &result{Name: name, Status: "running", Evidence: object{}}
 	replaced := false
 	for i, previous := range d.history.Steps {
@@ -193,7 +200,7 @@ func (d *driver) executeStep(name string, checkpoint bool, f func()) {
 		d.history.Steps = append(d.history.Steps, r)
 	}
 	d.active = r
-	if checkpoint && d.read(k, r) {
+	if checkpointScope != "" && d.read(k, r) {
 		d.report()
 		return
 	}
@@ -212,7 +219,7 @@ func (d *driver) executeStep(name string, checkpoint bool, f func()) {
 	}()
 	f()
 	r.Status = "ok"
-	if checkpoint {
+	if checkpointScope != "" {
 		d.put(k, r)
 	}
 	d.report()
@@ -228,9 +235,6 @@ func envFile(p string) map[string]string {
 	}
 	return m
 }
-func (d *driver) env(s string) map[string]string {
-	return envFile(filepath.Join(d.root, "env", s+".env"))
-}
 func command(dir string, env []string, bin string, args ...string) []byte {
 	c := exec.Command(bin, args...)
 	c.Dir = dir
@@ -241,34 +245,43 @@ func command(dir string, env []string, bin string, args ...string) []byte {
 	}
 	return b
 }
+func (d *driver) refreshMarket() {
+	if d.native() {
+		d.trace("stack.py refresh-market")
+	} else {
+		d.trace("kaivo-stagingseed market · server-side apply 并等待 ConfigMap 投射")
+	}
+	d.demoEnvironment.refreshMarket()
+	if k, ok := d.demoEnvironment.(*kubeEnvironment); ok {
+		var quote struct{ Minute time.Time }
+		decode(k.field(k.namespaces["business"], "configmap", "payment-inputs", "rate.json"), &quote)
+		require(!quote.Minute.IsZero(), "missing refreshed market minute")
+		waitFor("ledger to import the refreshed USDT/USD observation", time.Minute, func() bool {
+			return len(d.rows("ledger", "ledger_usd_rates", "SELECT version FROM ledger_usd_rates WHERE asset='USDT' AND observed_at=$1 LIMIT 1", quote.Minute)) == 1
+		})
+	}
+}
 func (d *driver) stack(args ...string) []byte {
 	d.trace("stack.py " + strings.Join(args, " "))
-	return command(d.repo, os.Environ(), "python3", append([]string{"-B", filepath.Join(d.repo, "dev/native/stack.py")}, args...)...)
+	return d.demoEnvironment.stack(args...)
 }
 func (d *driver) owner(service, dbvar string, args ...string) []byte {
 	d.trace(service + " " + strings.Join(args[:min(2, len(args))], " "))
-	var dsn string
-	if dbvar == sellersDatabase {
-		dsn = d.env("iam-sellers")[dbvar]
-	} else {
-		dsn = d.env(service + "-migrate")["AIPAY_DATABASE_URL"]
-	}
-	require(dsn != "", "missing "+service+" ceremony connection")
-	list := []string{"PATH=" + os.Getenv("PATH"), dbvar + "=" + dsn}
-	if dbvar == "AIPAY_IAM_BOOTSTRAP_DATABASE_URL" {
-		for k, v := range d.env("iam") {
-			if k == "AIPAY_ENVIRONMENT" || strings.HasPrefix(k, "AIPAY_IAM_DATA_") || k == "AIPAY_IAM_EMAIL_TTL" {
-				list = append(list, k+"="+v)
-			}
-		}
-	}
-	return command(d.dir, list, filepath.Join(d.root, "bin", service), args...)
+	return d.demoEnvironment.owner(service, dbvar, args...)
 }
 func (d *driver) declaration(name string, v any) string {
 	p := filepath.Join(d.dir, "declarations", name+".json")
 	check(atomic(p, encoded(v)))
 	return p
 }
+func (d *driver) sleep(delay time.Duration) {
+	select {
+	case <-time.After(delay):
+	case <-d.ctx.Done():
+		stop("演示已中断")
+	}
+}
+
 func waitFor(why string, limit time.Duration, f func() bool) {
 	if !pollUntil(limit, f) {
 		stop("timed out waiting for %s", why)
@@ -287,7 +300,11 @@ func pollUntil(limit time.Duration, f func() bool) bool {
 	}
 }
 func newDriver(root, repo, scope string) *driver {
-	d := &driver{root: root, repo: repo, dir: filepath.Join(root, "demo"), scope: scope, data: map[string]json.RawMessage{}, browsers: map[string]*browser{}, history: report{Scenario: scope, Started: time.Now().UTC().Format(time.RFC3339), Logs: filepath.Join(root, "logs")}}
+	return driverAt(root, repo, scope, filepath.Join(root, "demo"))
+}
+func driverAt(root, repo, scope, dir string) *driver {
+	d := &driver{ctx: context.Background(), root: root, repo: repo, dir: dir, scope: scope, data: map[string]json.RawMessage{}, browsers: map[string]*browser{}, history: report{Scenario: scope, Started: time.Now().UTC().Format(time.RFC3339), Logs: filepath.Join(root, "logs")}}
+	d.demoEnvironment = nativeEnvironment{root, repo, d.dir}
 	b, e := os.ReadFile(filepath.Join(d.dir, "state.json"))
 	if e == nil {
 		decode(b, &d.data)

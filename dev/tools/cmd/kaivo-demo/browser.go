@@ -9,7 +9,7 @@ import (
 	"maps"
 	"net/http"
 	"net/url"
-	"path/filepath"
+
 	"slices"
 	"strings"
 	"time"
@@ -25,15 +25,15 @@ func (d *driver) browser(name string) *browser {
 	if b := d.browsers[name]; b != nil {
 		return b
 	}
-	b := &browser{d: d, name: name, origin: adminOrigin, addr: "127.0.0.1:8081", prefix: "/api/v1/platform", cookies: map[string]string{}}
+	b := &browser{d: d, name: name, origin: adminOrigin, addr: d.addresses().admin, prefix: "/api/v1/platform", cookies: map[string]string{}}
 	if name == "seller" {
 		b.origin = "https://seller.aipay.test"
-		b.addr = "127.0.0.1:8082"
+		b.addr = d.addresses().seller
 		b.prefix = "/api/v1/seller"
 	}
 	if name == "merchant" {
 		b.origin = "https://merchant.aipay.test"
-		b.addr = "127.0.0.1:8080"
+		b.addr = d.addresses().public
 		b.prefix = ""
 	}
 	d.read("cookies/"+name, &b.cookies)
@@ -48,7 +48,7 @@ func (b *browser) http(method, path, label, ctype string, body []byte, headers m
 }
 
 func (b *browser) request(method, path, ctype string, body []byte, headers map[string]string) *http.Request {
-	req, e := http.NewRequest(method, "http://"+b.addr+path, bytes.NewReader(body))
+	req, e := http.NewRequestWithContext(b.d.ctx, method, "http://"+b.addr+path, bytes.NewReader(body))
 	check(e)
 	req.Host = strings.TrimPrefix(b.origin, "https://")
 	req.Header.Set("User-Agent", "Kaivo demo browser")
@@ -163,7 +163,7 @@ func (b *browser) write(label, path string, makeBody func() object) object {
 		return response
 	}
 	var body object
-	if path == "/plugins" || path == "/verification/plugins" {
+	if path == "/plugins" || path == "/verification/plugins" || !d.native() && path == "/verification/credentials" {
 		body = makeBody()
 		digest := fmt.Sprintf("%x", sha256.Sum256(encoded(body)))
 		require(d.value(k+"/body-sha", func() string { return digest }) == digest, "changed upload on retry")
@@ -202,13 +202,13 @@ func (d *driver) freshTOTP(name string) string {
 	if window.Count >= totpBudget {
 		if wait := time.Until(window.Start.Add(totpWindow)); wait > 0 {
 			d.trace(fmt.Sprintf("waiting %s for the IAM TOTP attempt window of %s", wait.Round(time.Second), name))
-			time.Sleep(wait)
+			d.sleep(wait)
 		}
 	}
 	var last int64
 	d.read("totp-step/"+name, &last)
 	for time.Now().Unix()/30 <= last || time.Now().Unix()%30 >= 28 {
-		time.Sleep(250 * time.Millisecond)
+		d.sleep(250 * time.Millisecond)
 	}
 	now := time.Now()
 	if !now.Before(window.Start.Add(totpWindow)) {
@@ -297,24 +297,24 @@ func (b *browser) verifyMFA(r object) object {
 	return b.post(p+"/verify", answer)
 }
 
+type iamMail struct{ To, Subject, Body string }
+
+func matchesMail(b []byte, recipient, subject string) bool {
+	var m iamMail
+	decode(b, &m)
+	return m.To == recipient && m.Subject == subject
+}
 func (d *driver) mail(name, subject string) string {
-	var token string
+	var body []byte
 	waitFor("IAM mail for "+name, 90*time.Second, func() bool {
-		paths, e := filepath.Glob(filepath.Join(d.root, "data/iam/mail", "*.json"))
-		check(e)
-		for i := len(paths) - 1; i >= 0; i-- {
-			var m struct{ To, Subject, Body string }
-			decode(file(paths[i]), &m)
-			if m.To == d.email(name) && m.Subject == subject {
-				_, s, ok := strings.Cut(m.Body, "：")
-				require(ok && len(raw(s)) == 32, "unexpected IAM security mail")
-				token = s
-				return true
-			}
-		}
-		return false
+		body = d.mailBody(d.email(name), subject)
+		return body != nil
 	})
-	return token
+	var m iamMail
+	decode(body, &m)
+	_, s, ok := strings.Cut(m.Body, "：")
+	require(ok && len(raw(s)) == 32, "unexpected IAM security mail")
+	return s
 }
 func form(v url.Values) []byte { return []byte(v.Encode()) }
 func standard(s string) []byte { b, e := base64.StdEncoding.DecodeString(s); check(e); return b }

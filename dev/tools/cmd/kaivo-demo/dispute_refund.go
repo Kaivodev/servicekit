@@ -168,7 +168,11 @@ func (t tradeRun) checkRefundHandoff(after bool, dispute, ruling string) string 
 			grants = t.dispatchGrants()
 			return len(grants) > 0
 		})
-		checkDispatchOrder(audit, grants)
+		if d.native() {
+			checkDispatchOrder(audit, grants)
+		} else {
+			d.evidence("跨库审计时间严格先后", "仅本机栈；预发已按预留 ID、seq 和裁决摘要核对交接。")
+		}
 	})
 	return str(step.Evidence, "refund_id")
 }

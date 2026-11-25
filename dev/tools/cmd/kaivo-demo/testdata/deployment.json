@@ -1,0 +1,29 @@
+{
+  "apiVersion": "apps/v1",
+  "kind": "Deployment",
+  "spec": {
+    "template": {
+      "metadata": {"labels": {"app.kubernetes.io/name":"iam"}},
+      "spec": {
+        "serviceAccountName": "iam",
+        "serviceAccount": "iam",
+        "automountServiceAccountToken": false,
+        "securityContext": {"runAsNonRoot":true,"runAsUser":65532,"seccompProfile":{"type":"RuntimeDefault"}},
+        "imagePullSecrets": [{"name":"registry-kaivo"}],
+        "initContainers": [{"name":"prepare-files","image":"prepare:dev"}],
+        "volumes": [{"name":"private","emptyDir":{"medium":"Memory"}}],
+        "containers": [{
+          "name":"iam","image":"iam:tested","imagePullPolicy":"Never",
+          "args":["serve"], "startupProbe":{"grpc":{"port":9101}},
+          "readinessProbe":{"grpc":{"port":9101}},"livenessProbe":{"grpc":{"port":9101}},
+          "securityContext":{"readOnlyRootFilesystem":true,"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]}},
+          "envFrom":[{"configMapRef":{"name":"iam-config"}}],
+          "env":[
+            {"name":"AIPAY_DATABASE_URL","valueFrom":{"secretKeyRef":{"name":"pg-iam-app","key":"uri"}}},
+            {"name":"AIPAY_IAM_DATA_KEY","valueFrom":{"secretKeyRef":{"name":"iam-private","key":"data-key"}}}],
+          "volumeMounts":[{"name":"private","mountPath":"/run/kaivo/private","readOnly":true}]
+        }]
+      }
+    }
+  }
+}

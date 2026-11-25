@@ -4,7 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"path/filepath"
+
 	"time"
 )
 
@@ -19,7 +19,7 @@ func (d *driver) channels() {
 	}
 	ch := d.key("channel")
 	seller := d.required("seller-account")
-	conf := b64.EncodeToString(encoded(object{"account_id": "md5-demo", "gateway": "http://127.0.0.1:9080"}))
+	conf := b64.EncodeToString(encoded(object{"account_id": "md5-demo", "gateway": d.addresses().gateway}))
 	effect := func() string {
 		return time.Now().UTC().Add(90 * time.Second).Truncate(time.Second).Format(time.RFC3339)
 	}
@@ -30,9 +30,9 @@ func (d *driver) channels() {
 		submit("method", "payment-methods", object{"change": object{"payment_method": "alipay", "name": "支付宝", "enabled": true, "expected_control_version": 0}})
 	})
 	config := func(enabled bool) object {
-		// The seller review is supplied by its reviewer. Never manufacture approval from the seller ID.
+		// Submit the digest that payment will independently read and verify.
 		var reviews []object
-		decode(file(d.env("payment")["AIPAY_PAYMENT_DEV_SELLER_REVIEWS_FILE"]), &reviews)
+		decode(d.input("seller-reviews.json"), &reviews)
 		var digest []byte
 		for _, r := range reviews {
 			if r["seller_account_id"] == seller {
@@ -42,7 +42,7 @@ func (d *driver) channels() {
 			}
 		}
 		require(len(digest) == 32, "payment requires a verified seller review in its configured development seller reviews file")
-		return object{"channel_account_id": ch, "channel_code": "sim_form_md5", "name": "Demo MD5", "seller_account_id": seller, "seller_review_sha256": b64.EncodeToString(digest), "payment_methods": []string{"alipay"}, "fiat_currency": "CNY", "min_amount_fiat_minor": "1", "max_amount_fiat_minor": "10000000", "daily_limit_fiat_minor": "100000000", "priority": 1, "weight": 1, "credentials_ref": "sim-md5-v1", "config_json": conf, "enabled": enabled, "callback_source_cidrs": []string{"127.0.0.1/32"}}
+		return object{"channel_account_id": ch, "channel_code": "sim_form_md5", "name": "Demo MD5", "seller_account_id": seller, "seller_review_sha256": b64.EncodeToString(digest), "payment_methods": []string{"alipay"}, "fiat_currency": "CNY", "min_amount_fiat_minor": "1", "max_amount_fiat_minor": "10000000", "daily_limit_fiat_minor": "100000000", "priority": 1, "weight": 1, "credentials_ref": "sim-md5-v1", "config_json": conf, "enabled": enabled, "callback_source_cidrs": d.callbackCIDRs()}
 	}
 	d.step("卖方通道绑定", func() {
 		submit("channel", "channel-accounts", object{"change": object{"configuration": config(false), "expected_control_version": 0}})
@@ -82,7 +82,7 @@ func (d *driver) channels() {
 			t, e := time.Parse(time.RFC3339Nano, d.required("effective/"+key))
 			check(e)
 			if delay := time.Until(t); delay > 0 {
-				time.Sleep(delay)
+				d.sleep(delay)
 			}
 		}
 		submit("enable-channel", "channel-accounts", object{"change": object{"configuration": config(true), "expected_control_version": version()}})
@@ -90,7 +90,7 @@ func (d *driver) channels() {
 	verifyID := d.key("verify-account")
 	d.step("独立只读凭据见证", func() {
 		var creds map[string]string
-		decode(file(filepath.Join(d.root, "handoff/query.json")), &creds)
+		decode(d.input("handoff/query.json"), &creds)
 		var sim struct {
 			Accounts []struct {
 				ID     string
@@ -98,7 +98,7 @@ func (d *driver) channels() {
 				Query  string `json:"query_shared_secret"`
 			}
 		}
-		decode(file(filepath.Join(d.root, "inputs/upstream-sim/config.json")), &sim)
+		decode(d.input("inputs/upstream-sim/config.json"), &sim)
 		ok := false
 		for _, a := range sim.Accounts {
 			if a.ID == "md5-demo" && a.Query != "" && a.Query != a.Shared && a.Query == creds["query_key"] {

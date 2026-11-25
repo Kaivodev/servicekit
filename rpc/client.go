@@ -8,7 +8,6 @@ import (
 	"github.com/Kaivodev/observability/grpcobs"
 	"github.com/Kaivodev/observability/requestmeta"
 	"github.com/Kaivodev/servicekit/config"
-	"github.com/Kaivodev/servicekit/mtls"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/metric/noop"
@@ -29,10 +28,10 @@ type ClientOptions struct {
 	MaxMessageBytes int
 }
 
-// Connect establishes a real authenticated connection within ctx's deadline.
+// Connect establishes a connection within ctx's deadline. Plaintext calls authenticate per RPC.
 // The returned connection belongs to the caller and must be closed on shutdown.
-func Connect(ctx context.Context, material *mtls.Material, options ClientOptions) (*grpc.ClientConn, error) {
-	if options.Address == "" || options.CallTimeout <= 0 || options.MaxMessageBytes < 1 {
+func Connect(ctx context.Context, transport Transport, options ClientOptions) (*grpc.ClientConn, error) {
+	if transport == nil || options.Address == "" || options.CallTimeout <= 0 || options.MaxMessageBytes < 1 {
 		return nil, errors.New("invalid RPC client options")
 	}
 	if err := config.ValidateAddress(options.Address); err != nil {
@@ -41,17 +40,15 @@ func Connect(ctx context.Context, material *mtls.Material, options ClientOptions
 	if _, ok := ctx.Deadline(); !ok {
 		return nil, errors.New("RPC connection requires a startup deadline")
 	}
-	// Reconnects handshake with the latest reloaded certificate and trust bundle.
-	transport, err := material.ClientCredentials(options.ServerName, options.ExpectedService)
+	dialOptions, err := transport.DialOptions(options.ServerName, options.ExpectedService)
 	if err != nil {
 		return nil, err
 	}
-	dialOptions := []grpc.DialOption{
-		grpc.WithTransportCredentials(transport), grpc.WithDisableRetry(),
+	dialOptions = append(dialOptions, grpc.WithDisableRetry(),
 		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(options.MaxMessageBytes), grpc.MaxCallSendMsgSize(options.MaxMessageBytes)),
 		grpc.WithChainUnaryInterceptor(clientMetrics(options.MeterProvider), clientDeadline(options.CallTimeout), grpcobs.UnaryClient()),
-		grpc.WithStreamInterceptor(streamClientCorrelation()),
-	}
+		grpc.WithChainStreamInterceptor(streamClientCorrelation()),
+	)
 	if options.TracerProvider != nil {
 		dialOptions = append(dialOptions, grpc.WithStatsHandler(otelgrpc.NewClientHandler(otelgrpc.WithMeterProvider(noop.NewMeterProvider()), otelgrpc.WithTracerProvider(options.TracerProvider), otelgrpc.WithPropagators(propagation.TraceContext{}))))
 	}

@@ -19,15 +19,21 @@ func run(args []string) error {
 	}
 	flags := flag.NewFlagSet("serve", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
-	listen := flags.String("listen", "127.0.0.1:8545", "loopback listener")
+	configured := os.Getenv("AIPAY_DEVCHAIN_LISTEN")
+	address := configured
+	if address == "" {
+		address = "127.0.0.1:8545"
+	}
+	listen := flags.String("listen", address, "listener IP:port")
 	path := flags.String("dataset", os.Getenv("AIPAY_DEVCHAIN_DATASET"), "chain dataset")
 	finalized := flags.String("finalized", os.Getenv("AIPAY_DEVCHAIN_FINALIZED"), "override finalized block height")
 	if len(args) == 0 || args[0] != "serve" || flags.Parse(args[1:]) != nil || flags.NArg() != 0 {
 		return errors.New("usage: kaivo-devchain serve -dataset FILE [-listen IP:PORT] [-finalized HEIGHT]")
 	}
 	host, _, err := net.SplitHostPort(*listen)
-	if err != nil || !net.ParseIP(host).IsLoopback() {
-		return errors.New("devchain requires a literal loopback listener")
+	ip := net.ParseIP(host)
+	if err != nil || ip == nil || (!ip.IsLoopback() && *listen != configured) {
+		return errors.New("devchain requires a literal loopback listener or an explicitly configured container IP listener")
 	}
 	data, err := devchain.Load(*path, *finalized)
 	if err != nil {

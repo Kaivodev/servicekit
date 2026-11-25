@@ -4,25 +4,32 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
-	"github.com/jackc/pgx/v5"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 )
 
 // All owner evidence is read inside a PostgreSQL-enforced read-only transaction.
 // Callers select named public facts. Never return row payloads, credentials or DSNs.
 func (d *driver) rows(owner, source, query string, args ...any) []object {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(d.ctx, 20*time.Second)
 	defer cancel()
-	role := owner + "-migrate"
-	if owner == "devcollection" {
-		role = owner
+	var c *pgx.Conn
+	var e error
+	// A forwarded connection may fail while a dead port-forward is being
+	// replaced; database() restarts it, so retry briefly before giving up.
+	for attempt := 0; attempt < 4; attempt++ {
+		attemptCtx, attemptCancel := context.WithTimeout(ctx, 5*time.Second)
+		c, e = pgx.ConnectConfig(attemptCtx, d.database(owner))
+		attemptCancel()
+		if e == nil || ctx.Err() != nil {
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
 	}
-	cfg, e := pgx.ParseConfig(d.env(role)["AIPAY_DATABASE_URL"])
-	require(e == nil, "invalid "+owner+" evidence connection")
-	c, e := pgx.ConnectConfig(ctx, cfg)
 	require(e == nil, owner+" evidence connection failed")
 	defer c.Close(ctx)
 	tx, e := c.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
@@ -74,44 +81,80 @@ func (d *driver) checkDepositRate(receipt object) {
 	d.evidence("ledger_usd_rate", rows[0])
 }
 func (d *driver) deposits() {
+	kube, staging := d.demoEnvironment.(*kubeEnvironment)
 	a := d.required("seller-account")
-	d.step("预存开户", func() {
-		d.stack("down")
-		d.stack("deposits-on", "--seller-account-id", a)
+	// Standalone K8s funding and setup seller share the same pre-credit balance.
+	step := d.step
+	if staging {
+		step = func(name string, run func()) { d.executeStep(name, "setup", run) }
+	}
+	step("预存开户", func() {
+		if staging {
+			d.refreshMarket()
+			kube.prepareDeposits(d.repo, a)
+		} else {
+			d.stack("down")
+			d.stack("deposits-on", "--seller-account-id", a)
+		}
 		var spec object
-		decode(file(filepath.Join(d.root, "deposits/scenario.json")), &spec)
+		decode(d.input("deposits/scenario.json"), &spec)
+		require(spec["account_id"] == a, "deposit dataset belongs to another seller")
 		wallet := str(spec, "wallet_account_code")
 		p := d.declaration("wallet", object{"type": "collection_wallet", "currency": "USDT", "chain": "BSC", "wallet_id": str(spec, "address_id"), "wallet_account_code": wallet, "reason": "阶段 2 演示", "declared_by": "demo-ledger"})
 		d.owner("ledger", "AIPAY_LEDGER_WALLETS_DATABASE_URL", "wallets", "register", p)
 		d.put("wallet", wallet)
-		d.stack("up")
+		if !staging {
+			d.stack("up")
+		}
 	})
 	wallet := d.required("wallet")
-	d.step("预存基线", func() {
+	step("预存基线", func() {
 		d.login("seller")
 		sb := d.sellerBalance()
 		d.evidence("seller_portal", sb)
 		d.put("deposit-base", []int64{d.wallet(wallet), units(sb, "available_usdt_micro")})
 	})
 	var base []int64
-	d.read("deposit-base", &base)
+	require(d.read("deposit-base", &base) && len(base) == 2, "missing deposit balance baseline")
 	var spec object
-	decode(file(filepath.Join(d.root, "deposits/scenario.json")), &spec)
+	decode(d.input("deposits/scenario.json"), &spec)
+	require(spec["account_id"] == a && spec["wallet_account_code"] == wallet, "deposit dataset differs from registered wallet")
 	samples := obj(spec["receipts"])
-	normal := num(obj(samples["normal"]), "units")
-	late := num(obj(samples["unfinalized"]), "units")
+	sample := obj(samples["normal"])
+	normal := num(sample, "units")
+
 	checkBalances := func(delta int64) bool {
 		return d.wallet(wallet) == base[0]+delta && units(d.sellerBalance(), "available_usdt_micro") == base[1]+delta
 	}
-	d.step("正常预存", func() {
-		d.checkDepositRate(obj(samples["normal"]))
+	step("正常预存", func() {
+		d.checkDepositRate(sample)
 		d.login("seller")
-		eid := strings.TrimSpace(string(d.stack("receipt", "add", "normal")))
+		var result []byte
+		if staging {
+			result = d.owner("devcollection", "AIPAY_DATABASE_URL", "receipt", "add", "normal")
+		} else {
+			result = d.stack("receipt", "add", "normal")
+		}
+		eid := strings.TrimSpace(string(result))
+		_, err := uuid.Parse(eid)
+		require(err == nil, "invalid collection event ID")
 		waitFor("verified seller deposit", 90*time.Second, func() bool { return checkBalances(normal) })
+		if staging {
+			rows := d.rows("ledger", "ledger_trade_deposits", `SELECT posting_seq,source_event_id,source_sequence
+                FROM ledger_trade_deposits WHERE chain='BSC' AND transaction_id=$1 AND transfer_index=$2
+                AND seller_account_id=$3 AND wallet_account_code=$4 AND units=$5 AND collection_event_id=$6`,
+				str(sample, "chain_transaction_id"), num(sample, "transfer_index"), a, wallet, normal, eid)
+			require(len(rows) == 1, "missing seller posting for the funded transfer")
+			d.evidence("ledger_trade_deposits", rows[0])
+		}
 		d.evidence("collection_event_id", eid)
 		d.evidence("wallet_units", d.wallet(wallet))
 		d.evidence("seller_portal", d.sellerBalance())
 	})
+	if staging {
+		return
+	}
+	late := num(obj(samples["unfinalized"]), "units")
 	d.step("预存重放", func() {
 		d.login("seller")
 		eid := strings.TrimSpace(string(d.stack("receipt", "replay", "normal")))

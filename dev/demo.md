@@ -9,7 +9,7 @@
 | 初始管理员 | IAM 属主 `bootstrap` 封存同一份声明，通过安全邮件及平台 `auth/password/reset` 设置各自密码。两人分别登录、注册 ES256 凭据、重新登录并完成挑战 | 驱动已接入，go-webauthn 已独立验证注册、断言和计数 |
 | 邀请人员 | 管理员 1 在平台 `invitations/platform-staff` 邀请两名审批人和审核、运营、风控人员各一名。受保护邀请由管理员 2 批准。每人用自己的邮件令牌接受邀请，注册 WebAuthn 并登录 | 待验证机 |
 | 登记审批人 | payment `approvers register`；reconciliation `registry approvers/dispute-approvers register`。争议登记使用 payment 返回的 key ID 和同一自然人。重试先 list 并核对指纹 | 待验证机 |
-| 制包 | 从本地仓库克隆干净 v0.2.1，检查 HEAD 及工作树，用 go1.27.3 对两包 build、package、replay、verify | 两包已在临时私有状态目录完成四项操作 |
+| 制包 | 从本地仓库克隆干净 v0.2.2，检查 HEAD 及工作树，用 go1.27.3 对两包 build、package、replay、verify | 两包已在临时私有状态目录完成四项操作 |
 | 卖方 | Telegram 私聊 `/start` 注册，`/balance` 取账户 ID，按账户 ID 和 Telegram 用户 ID 只读核对 `iam_telegram_bindings.user_id`。将六项声明持久化后执行 IAM 属主 `sellers activate`。管理员邀请同一账户和邮箱，卖方接受邀请、绑定 TOTP 并登录。指定已登记账户时用 `sellers list` 核对 | 报告用 `demo_verification_ref`、`demo_declared_by` 标出演示核验引用与声明人，记录 IAM 返回的登记时间 |
 | 钱包与预存 | `deposits-on` 为实际卖方生成绑定，ledger `wallets register` 开立 collection_wallet。normal、replay、延后原回执的第三块样本，逐笔核对卖方门户与钱包 | 驱动已接入。验收要求原始转账仅一笔钱包分录 |
 | 双域发布 | 运营分别在平台 `plugins`、`verification/plugins` 上传，两名登记审批人各自签署属主生成的规范材料。核对实际提交人的 `requested_by`、材料摘要、两份签署记录和最终状态 | 已接入 IAM 000010 授权，待验证机 |

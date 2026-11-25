@@ -13,17 +13,40 @@ import time
 
 import telemetry
 
-from stack_config import DEPOSIT_SERVICES, LIBRARY, PORTS, SERVICES, deposit_settings, read_env, write
+from stack_config import DEPOSIT_SERVICES, LIBRARY, PEERS, PORTS, SERVICES, deposit_settings, read_env, write
+
+
+TOKEN_ISSUER = "kaivo-native"
+TOKEN_SERVICES = tuple(name for name in SERVICES if name != "cashier")
+
+
+def transport(root):
+    return "plaintext" if (root / "transport.plaintext").is_file() else "mtls"
+
+
+def token_targets():
+    targets = {name: [] for name in TOKEN_SERVICES}
+    for target, callers in PEERS.items():
+        for caller in callers.split(","):
+            targets[caller].append(target)
+    return targets
 
 
 def service_env(root, name):
     # In particular do not inherit admin DSNs, module tokens or another service's keys.
     env = {k: os.environ[k] for k in ("PATH", "LANG", "TZ", "TMPDIR") if k in os.environ}
-    if name not in ("queue-redis", *telemetry.PROCESSES):
+    if name not in ("queue-redis", "devtoken", *telemetry.PROCESSES):
         owner = "ledger" if name == "ledger-reader" else name
         env.update(read_env(root / "env" / (owner + ".env")))
         env.update(deposit_settings(root, owner))
         env["AIPAY_LOG_OUTPUT"] = "stdout" if (root / "logs.stdout").exists() else "file"
+        if owner in TOKEN_SERVICES and transport(root) == "plaintext":
+            for k in tuple(env):
+                if k.startswith(("AIPAY_TLS_", "AIPAY_NOTIFIER_TLS_")):
+                    del env[k]
+            env.update(AIPAY_RPC_TRANSPORT="plaintext", AIPAY_RPC_TOKEN_DIR=str(root / "tokens" / owner),
+                       AIPAY_RPC_TOKEN_JWKS_FILE=str(root / "token-issuer/jwks.json"), AIPAY_RPC_TOKEN_ISSUER=TOKEN_ISSUER,
+                       AIPAY_RPC_SERVICE_NAMESPACES=",".join(s + "=local" for s in TOKEN_SERVICES))
         if name != "cashier":
             env.update(telemetry.environment(root))
     if name == "ledger-reader":
@@ -37,10 +60,19 @@ def service_env(root, name):
 def services(root):
     deposits = DEPOSIT_SERVICES if (root / "deposits.enabled").is_file() else ()
     managed = telemetry.PROCESSES if telemetry.state(root)["mode"] == "local" else ()
-    return managed + (("queue-redis",) if (root / "data/queue-redis/redis.conf").exists() else ()) + deposits + SERVICES
+    plaintext = transport(root) == "plaintext"
+    if plaintext and deposits:
+        raise ValueError("plaintext conflicts with deposits-on because devcollection requires mTLS")
+    issuer = ("devtoken",) if plaintext else ()
+    # The line-6000 settlement binary only accepts mTLS and has no K2 workload.
+    workloads = tuple(s for s in SERVICES if not (plaintext and s == "settlement"))
+    return issuer + managed + (("queue-redis",) if (root / "data/queue-redis/redis.conf").exists() else ()) + deposits + workloads
 
 
 def command(root, name):
+    if name == "devtoken":
+        return [str(root / "bin/kaivo-devtoken"), "-state", str(root), "-issuer", TOKEN_ISSUER,
+                "-targets", json.dumps(token_targets())]
     if name in telemetry.PROCESSES:
         return telemetry.command(root, name)
     if name == "cashier":
@@ -57,6 +89,8 @@ def command(root, name):
 def health(root, name):
     env = service_env(root, name)
     try:
+        if name == "devtoken":
+            return time.time() - (root / "token-issuer/ready").stat().st_mtime < 300
         if name == "otelcol":
             with socket.create_connection(("127.0.0.1", 4317), timeout=3):
                 return True
@@ -179,6 +213,10 @@ def start(root, name):
             return False
         raise RuntimeError(f"{name} is running but unready; inspect its logs")
     ports = [9122 if name == "ledger-reader" else PORTS.get(name, 6389)] + ([8081, 8082] if name == "backend" else [])
+    if name == "devtoken":
+        (root / "token-issuer/ready").unlink(missing_ok=True)
+        (root / "logs/devtoken").mkdir(mode=0o700, exist_ok=True)
+        ports = []
     for port in ports:
         with socket.socket() as probe:
             probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)

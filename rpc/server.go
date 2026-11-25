@@ -16,7 +16,7 @@ import (
 	"github.com/Kaivodev/observability/grpcobs"
 	"github.com/Kaivodev/servicekit/authz"
 	"github.com/Kaivodev/servicekit/config"
-	"github.com/Kaivodev/servicekit/mtls"
+	"github.com/Kaivodev/servicekit/internal/servicetoken"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/metric/noop"
@@ -24,7 +24,6 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/health"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/keepalive"
@@ -75,8 +74,8 @@ type Server struct {
 // enforce resource ownership and business state.
 type Register func(grpc.ServiceRegistrar)
 
-func NewServer(options ServerOptions, material *mtls.Material, access, runtime *slog.Logger, checks map[string]Check, register Register) (*Server, error) {
-	if access == nil || runtime == nil || options.RPC.CallTimeout <= 0 || options.RPC.MaxMessageBytes < 1 || options.RPC.MaxConcurrentStreams < 1 || options.HealthTimeout <= 0 || options.HealthInterval <= 0 || options.ShutdownTimeout <= 0 {
+func NewServer(options ServerOptions, transport Transport, access, runtime *slog.Logger, checks map[string]Check, register Register) (*Server, error) {
+	if transport == nil || access == nil || runtime == nil || options.RPC.CallTimeout <= 0 || options.RPC.MaxMessageBytes < 1 || options.RPC.MaxConcurrentStreams < 1 || options.HealthTimeout <= 0 || options.HealthInterval <= 0 || options.ShutdownTimeout <= 0 {
 		return nil, errors.New("invalid RPC server options")
 	}
 	// Unset values take the defaults rather than disabling the limit.
@@ -90,11 +89,16 @@ func NewServer(options ServerOptions, material *mtls.Material, access, runtime *
 	if maxAge < 0 || maxAge > config.MaxConnectionAgeLimit || grace < 0 || grace > maxAge {
 		return nil, errors.New("invalid RPC connection age")
 	}
-	tlsConfig, err := material.Server(options.RPC.AllowedPeers)
-	if err != nil {
-		return nil, err
+	// grpcobs requires a printable label even for an anonymous health probe.
+	// Only the access logger receives this label. Policies use Transport.Peer.
+	logPeer := func(ctx context.Context) (string, error) {
+		name, err := transport.Peer(ctx)
+		if errors.Is(err, servicetoken.ErrHealthProbe) {
+			return "anonymous", nil
+		}
+		return name, err
 	}
-	observer, err := grpcobs.NewServer(access, runtime, material.Peer)
+	observer, err := grpcobs.NewServer(access, runtime, logPeer)
 	if err != nil {
 		return nil, err
 	}
@@ -109,22 +113,31 @@ func NewServer(options ServerOptions, material *mtls.Material, access, runtime *
 	var report func(context.Context, string, string, string)
 	if options.MeterProvider != nil {
 		s.metrics = newServerMetrics(options.MeterProvider)
-		report = s.metrics.denials(material.Peer)
+		report = s.metrics.denials(transport.Peer)
 	}
 	unaryAuthz, streamAuthz := options.Authorizer.ObservedInterceptors(report)
 	unary := []grpc.UnaryServerInterceptor{observer.Unary(), s.unaryGuard(), unaryAuthz}
-	streams := []grpc.StreamServerInterceptor{s.streamGuard(access, material.Peer), streamAuthz}
+	streams := []grpc.StreamServerInterceptor{s.streamGuard(access, logPeer), streamAuthz}
 	if s.metrics != nil {
 		unary = append([]grpc.UnaryServerInterceptor{s.metrics.unary}, unary...)
 		streams = append([]grpc.StreamServerInterceptor{s.metrics.stream}, streams...)
 	}
-	grpcOptions := []grpc.ServerOption{grpc.Creds(credentials.NewTLS(tlsConfig)),
+	grpcOptions, err := transport.ServerOptions(options.RPC.AllowedPeers, func(ctx context.Context, method, peer, reason string) {
+		runtime.WarnContext(ctx, "rpc authentication denied", "method", method, "peer_service", peer, "reason", reason)
+		if report != nil {
+			report(ctx, method, peer, reason)
+		}
+	})
+	if err != nil {
+		return nil, err
+	}
+	grpcOptions = append(grpcOptions,
 		grpc.ConnectionTimeout(options.RPC.CallTimeout), grpc.MaxRecvMsgSize(options.RPC.MaxMessageBytes), grpc.MaxSendMsgSize(options.RPC.MaxMessageBytes), grpc.MaxConcurrentStreams(options.RPC.MaxConcurrentStreams),
 		grpc.ChainUnaryInterceptor(unary...), grpc.ChainStreamInterceptor(streams...),
 		// Bounded connection lifetime: clients reconnect and present, and verify,
 		// the current short-lived certificates instead of the handshake-time ones.
 		grpc.KeepaliveParams(keepalive.ServerParameters{MaxConnectionAge: maxAge, MaxConnectionAgeGrace: grace}),
-	}
+	)
 	if s.metrics != nil {
 		grpcOptions = append(grpcOptions, grpc.StatsHandler(unknownRPCStats{s.metrics}))
 	}

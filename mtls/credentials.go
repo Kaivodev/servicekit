@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/Kaivodev/servicekit/config"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/peer"
 )
@@ -319,4 +320,22 @@ func certificateIdentity(cert *x509.Certificate, domain string) (string, error) 
 		return "", errors.New("invalid certificate service name")
 	}
 	return service, nil
+}
+
+// ServerOptions enforces the peer allowlist during the TLS handshake.
+func (m *Material) ServerOptions(allowed []string, _ func(context.Context, string, string, string)) ([]grpc.ServerOption, error) {
+	cfg, err := m.Server(allowed)
+	if err != nil {
+		return nil, err
+	}
+	return []grpc.ServerOption{grpc.Creds(credentials.NewTLS(cfg))}, nil
+}
+
+// DialOptions verifies the DNS name and service identity on each handshake.
+func (m *Material) DialOptions(serverName, expectedService string) ([]grpc.DialOption, error) {
+	creds, err := m.ClientCredentials(serverName, expectedService)
+	if err != nil {
+		return nil, err
+	}
+	return []grpc.DialOption{grpc.WithTransportCredentials(creds)}, nil
 }

@@ -9,6 +9,7 @@ import (
 
 // Probe settings intentionally require neither database nor Redis credentials.
 type Probe struct {
+	Transport  string
 	TLS        TLS
 	Address    string
 	ServerName string
@@ -25,13 +26,21 @@ func LoadProbe(service, defaultAddress string, get func(string) string) (Probe, 
 		}
 		return fallback
 	}
-	p := Probe{TLS: TLS{CAFile: get("AIPAY_TLS_CA_FILE"), CertFile: get("AIPAY_TLS_CERT_FILE"), KeyFile: get("AIPAY_TLS_KEY_FILE"), TrustDomain: value("TLS_TRUST_DOMAIN", "aipay.internal")}, Address: value("GRPC_TARGET", value("GRPC_ADDR", defaultAddress)), ServerName: value("GRPC_SERVER_NAME", service)}
-	var err error
+	transport, tls, err := transportSettings(get)
+	if err != nil {
+		return Probe{}, err
+	}
+	p := Probe{Transport: transport.Mode, TLS: tls, Address: value("GRPC_TARGET", value("GRPC_ADDR", defaultAddress)), ServerName: value("GRPC_SERVER_NAME", service)}
 	p.Timeout, err = time.ParseDuration(value("HEALTH_TIMEOUT", "2s"))
 	if err != nil || p.Timeout <= 0 {
 		return Probe{}, errors.New("invalid healthcheck timeout")
 	}
-	if err := ValidateTLS(p.TLS); err != nil {
+	// A kubelet or standalone probe needs only the plaintext address.
+	if transport.Mode == Plaintext {
+		if tls.CAFile != "" || tls.CertFile != "" || tls.KeyFile != "" || tls.TrustDomain != "" {
+			return Probe{}, errors.New("TLS settings conflict with plaintext probe")
+		}
+	} else if err := transport.Validate(tls, false); err != nil {
 		return Probe{}, err
 	}
 	if err := ValidateAddress(p.Address); err != nil {

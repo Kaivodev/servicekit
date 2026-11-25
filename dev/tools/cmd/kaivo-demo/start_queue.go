@@ -56,6 +56,6 @@ func (d *driver) queueStart(user int64) {
 		line := fmt.Sprintf("/start 已达到 IAM 每用户 %s 内 %d 次的注册上限，预计等待 %s", window, limit, max(time.Second, wait.Round(time.Second)))
 		d.trace(line)
 		fmt.Fprintln(os.Stderr, line)
-		time.Sleep(wait)
+		d.sleep(wait)
 	}
 }

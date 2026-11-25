@@ -169,14 +169,14 @@ func (d *driver) packages() {
 	for _, code := range []string{"sim_form_md5", "sim_form_md5_verify"} {
 		d.step("制作 "+code, func() {
 			local := filepath.Join(filepath.Dir(d.repo), "upstream-plugins")
-			src := filepath.Join(d.dir, "upstream-plugins-v0.2.1")
+			src := filepath.Join(d.dir, "upstream-plugins-v0.2.2")
 			if _, e := os.Stat(src); os.IsNotExist(e) {
-				command(d.dir, os.Environ(), "git", "clone", "--no-local", "--branch", "v0.2.1", "--depth", "1", local, src)
+				command(d.dir, os.Environ(), "git", "clone", "--no-local", "--branch", "v0.2.2", "--depth", "1", local, src)
 			}
 			env := append(os.Environ(), "GOWORK=off", "GOTOOLCHAIN=go1.27.3")
 			head := command(src, env, "git", "rev-parse", "HEAD")
-			tag := command(local, env, "git", "rev-parse", "v0.2.1^{commit}")
-			require(bytes.Equal(head, tag) && len(command(src, env, "git", "status", "--porcelain", "--untracked-files=all")) == 0, "plugin source differs from clean v0.2.1")
+			tag := command(local, env, "git", "rev-parse", "v0.2.2^{commit}")
+			require(bytes.Equal(head, tag) && len(command(src, env, "git", "status", "--porcelain", "--untracked-files=all")) == 0, "plugin source differs from clean v0.2.2")
 			ctl := filepath.Join(d.dir, "pluginctl")
 			command(src, env, "go", "build", "-mod=readonly", "-o", ctl, "./cmd/pluginctl")
 			out, e := os.MkdirTemp(d.dir, code+"-")
@@ -238,6 +238,11 @@ func (d *driver) seller() {
 		d.invite("seller", "")
 		d.login("seller")
 	})
+	if kube, ok := d.demoEnvironment.(*kubeEnvironment); ok {
+		d.liveStep("开发卖方审核资料", func() {
+			kube.sellerReview(d.required("seller-account"), d.required("seller-owner"), d.required("seller-email"))
+		})
+	}
 	d.deposits()
 }
 

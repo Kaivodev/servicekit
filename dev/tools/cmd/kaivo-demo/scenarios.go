@@ -7,7 +7,7 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
-	"crypto/tls"
+
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
@@ -69,7 +69,7 @@ func (d *driver) signedEPay(version, path string, v url.Values) (int, object) {
 		plain, ok := canonical(f)
 		require(ok && f.Get("sign_type") == "RSA", "invalid V2 response parameters")
 		h := sha256.Sum256([]byte(plain))
-		block, _ := pem.Decode(file(filepath.Join(d.root, "handoff/platform-public.pem")))
+		block, _ := pem.Decode(d.input("handoff/platform-public.pem"))
 		require(block != nil, "missing platform SPKI")
 		key, e := x509.ParsePKIXPublicKey(block.Bytes)
 		check(e)
@@ -80,12 +80,12 @@ func (d *driver) signedEPay(version, path string, v url.Values) (int, object) {
 }
 func (d *driver) sim(method, path string, data object) []byte {
 	var cfg object
-	decode(file(filepath.Join(d.root, "inputs/upstream-sim/config.json")), &cfg)
+	decode(d.input("inputs/upstream-sim/config.json"), &cfg)
 	var body []byte
 	if data != nil {
 		body = encoded(data)
 	}
-	req, e := http.NewRequest(method, "http://127.0.0.1:9080"+path, bytes.NewReader(body))
+	req, e := http.NewRequestWithContext(d.ctx, method, d.addresses().sim+path, bytes.NewReader(body))
 	check(e)
 	req.Header.Set("Authorization", "Bearer "+str(cfg, "control_token"))
 	req.Header.Set("Content-Type", "application/json")
@@ -100,21 +100,18 @@ func (d *driver) sim(method, path string, data object) []byte {
 }
 func (d *driver) cashier(link string, pay bool) {
 	u, e := url.Parse(link)
-	require(e == nil && u.Scheme == "https" && u.Host == "127.0.0.1:9443" && u.User == nil && u.RawQuery == "" && u.Fragment == "" && regexp.MustCompile(`^/cashier/[A-Za-z0-9_-]+$`).MatchString(u.EscapedPath()), "unexpected cashier link")
-	roots := x509.NewCertPool()
-	require(roots.AppendCertsFromPEM(file(filepath.Join(d.root, "certs/ca.crt"))), "missing cashier CA")
-	tr := &http.Transport{TLSClientConfig: &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12}}
-	defer tr.CloseIdleConnections()
-	c := &http.Client{Transport: tr, Timeout: 8 * time.Second, CheckRedirect: localHTTP.CheckRedirect}
+	require(e == nil && u.Scheme+"://"+u.Host == d.addresses().cashier && u.User == nil && u.RawQuery == "" && u.Fragment == "" && regexp.MustCompile(`^/cashier/[A-Za-z0-9_-]+$`).MatchString(u.EscapedPath()), "unexpected cashier link")
+	c := d.cashierClient()
+	defer c.CloseIdleConnections()
 	methods := []string{"GET"}
 	if pay {
 		methods = append(methods, "POST")
 	}
 	for _, method := range methods {
-		req, e := http.NewRequest(method, link, nil)
+		req, e := http.NewRequestWithContext(d.ctx, method, link, nil)
 		check(e)
 		res, e := c.Do(req)
-		require(e == nil, "cashier TLS request failed")
+		require(e == nil, "cashier request failed")
 		res.Body.Close()
 		d.trace(fmt.Sprintf("%s /cashier/{token} → HTTP %d", method, res.StatusCode))
 		require(res.StatusCode == 200, "cashier rejected request")
@@ -130,8 +127,8 @@ func (t tradeRun) step(label string, f func()) *result {
 	t.d.step(t.name+" "+label, f)
 	return t.d.active
 }
-func createParams(number string) url.Values {
-	return url.Values{"out_trade_no": {number}, "type": {"alipay"}, "name": {"阶段二担保"}, "money": {"1.00"}, "notify_url": {notifyOrigin + "/notify"}, "return_url": {"https://merchant.aipay.test/return"}, "clientip": {"127.0.0.1"}, "method": {"web"}}
+func (d *driver) createParams(number string) url.Values {
+	return url.Values{"out_trade_no": {number}, "type": {"alipay"}, "name": {"阶段二担保"}, "money": {"1.00"}, "notify_url": {d.addresses().notify + "/notify"}, "return_url": {"https://merchant.aipay.test/return"}, "clientip": {"127.0.0.1"}, "method": {"web"}}
 }
 func (d *driver) trade(name, proto string) tradeRun {
 	t := tradeRun{d: d, name: name, proto: proto, number: d.key(d.scope + "/" + name)}
@@ -140,9 +137,12 @@ func (d *driver) trade(name, proto string) tradeRun {
 		snap := d.balanceSnapshotFrom(k+"/before", d.waitForIdleBalances())
 		d.put("balances/"+k, snap)
 		d.evidence("before", snap)
+		if !d.native() && units(obj(snap["seller_portal"]), "available_usdt_micro") == 0 {
+			stop("缺样本：卖方可用 USDT 为零；请核对 setup seller 的正常预存步骤")
+		}
 	})
 	t.step("下单与冻结", func() {
-		v := createParams(t.number)
+		v := d.createParams(t.number)
 		path := "/mapi.php"
 		link := "payurl"
 		if proto == "v2" {
@@ -260,8 +260,8 @@ func (t tradeRun) release() object {
 func (t tradeRun) notify() {
 	t.step("商户验签回执", func() {
 		waitFor("signed merchant notification", 90*time.Second, func() bool {
-			rs, e := readRecords[receipt](filepath.Join(t.d.dir, "notifications.json"))
-			check(e)
+			var rs []receipt
+			decode(t.d.fixtureRecord("notifications.json"), &rs)
 			for _, r := range rs {
 				if r.MerchantOrder == t.number && r.Trade == t.d.required("trade-no/"+t.d.scope+"/"+t.name) && r.Money == "1.00" && r.PID == t.d.required("pid/v1") {
 					t.d.evidence("merchant_receipt", r)
@@ -368,7 +368,7 @@ func (d *driver) refund(after bool) {
 		d.epay("v2", "/api/pay/refundquery", url.Values{"out_refund_no": {t.number}})
 		t.finish(false)
 	})
-	if after {
+	if after && d.native() {
 		d.insufficient()
 	}
 }
@@ -423,6 +423,7 @@ var scenarios = map[string]func(*driver){
 		d.staleAuthorization()
 	},
 	"cancel":                        func(d *driver) { d.cancel(false); d.cancel(true) },
+	"refund-insufficient":           (*driver).insufficient,
 	"refund-before-release":         func(d *driver) { d.refund(false) },
 	"refund-after-release":          func(d *driver) { d.refund(true) },
 	"dispute":                       (*driver).dispute,
@@ -451,7 +452,7 @@ func (d *driver) run(s string) {
 		// again with /start, which is idempotent for an existing registration.
 		reply := d.bot(fmt.Sprintf("session/%s/%d", s, time.Now().UnixNano()), "/start")
 		require(strings.Contains(reply, "注册或登录已完成"), "merchant Telegram login refused")
-		d.stack("refresh-market")
+		d.refreshMarket()
 	})
 	scenarios[s](d)
 	d.put("finished/"+s, true)
@@ -470,6 +471,9 @@ func (d *driver) insufficient() {
 		d.evidence("required_N", n)
 		d.evidence("merchant_available", available)
 		require(str(hold, "status") == "RELEASED", "negative sample must still be released")
+		if !d.native() && available >= n {
+			stop("缺样本：本单已放币；请在商户独立支用余额至低于 N 后续跑负例")
+		}
 		require(available < n, "merchant still has N; clean stack has no merchant spending/withdrawal entry. Resume this sample only after an independently authorized debit")
 		v := d.epay("v2", "/api/pay/refund", url.Values{"out_trade_no": {t.number}, "money": {"1.00"}, "out_refund_no": {t.number}})
 		require(v["msg"] == "结果待确认", "unexpected outcome for insufficient balance")
@@ -511,12 +515,12 @@ type simRefundResult struct {
 
 func (d *driver) simRefundQuery(order, refund string) simRefundResult {
 	var credentials map[string]string
-	decode(file(filepath.Join(d.root, "handoff/query.json")), &credentials)
+	decode(d.input("handoff/query.json"), &credentials)
 	fields := url.Values{"account_id": {"md5-demo"}, "operation": {"refund-query"}, "order_id": {order}, "refund_id": {refund}}
 	require(credentials["query_key"] != "", "missing independent query credential")
 	sum := md5.Sum([]byte(fields.Encode() + "&key=" + credentials["query_key"]))
 	fields.Set("sign", hex.EncodeToString(sum[:]))
-	resp, e := localHTTP.PostForm("http://127.0.0.1:9080/api/md5-demo/refund-query", fields)
+	resp, e := localHTTP.PostForm(d.addresses().sim+"/api/md5-demo/refund-query", fields)
 	require(e == nil, "sim refund-query unavailable")
 	defer resp.Body.Close()
 	var fact simRefundResult

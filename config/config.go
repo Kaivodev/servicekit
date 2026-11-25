@@ -23,6 +23,7 @@ type Config struct {
 	Tracing         tracing.Config
 	LogLevel        slog.Level
 	RPC             RPC
+	Transport       Transport
 	TLS             TLS
 	Database        Database
 	Redis           Redis
@@ -112,6 +113,9 @@ func Load(service, defaultAddress string, get func(string) string) (Config, erro
 	problems = append(problems, traceErr)
 	environment, envErr := LoadEnvironment(get)
 	problems = append(problems, envErr)
+	transport, tls, transportErr := transportSettings(get)
+	problems = append(problems, transportErr)
+	tls.ReloadInterval = duration("TLS_RELOAD_INTERVAL", "30s")
 	c := Config{
 		Service: service, Environment: environment, Logging: logs, LogLevel: level, Tracing: traceConfig,
 		RPC: RPC{
@@ -122,7 +126,7 @@ func Load(service, defaultAddress string, get func(string) string) (Config, erro
 			MaxConnectionAge:      duration("RPC_MAX_CONNECTION_AGE", "54m"),
 			MaxConnectionAgeGrace: duration("RPC_MAX_CONNECTION_AGE_GRACE", "30s"),
 		},
-		TLS:            TLS{CAFile: get("AIPAY_TLS_CA_FILE"), CertFile: get("AIPAY_TLS_CERT_FILE"), KeyFile: get("AIPAY_TLS_KEY_FILE"), TrustDomain: value("TLS_TRUST_DOMAIN", "aipay.internal"), ReloadInterval: duration("TLS_RELOAD_INTERVAL", "30s")},
+		Transport: transport, TLS: tls,
 		Database:       Database{URL: get("AIPAY_DATABASE_URL"), MaxConns: int32(integer("DATABASE_MAX_CONNS", "20", 1, 10000)), MinConns: int32(integer("DATABASE_MIN_CONNS", "2", 0, 10000)), MaxConnLifetime: duration("DATABASE_MAX_CONN_LIFETIME", "30m")},
 		Redis:          Redis{URL: get("AIPAY_REDIS_URL"), PoolSize: int(integer("REDIS_POOL_SIZE", "10", 1, 10000)), Timeout: duration("REDIS_TIMEOUT", "3s")},
 		StartupTimeout: duration("STARTUP_TIMEOUT", "10s"), ShutdownTimeout: duration("SHUTDOWN_TIMEOUT", "15s"), HealthTimeout: duration("HEALTH_TIMEOUT", "2s"), HealthInterval: duration("HEALTH_INTERVAL", "3s"),
@@ -146,7 +150,7 @@ func Load(service, defaultAddress string, get func(string) string) (Config, erro
 		seen[peer] = true
 		c.RPC.AllowedPeers = append(c.RPC.AllowedPeers, peer)
 	}
-	if err := ValidateTLS(c.TLS); err != nil {
+	if err := c.Transport.Validate(c.TLS, true); err != nil {
 		problems = append(problems, err)
 	}
 	if err := ValidateDatabase(c.Database.URL); err != nil {

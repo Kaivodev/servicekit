@@ -24,8 +24,8 @@ func capture(pattern, s string) string {
 const uuidPattern = "[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}"
 
 func (d *driver) messages() []message {
-	ms, e := readRecords[message](filepath.Join(d.dir, "messages.json"))
-	check(e)
+	var ms []message
+	decode(d.fixtureRecord("messages.json"), &ms)
 	return ms
 }
 
@@ -151,6 +151,7 @@ func (d *driver) merchant() {
 				m := d.telegram("issue-key", merchantUser, func() string { return "/key_generate " + app + " " + ver + " " + d.freshTOTP("merchant") })
 				require(regexp.MustCompile(`^[A-Za-z0-9]{32}$`).MatchString(m.Text), "IAM did not deliver V1 KEY")
 				check(atomic(filepath.Join(d.dir, "merchant-key.json"), encoded(object{"PID": d.required("pid/v1"), "Key": m.Text})))
+				d.syncMerchantKeys()
 				waitFor("backend deleteMessage for KEY", 6*time.Minute, func() bool {
 					for _, msg := range d.messages() {
 						if msg.ID == m.ID && msg.Chat == merchantUser {
@@ -177,6 +178,7 @@ func (d *driver) merchant() {
 				_, ok := key.(*rsa.PublicKey)
 				require(ok, "invalid platform RSA key")
 				check(atomic(filepath.Join(d.dir, "merchant-v2.json"), encoded(object{"pid": d.required("pid/v2"), "spki": spki})))
+				d.syncMerchantKeys()
 			}
 			info := d.bot("app-info/"+proto, "/app "+app)
 			if strings.Contains(info, "启用 false") {
@@ -209,7 +211,7 @@ func (d *driver) merchant() {
 				case strings.HasPrefix(prompt, "请输入该业务的应用 ID"):
 					input = app1 + " " + app2
 				case strings.HasPrefix(prompt, "请输入应用 "+app1+" "), strings.HasPrefix(prompt, "请输入应用 "+app2+" "):
-					input = notifyOrigin + " https://merchant.aipay.test"
+					input = d.addresses().notify + " https://merchant.aipay.test"
 				default:
 					stop("unknown merchant access prompt")
 				}
@@ -237,7 +239,7 @@ func (d *driver) merchant() {
 		for _, t := range targets {
 			target := obj(t)
 			app := str(target, "application_id")
-			require(apps[app] && str(target, "notify_origin") == notifyOrigin && str(target, "return_origin") == "https://merchant.aipay.test", "unexpected application notification target")
+			require(apps[app] && str(target, "notify_origin") == d.addresses().notify && str(target, "return_origin") == "https://merchant.aipay.test", "unexpected application notification target")
 			delete(apps, app)
 		}
 		h := sha256.Sum256(encoded(materials))

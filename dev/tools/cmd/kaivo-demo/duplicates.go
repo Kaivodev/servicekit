@@ -15,9 +15,10 @@ import (
 )
 
 func (d *driver) duplicateEnvelope() {
+	d.requireNative("重复回执、ledger-reader、ledger-matches")
 	p := filepath.Join(d.dir, "overlap.json")
 	var spec object
-	decode(file(filepath.Join(d.root, "deposits/scenario.json")), &spec)
+	decode(d.input("deposits/scenario.json"), &spec)
 	key, op := "normal", "replay"
 	delta := int64(0)
 	if sample, ok := obj(spec["receipts"])["duplicate-delivery"]; ok {
@@ -95,7 +96,7 @@ func (d *driver) duplicateEnvelope() {
 		// by the producer alone cannot establish that it reached both consumers.
 		waitFor("ledger consumer concurrent cursor check", 15*time.Second, func() bool {
 			for _, svc := range []string{"ledger", "ledger-reader"} {
-				if movedCursor(filepath.Join(d.root, "logs", svc, "runtime.log"), d.required("overlap-start")) {
+				if d.cursorMoved(svc, d.required("overlap-start")) {
 					d.evidence("concurrent_reader_log", "logs/"+svc+"/runtime.log")
 					return true
 				}
@@ -131,6 +132,7 @@ func movedCursor(path, since string) bool {
 	return false
 }
 func (d *driver) staleAuthorization() {
+	d.requireNative("重复回执、ledger-reader、ledger-matches")
 	t := d.trade("旧授权", "v1")
 	d.step("暂缓授权拉取", func() { d.stack("ledger-matches", "pause") })
 	t.paid(1)

@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	syncatomic "sync/atomic"
 	"time"
 )
 
@@ -100,6 +101,8 @@ type receipt struct{ Trade, MerchantOrder, PID, Money, Status string }
 type fixtures struct {
 	dir, token, webhook string
 	mu                  sync.Mutex
+	host                string
+	config              syncatomic.Pointer[fixtureConfig]
 }
 
 func readRecords[T any](path string) ([]T, error) {
@@ -115,7 +118,16 @@ func readRecords[T any](path string) ([]T, error) {
 	return items, e
 }
 func (f *fixtures) bot(w http.ResponseWriter, r *http.Request) {
-	method, ok := strings.CutPrefix(r.URL.Path, "/bot"+f.token+"/")
+	token, webhook := f.token, f.webhook
+	if f.host != "" {
+		cfg := f.config.Load()
+		if cfg == nil {
+			w.WriteHeader(503)
+			return
+		}
+		token, webhook = cfg.Token, cfg.Webhook
+	}
+	method, ok := strings.CutPrefix(r.URL.Path, "/bot"+token+"/")
 	if !ok || r.Method != "POST" {
 		http.NotFound(w, r)
 		return
@@ -144,7 +156,7 @@ func (f *fixtures) bot(w http.ResponseWriter, r *http.Request) {
 	var result any
 	switch method {
 	case "getWebhookInfo":
-		result = object{"url": f.webhook}
+		result = object{"url": webhook}
 	case "getChatMember":
 		status := "left"
 		if in.Chat == demoGroup && in.User == merchantUser {
@@ -216,7 +228,11 @@ func v1Sign(v url.Values, key string) string {
 	return hex.EncodeToString(h[:])
 }
 func (f *fixtures) notify(w http.ResponseWriter, r *http.Request) {
-	if r.Method != "POST" || r.URL.Path != "/notify" || r.URL.RawQuery != "" || r.Host != "localhost:9082" {
+	host := f.host
+	if host == "" {
+		host = "localhost:9082"
+	}
+	if r.Method != "POST" || r.URL.Path != "/notify" || r.URL.RawQuery != "" || r.Host != host {
 		http.NotFound(w, r)
 		return
 	}
@@ -230,7 +246,7 @@ func (f *fixtures) notify(w http.ResponseWriter, r *http.Request) {
 	switch v.Get("sign_type") {
 	case "MD5":
 		var key struct{ PID, Key string }
-		b, e := os.ReadFile(filepath.Join(f.dir, "merchant-key.json"))
+		b, e := f.verifier("merchant-key.json")
 		if e != nil || json.Unmarshal(b, &key) != nil {
 			w.WriteHeader(503)
 			return
@@ -242,7 +258,7 @@ func (f *fixtures) notify(w http.ResponseWriter, r *http.Request) {
 			PID  string
 			SPKI []byte
 		}
-		b, e := os.ReadFile(filepath.Join(f.dir, "merchant-v2.json"))
+		b, e := f.verifier("merchant-v2.json")
 		if e != nil || json.Unmarshal(b, &info) != nil {
 			w.WriteHeader(503)
 			return
@@ -275,12 +291,19 @@ func tunnel(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(403)
 		return
 	}
-	dst, e := net.DialTimeout("tcp4", "127.0.0.1:9082", 2*time.Second)
+	connectMerchant(w, r, "127.0.0.1:9082", nil)
+}
+func connectMerchant(w http.ResponseWriter, r *http.Request, address string, record func() error) {
+	dst, e := net.DialTimeout("tcp4", address, 2*time.Second)
 	if e != nil {
 		w.WriteHeader(502)
 		return
 	}
 	defer dst.Close()
+	if record != nil && record() != nil {
+		w.WriteHeader(500)
+		return
+	}
 	c, rw, e := http.NewResponseController(w).Hijack()
 	if e != nil {
 		return

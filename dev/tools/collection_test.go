@@ -6,7 +6,10 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/x509"
+	"encoding/base64"
+	"encoding/json"
 	"encoding/pem"
 	"os"
 	"os/exec"
@@ -24,7 +27,10 @@ import (
 	"github.com/Kaivodev/servicekit/rpc"
 	"github.com/Kaivodev/servicekit/signing"
 	"github.com/google/uuid"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -143,12 +149,27 @@ func startReader(t *testing.T, db eventstream.DB) func(string) (eventsv1.EventSt
 		}
 		return m
 	}
+	address := serveReader(t, db, material("collection"))
+	return func(name string) (eventsv1.EventStreamServiceClient, error) {
+		ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+		defer cancel()
+		conn, err := rpc.Connect(ctx, material(name), rpc.ClientOptions{Address: address, ServerName: "collection", ExpectedService: "collection", CallTimeout: time.Second, MaxMessageBytes: 1 << 20})
+		if err != nil {
+			return nil, err
+		}
+		t.Cleanup(func() { _ = conn.Close() })
+		return eventsv1.NewEventStreamServiceClient(conn), nil
+	}
+}
+
+func serveReader(t *testing.T, db eventstream.DB, transport rpc.Transport) string {
+	t.Helper()
 	cfg := config.Config{RPC: config.RPC{Address: "127.0.0.1:0", AllowedPeers: []string{"ledger", "reconciliation"}, MaxMessageBytes: 1 << 20, MaxConcurrentStreams: 16, CallTimeout: time.Second}, HealthInterval: time.Second, HealthTimeout: time.Second, ShutdownTimeout: time.Second}
 	reader, err := collection.NewReader(db)
 	if err != nil {
 		t.Fatal(err)
 	}
-	server, err := collection.NewServer(cfg, material("collection"), reader, func(context.Context) error { return nil })
+	server, err := collection.NewServer(cfg, transport, reader, func(context.Context) error { return nil })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,15 +188,65 @@ func startReader(t *testing.T, db eventstream.DB) func(string) (eventsv1.EventSt
 		}
 		time.Sleep(time.Millisecond)
 	}
-	return func(name string) (eventsv1.EventStreamServiceClient, error) {
+	return server.Address()
+}
+
+func TestCollectionServiceAccountTokens(t *testing.T) {
+	dir := t.TempDir()
+	issuer, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jwks, err := signing.MarshalJWKS(map[string]*ecdsa.PublicKey{"test": &issuer.PublicKey})
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys := filepath.Join(dir, "jwks")
+	if err = os.WriteFile(keys, jwks, 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Config{Transport: config.Transport{Mode: config.Plaintext, TokenDir: dir, JWKSFile: keys, Issuer: "integration", ServiceNamespaces: map[string]string{"ledger": "kaivo-ledger", "reconciliation": "kaivo-reconciliation", "collection": "kaivo-sim"}}}
+	tr, err := rpc.LoadTransport(cfg, "collection")
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, err := grpc.NewClient("passthrough:///"+serveReader(t, unusedDB{}, tr), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	client := eventsv1.NewEventStreamServiceClient(conn)
+	for _, tc := range []struct {
+		subject, ns string
+		want        codes.Code
+	}{
+		{"ledger", "kaivo-ledger", codes.InvalidArgument}, {"reconciliation", "kaivo-reconciliation", codes.InvalidArgument},
+		{"ledger", "kaivo-sim", codes.Unauthenticated}, {"", "", codes.Unauthenticated},
+	} {
 		ctx, cancel := context.WithTimeout(t.Context(), time.Second)
-		defer cancel()
-		conn, err := rpc.Connect(ctx, material(name), rpc.ClientOptions{Address: server.Address(), ServerName: "collection", ExpectedService: "collection", CallTimeout: time.Second, MaxMessageBytes: 1 << 20})
-		if err != nil {
-			return nil, err
+		if tc.subject != "" {
+			enc := base64.RawURLEncoding
+			now := time.Now()
+			claims, err := json.Marshal(map[string]any{"iss": "integration", "sub": "system:serviceaccount:" + tc.ns + ":" + tc.subject, "aud": "kaivo:collection", "iat": now.Unix(), "nbf": now.Unix(), "exp": now.Add(time.Minute).Unix()})
+			if err != nil {
+				t.Fatal(err)
+			}
+			input := enc.EncodeToString([]byte(`{"alg":"ES256","kid":"test"}`)) + "." + enc.EncodeToString(claims)
+			digest := sha256.Sum256([]byte(input))
+			r, s, err := ecdsa.Sign(rand.Reader, issuer, digest[:])
+			if err != nil {
+				t.Fatal(err)
+			}
+			var sig [64]byte
+			r.FillBytes(sig[:32])
+			s.FillBytes(sig[32:])
+			ctx = metadata.AppendToOutgoingContext(ctx, "x-kaivo-service-token", input+"."+enc.EncodeToString(sig[:]))
 		}
-		t.Cleanup(func() { _ = conn.Close() })
-		return eventsv1.NewEventStreamServiceClient(conn), nil
+		_, err := client.ListEvents(ctx, &eventsv1.ListEventsRequest{Stream: collection.Stream, Limit: 0})
+		cancel()
+		if status.Code(err) != tc.want {
+			t.Fatalf("%s/%s: got %v, want %v", tc.ns, tc.subject, err, tc.want)
+		}
 	}
 }
 

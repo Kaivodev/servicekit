@@ -9,14 +9,14 @@ import (
 	"time"
 
 	"github.com/Kaivodev/servicekit/config"
+	"github.com/Kaivodev/servicekit/internal/servicetoken"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 )
 
-// healthPrefix is servicekit's own readiness service. Its callers are limited
-// by the mTLS peer allowlist and it carries no business data.
+// healthPrefix is servicekit's own readiness service. It carries no business data.
 const healthPrefix = "/grpc.health.v1.Health/"
 
 // ErrReplayed is returned by a ReplayGuard for an already consumed jti.
@@ -40,7 +40,7 @@ type Options struct {
 	// Service is the local service name; assertions must name it in aud.
 	Service  string
 	Policies Policies
-	// Peer returns the verified mTLS service identity, e.g. mtls.Material.Peer.
+	// Peer returns the verified service identity from the selected transport.
 	Peer func(context.Context) (string, error)
 	// Assertions is required when any rule needs an assertion.
 	Assertions *AssertionVerifier
@@ -187,7 +187,7 @@ func withoutAssertion(md metadata.MD) metadata.MD {
 // no longer carries the raw assertion metadata.
 func (a *Authorizer) authorize(ctx context.Context, method string) (context.Context, error) {
 	caller, err := a.options.Peer(ctx)
-	if err != nil {
+	if err != nil && !(strings.HasPrefix(method, healthPrefix) && errors.Is(err, servicetoken.ErrHealthProbe)) {
 		return nil, a.reject(ctx, method, "", errService)
 	}
 	md, _ := metadata.FromIncomingContext(ctx)

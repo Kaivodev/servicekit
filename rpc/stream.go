@@ -22,8 +22,8 @@ type contextStream struct {
 
 func (s *contextStream) Context() context.Context { return s.ctx }
 
-// Health Watch is a streaming RPC too: it must not bypass peer identity checks
-// or panic recovery simply because the shared unary observer is not invoked.
+// Streams use the same transport identity as the unary observer. The plaintext
+// health exemption has already been checked by the outer transport interceptor.
 func (s *Server) streamGuard(access *slog.Logger, authenticate grpcobs.Authenticate) grpc.StreamServerInterceptor {
 	return func(server any, stream grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) (err error) {
 		ctx := requestmeta.With(stream.Context(), requestmeta.New())

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Kaivodev/servicekit/config"
+	"github.com/Kaivodev/servicekit/postgres"
 	"github.com/golang-migrate/migrate/v4"
 	_ "github.com/golang-migrate/migrate/v4/database/pgx/v5"
 	"github.com/golang-migrate/migrate/v4/source/iofs"
@@ -32,9 +33,14 @@ func Open(rawURL string, files fs.FS, directory, service string) (*Runner, error
 	if !config.ValidService(service) {
 		return nil, errors.New("invalid migration service identity")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	lease, err := pgx.Connect(ctx, rawURL)
+	var lease *pgx.Conn
+	err := postgres.Retry(ctx, func(ctx context.Context) error {
+		var e error
+		lease, e = pgx.Connect(ctx, rawURL)
+		return e
+	})
 	if err != nil {
 		return nil, errors.New("connect to migration ownership guard failed")
 	}

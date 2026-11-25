@@ -20,13 +20,129 @@ python3 dev/native/stack.py down
 - `prepare` 独占创建 `../.local/dev/native/`，检查证书、公钥、签名器和权限，再建六个业务库及独立的 `collection_dev` 开发库。已有目录会拒绝覆盖。只生成配置可用 `prepare --files-only`，之后用相同管理员连接执行 `provision`。数据库步骤失败时保留生成材料，用 `provision` 重试。角色带本栈标记，遇到同名旧角色或他栈库会拒绝接管。管理员 URL 不持久化。
 - 数据库名为 `aipay_<服务>`，迁移角色为服务名。IAM、ledger、payment、reconciliation 以迁移脚本授权的 `<服务>_app` 非 owner 身份运行。backend、settlement 使用各自独立的开发角色。notifier 使用 payment 的二进制和自己的 mTLS 身份，upstream-sim 使用内存存储；两者都没有数据库或迁移。
 - 缓存 Redis 的 DB 0–5 依次分配给 backend、IAM、ledger、settlement、reconciliation、payment，传入 URL 的 DB 部分由栈替换。队列有独立实例，IAM 和 payment 分别用 DB 1、5。提供 `AIPAY_DEV_QUEUE_REDIS_URL` 会使用已有的持久化、noeviction 队列实例；仅有缓存 URL 时，栈用本机 `redis-server` 和 `redis-cli` 在 127.0.0.1:6389 管理第二个实例，启用 AOF 并将队列数据保存在状态目录。
-- `build` 以 `GOWORK=off` 构建七个业务二进制、两个预存开发工具和演示驱动，继承调用方的 Go 构建缓存。可先用 `build --bin-dir <目录>` 仅做构建。联调构建对 IAM、payment 在临时 modfile 中选用含 file signer 的已发布 v0.5.0。其他服务使用自身依赖。部署时各属主应自行确认并升级固定版本。发版前要验证尚未打标签的 observability、servicekit 改动时，用 `build --workspace` 按工作区根目录的 go.work 构建六个属主服务（upstream-sim 和开发工具不变）；新的校验和只写入 go.work.sum，不改各仓库。
+- `build` 以 `GOWORK=off` 构建七个业务二进制、两个预存开发工具、本地令牌签发方和演示驱动，继承调用方的 Go 构建缓存。可先用 `build --bin-dir <目录>` 仅做构建。各服务使用自身 go.mod 固定的版本。部署时各属主应自行确认并升级固定版本。发版前要验证尚未打标签的 observability、servicekit 改动时，用 `build --workspace` 按工作区根目录的 go.work 构建六个属主服务（upstream-sim 和开发工具不变）；新的校验和只写入 go.work.sum，不改各仓库。
 - 监听地址均为 127.0.0.1。IAM、ledger、settlement、reconciliation、payment、notifier 的 gRPC 端口分别为 9101、9102、9103、9104、9105、9115。backend 公网、平台与卖方监听分别为 8080、8081、8082。模拟上游 API 为 9080，浏览器收银链接用 HTTPS 9443，客户端仅需信任本栈的 `certs/ca.crt`。upstream-sim 重启后原模拟订单与收银链接失效。
 - `up` 逐个等待服务就绪；gRPC 使用属主 CLI（含 `notifier healthcheck`），backend 使用 `/health/ready`，upstream-sim 使用 `/healthz`，收银入口通过 HTTPS 转发该探针。失败时仅回收本次成功启动的进程。日志在 `logs/<service>/`，子 PID 在 `run/<service>.pid`。停机指令通过私有 Unix socket 交给持有子进程句柄的父进程。外部 PostgreSQL、缓存与自备队列不会收到停止指令。`status` 在有服务未就绪时返回非零。
 - 私有 env、7 天证书、持久化 ES256 签名密钥与公钥、EPay 平台 RSA、密封密钥、上游凭据分别存于 `env/`、`certs/`、`inputs/`、`handoff/`。目录 0700、文件 0600。保留整组状态以继续开发；证书过期应协调重签和重启。原有签名链、密封数据仍依赖原业务密钥。不要打印 env、私钥、数据库 URL、整个 Compose 配置或模拟器凭据接口的响应。
-- `prepare` 会生成首份行情。随后先运行一次 `refresh-market`，再生成预存数据集或发布任何资金事件。每次刷新使用刚结束的 UTC 分钟，生成 payment 的十分钟报价、reconciliation 的双来源行情和一小时覆盖事实。payment 每次报价重读文件，命令会重启已运行的 reconciliation 以载入新行情。演示中报价或覆盖即将过期时可再次刷新。
+- `prepare` 会生成首份行情。随后先运行一次 `refresh-market`，再生成预存数据集或发布任何资金事件。每次刷新使用刚结束的 UTC 分钟，生成 payment 的十分钟报价、reconciliation 的双来源行情和一小时覆盖事实。payment 每次报价重读文件，reconciliation 检测到行情文件变化后自动重新载入，不需要重启。演示中报价或覆盖即将过期时可再次刷新。
 - ledger 启动时从 `AIPAY_LEDGER_DEV_USD_RATES_FILE` 载入 `inputs/ledger/usd-rates.json`，默认每 30 秒重读。文件是 JSON 数组，每个行情分钟追加一条 USDT/USD 观测，`observed_at` 取该分钟的 UTC 起点，`dev-a` 和 `dev-b` 分别报价 `1.0000` 和 `0.9999`。同一分钟重复刷新沿用原记录。追加后超过 64 KiB 时会报错并保留原文件，可归档已登记的旧观测后再刷新。
 - 商户通知若要实际投递，在 prepare 前提供 `AIPAY_NOTIFIER_EGRESS_PROXY` 和 `AIPAY_NOTIFIER_ALLOWED_HOSTS`，并提供匹配商户地址的回执端。原生演示使用本地 CONNECT 代理 3128 和精确主机 localhost。开发 bot 已配置本地测试 token 和 webhook secret，Bot API 测试端预留 9081。本机驱动提供这两个测试端，浏览器 Cookie 处理方式见下文。
+
+## 预发开发材料
+
+从 servicekit 根目录构建 `kaivo-stagingseed`，再运行 deploy 的引导脚本。生成器从当前 kubectl context 读取四个预发命名空间中的受管对象，只通过 stdout 管道交付材料。对象、键名和挂载方式见 [deploy 的 servicekit 开发材料接口](../../deploy/README.md#servicekit-开发材料接口)。
+
+```bash
+mkdir -p .bin
+(cd dev/tools && GOWORK=off go build -trimpath -o ../../.bin/kaivo-stagingseed ./cmd/kaivo-stagingseed)
+export KAIVO_STAGING_SEED="$PWD/.bin/kaivo-stagingseed"
+(cd ../deploy && scripts/staging-bootstrap.sh)
+```
+
+首次引导逐个应用 9 个 Secret 和 10 个 ConfigMap。sim 域的 `deposit-dataset/chain.json` 起初只有创世块，使 devchain 可在卖方登记前启动。重复引导会复用原私钥、凭据、签名生效时间、卖方审核资料和已初始化的行情。中断后可重跑，生成器从幸存副本补齐共享材料。三域公钥登记表、EPay、交易或查询密钥出现冲突时，生成器向 stderr 写入脱敏诊断，stdout 为空。已有公钥但对应私钥全部丢失时，需要恢复原私钥。请串行执行引导、行情更新和卖方 setup。
+
+行情使用刚结束的 UTC 分钟，同一分钟按来源去重。以下 Bash 命令只更新三个 ConfigMap 的四个行情键。单独的 field manager 接管这些键，保留同属 `payment-inputs` 的 `seller-reviews.json`。账本历史达到 64 KiB 或行情达到 1 MiB 限制时，先归档已完成分钟再刷新。
+
+```bash
+set -o pipefail
+read -r -a kube <<< "${KUBECTL:-kubectl}"
+"$KAIVO_STAGING_SEED" market |
+  "${kube[@]}" apply --server-side --field-manager=kaivo-staging-market --force-conflicts -f -
+```
+
+`KUBECTL` 可设为 `limactl shell kaivo-k3s sudo k3s kubectl`，生成器按空白拆分。生成器、驱动和引导脚本须指向同一集群。驱动访问收银页时将 upstream-sim 的 9080 端口转发到本机 9080。登记支付和只读核验通道时，网关地址使用 `http://upstream-sim.kaivo-sim.svc.cluster.local:9080`。模拟 Bot API、商户接收端及 CONNECT 代理预留在 `demo-fixtures.kaivo-sim.svc.cluster.local` 的 8081、8082、3128 端口。
+
+## K8s 担保演示
+
+在独占的 development 预发运行。一次 `setup` 完成 IAM 登记、开发审核、预存充值、通道和商户开通。默认样本给卖方充值 1,000 USDT。驱动核对 collection 钱包和卖方门户可用余额均增加 1,000,000,000 微单位，才继续执行后面的阶段。
+
+### 准备环境
+
+- deploy 需提供包含本版工具的镜像和清单，完成 seed、迁移与部署。业务、账本、核验域沿用各自的 CNPG；sim 域增加 `sim-pg/collection_dev`、devchain 和 devcollection。ledger、reconciliation 要能订阅并验证 `collection.deposits`。后台 SMTP 使用 Mailpit。
+- 操作者需要同级 upstream-plugins 仓库及其 v0.2.2 标签、Go 1.27.3 插件工具链、离线模块缓存、Python 3 和 kubectl。工具镜像的构建上下文应包含 servicekit 根模块及 dev/tools。
+- kubectl 身份需要读取 Deployment、Service、Pod、Secret 和 ConfigMap，创建和删除属主 Pod、读取其日志，使用 pods/portforward，创建或 patch 开发输入 ConfigMap，对行情执行 server-side apply，以及 patch 和 watch 三个预存 Deployment。CNPG 策略允许对应的 `<服务>-admin` Pod；sim 库使用 `collection-admin`。
+- 夹具使用单副本，状态目录挂载 `emptyDir.medium: Memory`。NetworkPolicy 放行 backend 到夹具 8081、notifier 到 3128，控制端口 8088 只监听 Pod 回环。payment、reconciliation 的热更新输入采用目录挂载。
+
+| 变量 | 默认值与用途 |
+|---|---|
+| `AIPAY_DEMO_TARGET` | `k8s` 选择预发；默认运行本机栈 |
+| `KUBECTL` | `kubectl`。支持 Lima 多词命令，参数中有空格时使用包装脚本 |
+| `KAIVO_STAGING_SEED` | 刷新行情时运行的生成器，与引导使用同一版本 |
+| `AIPAY_DEMO_CONFIGMAP_SYNC` | `75s`。输入更新后等待 kubelet 投射的时长，接受如 `90s`、`2m` 的正时长，最大 10 分钟 |
+| `AIPAY_DEMO_NS_BUSINESS`、`AIPAY_DEMO_NS_LEDGER`、`AIPAY_DEMO_NS_RECONCILIATION`、`AIPAY_DEMO_NS_SIM` | 默认依次为 `kaivo-business`、`kaivo-ledger`、`kaivo-reconciliation`、`kaivo-sim`。清单、seed、夹具和驱动使用同一组名称 |
+| `AIPAY_DEMO_PORT_BASE` | 默认 18080。连续八个端口用于 backend 三个门户、Mailpit、夹具控制、三个业务域的 PostgreSQL。upstream-sim 固定转发到 127.0.0.1:9080 |
+| `AIPAY_DEMO_FIXTURE_DIR` | 容器内夹具状态目录，默认 `/tmp/demo` |
+
+### 从空预发运行担保场景
+
+以下 Bash 命令从 servicekit 根目录运行。驱动把登录会话、审批凭据和开户断点保存在私有状态目录中，要求目录属于当前用户且权限为 0700，规则与本机驱动相同。也可以先在该目录上挂载内存盘（tmpfs），使断点不落盘，这是可选做法。Lima 的端口转发须能从宿主机的回环地址访问。
+
+```bash
+set -euo pipefail
+umask 077
+export SERVICEKIT="$PWD"
+export STATE="$PWD/../.local/k2-staging"
+mkdir -p -m 700 "$STATE" && chmod 700 "$STATE"
+# 可选：在空目录上挂载内存盘，使断点不落盘（需要 sudo）。
+#   macOS: sudo mount_tmpfs -s 1g "$STATE" && sudo chown "$(id -u):$(id -g)" "$STATE" && chmod 700 "$STATE"
+#   Linux: sudo mount -t tmpfs -o "size=1G,exec,nodev,nosuid,mode=0700,uid=$(id -u),gid=$(id -g)" tmpfs "$STATE"
+
+export GOWORK=off GOPROXY=off GOFLAGS=-mod=mod
+mkdir -p "$STATE/bin"
+(cd dev/tools && go build -trimpath -o "$STATE/bin/kaivo-demo" ./cmd/kaivo-demo &&
+  go build -trimpath -o "$STATE/bin/kaivo-stagingseed" ./cmd/kaivo-stagingseed)
+export KAIVO_STAGING_SEED="$STATE/bin/kaivo-stagingseed"
+export KUBECTL='limactl shell kaivo-k3s sudo k3s kubectl'
+export KAIVO_K3S_IMPORT='limactl shell kaivo-k3s sudo k3s ctr -n k8s.io images import -'
+(cd ../deploy && scripts/k3s-local.sh images && scripts/k3s-local.sh up)
+
+export AIPAY_DEMO_TARGET=k8s
+demo() { "$STATE/bin/kaivo-demo" "$STATE" "$SERVICEKIT" "$@"; }
+demo setup -o "$STATE/setup.md"
+for scenario in main cancel refund-before-release refund-after-release dispute \
+  dispute-refund-before-release dispute-refund-after-release; do
+  demo run "$scenario" -o "$STATE/$scenario.md"
+done
+```
+
+单独执行 `demo setup seller` 可续跑卖方阶段。驱动把 IAM 登记资料的摘要合入 payment 的开发审核列表，刷新行情，发布同一份链、回执与地址绑定，然后依次重启并等待 devchain、devcollection、reconciliation 就绪。ledger 开启预存订阅后一直运行。驱动派生 `ledger-admin` 登记钱包、`collection-admin` 签发 normal 回执，并等待最多 90 秒确认到账。同一预发保留首个卖方和原始区块时间；`demo run deposits` 与卖方 setup 共用充值断点。
+
+状态在 `$STATE/demo-k8s/`；若挂载了内存盘，卸载后私有断点随之丢失。`-o` 支持 setup、单独阶段和 run，扩展名 .json 输出 JSON，其余输出 Markdown。争议退款在跨库环境按预留 ID、序号、裁决摘要和业务余额核对；同一数据库时钟的严格先后检查保留在本机。`refund-insufficient` 是另行运行的商户可用余额不足负例，需要独立支用样本。重复回执、`ledger-reader` 和 `ledger-matches` 仍为仅本机栈。通道的回调来源取登记时模拟器 Pod 的精确 IP，Pod IP 改变后按原审批流程更新。
+
+### 集群内夹具
+
+入口为 `/app/kaivo-demo serve-k8s [STATE_DIR]`。将 sim 域 `demo-fixtures-private/bot-token` 只读挂载到 `AIPAY_TELEGRAM_BOT_TOKEN_FILE` 指定的路径，供夹具启动和核验配置请求。`AIPAY_TELEGRAM_WEBHOOK_URL` 默认 `https://merchant.aipay.test/telegram/webhook`。
+
+| 端口 | 行为 |
+|---|---|
+| 8081 | 模拟 Bot API，核验 token，记录消息、文档和删除 |
+| 8082 | 指定 Service 主机上的 POST /notify，验证商户 PID 和签名 |
+| 3128 | 仅允许 CONNECT 到夹具 Service 的 8082 |
+| 8088 | Pod 回环。GET 读取消息、通知、连接和文档；POST /config 使用 Bearer 认证，更新内存中的 webhook 和商户验签材料 |
+
+驱动在 port-forward 建立后同步夹具，商户签发或更新密钥后再次同步。Pod 重启后，下次运行驱动时会重新装载验签材料。
+
+## 本机 gRPC 传输
+
+默认使用 mTLS。要验证 K8s 的身份路径，先准备本机栈并构建已接入 v0.8.0 传输入口的 iam、ledger、payment（含 notifier）、reconciliation、backend。在发布前使用同级工作区构建。
+
+```sh
+stack() { python3 -B dev/native/stack.py "$@"; }
+stack down
+stack deposits-off
+stack build --workspace
+stack transport plaintext
+stack transport status
+stack up
+stack status
+# 切回默认模式
+stack down
+stack transport mtls
+```
+
+`transport status` 可在运行中查询。切换模式要求所有受管进程已停止，包含独立的 ledger-reader。本机控制器沿用预存阶段的 mTLS 配置，明文模式与 `deposits-on` 互斥。line-6000 的 settlement 也只支持 mTLS，本机明文模式跳过该进程。收银模拟器继续提供 HTTPS，演示驱动与收银健康检查沿用栈的 CA。
+
+受管进程 `devtoken` 在业务进程之前启动、之后停止。签发私钥位于私有状态目录 `native/token-issuer/issuer.key`，权限为 0600。控制器从 `dev/stack_config.py` 的 `PEERS` 反推调用关系，令牌按 `native/tokens/<调用方>/<目标>` 独立存放，有效期 10 分钟，每 4 分钟原子替换。服务运行时仅收到自己的令牌目录、公钥集路径、签发方和命名空间映射。notifier 使用自己的身份，ledger-reader 复用 ledger 身份。磁盘上的服务 env 文件保留 mTLS 配置，Compose 继续使用 mTLS。
 
 ## 本机遥测与日志
 
@@ -86,7 +202,7 @@ stack demo run archived-work -o ../.local/dev/native/demo/reports/archived-work.
 stack demo run statement -o ../.local/dev/native/demo/reports/statement.md
 ```
 
-- `demo setup [iam|registry|packages|seller|channels|merchant]` 可单独运行某个阶段。无参数时依次开通，首个真实失败会停止。独立制包只需已构建的驱动、同级 upstream-plugins 的 v0.2.1 和 go1.27.3 工具链。
+- `demo setup [iam|registry|packages|seller|channels|merchant]` 可单独运行某个阶段。无参数时依次开通，首个真实失败会停止。独立制包只需已构建的驱动、同级 upstream-plugins 的 v0.2.2 和 go1.27.3 工具链。
 - 第 11 轮四个场景已于 2026-11-24 在本机进程栈通过，结果见[验证机记录](#2026-11-24-第-11-轮演示验收)。卖方场景会切换唯一通道，通知场景会绑定演示商户群。归档场景按 payment 的真实退避等待，可用 `AIPAY_DEMO_ARCHIVE_WAIT=0s` 立即检查并留待续跑。对账场景优先使用已有文件，新栈可能要等到下一次 UTC+8 零点。详见[步骤与证据](demo.md#第-11-轮运行条件)。
 - 两个争议退款场景已于 2026-11-22 在本机进程栈通过。各使用一笔新订单。放币后场景也通过平台登记争议，登记失败会把现场状态写入报告。重跑同名场景沿用原单和已签材料。
 - `demo run 场景 -o 文件` 在每步结束时更新报告，失败时保留已有证据和错误。`.json` 输出 JSON，其他文件名输出 Markdown。默认的两份场景报告仍位于 `demo/reports/`。
@@ -141,7 +257,7 @@ dc down
 
 已有阶段 2 Compose 栈执行 `dc down`、`python3 -B dev/prepare.py --demo-config`、`dc up -d --build`，重新载入 env 并执行迁移。两种栈都将专用报表私钥存于 `inputs/ledger/report.pem`（0600），公钥发布到 `handoff/ledger-report-public.pem`。升级复用原密钥。
 
-运行中再次执行 `python3 dev/prepare.py --refresh-market` 后，用 `dc restart reconciliation` 载入新行情。ledger 会定期重读挂载目录中的汇率文件。
+运行中再次执行 `python3 dev/prepare.py --refresh-market` 即可，reconciliation 会自动载入新行情。ledger 会定期重读挂载目录中的汇率文件。
 
 **未在本机验证**。本轮仅静态解析 Compose 和交叉检查配置。新项目名为 `aipay-p2`，独占 `../.local/dev/compose/` 与独立命名卷，避免接管旧五服务栈的用户、卷或密钥。切换前应停止占用相同宿主端口的旧栈或本机进程。普通 `down` 保留卷，`down -v` 会删除数据库和队列卷。
 

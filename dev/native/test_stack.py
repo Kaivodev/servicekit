@@ -329,6 +329,72 @@ class Configuration(unittest.TestCase):
             cfg.redis_db("redis://host/0?db=0", 5)
 
 
+class Transport(unittest.TestCase):
+    def test_switch_and_injection(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "env").mkdir()
+            tls = {"AIPAY_TLS_CERT_FILE": "cert", "AIPAY_NOTIFIER_TLS_KEY_FILE": "private"}
+            for name in cfg.SERVICES:
+                cfg.save_env(root / "env" / (name + ".env"), tls)
+            self.assertEqual(processes.transport(root), "mtls")
+            with patch.object(stack, "request", side_effect=lambda name, _: name == "ledger-reader"):
+                with self.assertRaisesRegex(ValueError, "down"):
+                    stack.change_mode(root, "transport", "plaintext")
+            stack.change_mode(root, "transport", "plaintext")
+            self.assertEqual(processes.services(root)[0], "devtoken")
+            self.assertNotIn("settlement", processes.services(root))
+            self.assertEqual(list(reversed(processes.services(root)))[-1], "devtoken")
+            self.assertEqual(json.loads(processes.command(root, "devtoken")[-1]), processes.token_targets())
+            self.assertEqual({(c, t) for c, ts in processes.token_targets().items() for t in ts},
+                             {(c, t) for t, callers in cfg.PEERS.items() for c in callers.split(",")})
+            for name in (*processes.TOKEN_SERVICES, "ledger-reader"):
+                env = processes.service_env(root, name)
+                owner = "ledger" if name == "ledger-reader" else name
+                self.assertEqual(env["AIPAY_RPC_TRANSPORT"], "plaintext")
+                self.assertEqual(env["AIPAY_RPC_TOKEN_DIR"], str(root / "tokens" / owner))
+                self.assertEqual(env["AIPAY_RPC_TOKEN_JWKS_FILE"], str(root / "token-issuer/jwks.json"))
+                self.assertEqual(env["AIPAY_RPC_TOKEN_ISSUER"], processes.TOKEN_ISSUER)
+                self.assertIn(owner + "=local", env["AIPAY_RPC_SERVICE_NAMESPACES"].split(","))
+                self.assertFalse(env.keys() & tls.keys())
+                self.assertEqual(cfg.read_env(root / "env" / (owner + ".env")), tls)
+            self.assertNotIn("AIPAY_RPC_TRANSPORT", processes.service_env(root, "cashier"))
+            with self.assertRaisesRegex(ValueError, "devcollection requires mTLS"):
+                stack.deposits(root, "seller", None)
+            with patch.object(stack, "request", side_effect=lambda name, _: name == "devtoken"):
+                with self.assertRaisesRegex(ValueError, "down"):
+                    stack.change_mode(root, "transport", "mtls")
+            stack.change_mode(root, "transport", "mtls")
+            self.assertNotIn("devtoken", processes.services(root))
+            self.assertEqual(processes.service_env(root, "notifier")["AIPAY_NOTIFIER_TLS_KEY_FILE"], "private")
+            (root / "deposits.enabled").touch()
+            with self.assertRaisesRegex(ValueError, "devcollection requires mTLS"):
+                stack.change_mode(root, "transport", "plaintext")
+
+    @unittest.skipUnless(os.getenv("AIPAY_TEST_DEVTOKEN_BINARY"), "supply kaivo-devtoken for process test")
+    def test_managed_issuer(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            for name in ("run", "bin", "logs"):
+                (root / name).mkdir()
+            (root / "bin/kaivo-devtoken").symlink_to(Path(os.environ["AIPAY_TEST_DEVTOKEN_BINARY"]).resolve())
+            cwd = Path.cwd()
+            os.chdir(root / "run")
+            try:
+                worker = processes.start(root, "devtoken")
+                try:
+                    self.assertTrue(processes.health(root, "devtoken"))
+                    self.assertTrue((root / "tokens/notifier/payment").is_file())
+                    self.assertFalse((root / "tokens/notifier/iam").exists())
+                    self.assertEqual((root / "token-issuer/issuer.key").stat().st_mode & 0o777, 0o600)
+                finally:
+                    processes.stop("devtoken")
+                    self.assertEqual(worker.wait(3), 0)
+                self.assertFalse(processes.health(root, "devtoken"))
+            finally:
+                os.chdir(cwd)
+
+
 class Telemetry(unittest.TestCase):
     def test_local_binaries_config_and_state(self):
         with tempfile.TemporaryDirectory() as tmp:

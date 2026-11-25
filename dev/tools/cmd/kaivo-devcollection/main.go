@@ -11,7 +11,6 @@ import (
 
 	"github.com/Kaivodev/servicekit/config"
 	"github.com/Kaivodev/servicekit/dev/tools/internal/collection"
-	"github.com/Kaivodev/servicekit/mtls"
 	"github.com/Kaivodev/servicekit/postgres"
 	"github.com/Kaivodev/servicekit/rpc"
 )
@@ -30,9 +29,16 @@ func run(ctx context.Context, args []string) error {
 		}
 		return rpc.Probe(ctx, "ledger", "collection", probe)
 	}
+	if len(args) == 3 && args[0] == "receipt" {
+		path := get("AIPAY_DEVCOLLECTION_SCENARIO")
+		if path == "" {
+			return errors.New("receipt requires a scenario file")
+		}
+		args = []string{"receipt", args[1], path, args[2]}
+	}
 	receipt := len(args) == 4 && args[0] == "receipt" && (args[1] == "add" || args[1] == "replay")
 	if !receipt && !(len(args) == 1 && (args[0] == "serve" || args[0] == "head" || args[0] == "migrate")) {
-		return errors.New("usage: kaivo-devcollection serve | head | migrate | receipt {add|replay} SCENARIO RECEIPT_KEY")
+		return errors.New("usage: kaivo-devcollection serve | head | migrate | receipt {add|replay} [SCENARIO] RECEIPT_KEY")
 	}
 	cfg, err := config.Load("collection", address, get)
 	if err != nil {
@@ -74,7 +80,7 @@ func run(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	material, err := mtls.Load(cfg.TLS, "collection")
+	material, err := rpc.LoadTransport(cfg, "collection")
 	if err != nil {
 		return err
 	}

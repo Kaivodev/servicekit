@@ -2,13 +2,13 @@
 
 `github.com/Kaivodev/servicekit` 提供各私有服务共用的运行基础，采用官方 grpc-go。业务处理、用户认证、RBAC、资金模型、业务表结构与迁移仍由服务仓库维护；签名事件与已用认证证明的辅助只操作服务传入的表。
 
-- `config`：集中校验 `AIPAY_*` 配置；必须提供 PostgreSQL、TLS 和明确的调用方名单。Redis 可选。`AIPAY_ENVIRONMENT` 取 `production`、`staging` 或 `development`，未设置按 `production` 处理，只有 `development` 能启用开发专用组件。
+- `config`：集中校验 `AIPAY_*` 配置；服务端必须提供 PostgreSQL、传输身份配置和明确的调用方名单。Redis 可选。`AIPAY_ENVIRONMENT` 取 `production`、`staging` 或 `development`，未设置按 `production` 处理，只有 `development` 能启用开发专用组件。
 - `mtls` / `rpc`：TLS 1.3、双向证书链校验、DNS 校验与 `spiffe://<trust-domain>/service/<name>` 身份绑定；连接复用、unary 超时、调用取消、报文大小限制、关联 ID 和访问日志。
 - `postgres` / `redis`：连接池和有界关闭；schema 版本、dirty 标记和服务属主校验。
 - `migration`：显式执行服务自身内嵌迁移；数据库级锁串行验证属主与执行迁移，拒绝跨服务和无属主的既有迁移历史。
 - `queue`：专用 Redis 的显式 Asynq producer/worker、重试策略、就绪和有界排空；handler 与 outbox 由业务属主提供。
 - `cli`：`serve`、`version`、`healthcheck`、`migrate up|down|version`。`down` 只回滚最近一次迁移，可能删除数据。
-- `authz`：服务端方法级授权。`LoadPolicies(eventsv1.File_….Services().ByName(…), …)` 从生成 SDK 的服务描述读取 `(aipay.authz.v1.policy)`，任何方法缺少合法策略即启动失败；拦截器按已验证的 mTLS 身份匹配调用方规则，按要求核验 IAM 认证证明（紧凑 JWS ES256、`kid` 查本服务配置的 JWKS 公钥登记表、签发方、60 秒有效期、受众、权限、`amr` 含 `mfa` 与 `auth_time` 时限），单次使用的方法在调用业务前经 `ReplayGuard` 记录 `jti`（提供 PostgreSQL 实现）。`acting_scope` 按账户模型严格解析（`platform`、`account`、`business`、`application`；缺少所需 ID、类型未知、个人账户带组织 ID、出现其他成员或商户应用不在应用范围时一律拒绝）。核验结果以只读 `authz.Call` 交给业务：`Account()` 给出可信的资金账户，`RequireScope(authz.ScopeAccount)` 用于余额、地址簿、提现等账户级资金方法，业务或应用范围的角色因此不能借同一账户取得资金权限。原始证明从 metadata 中移除；拒绝只记录稳定原因，不记录证明内容。`rpc.ServerOptions.Authorizer` 为空时，除健康检查外的方法一律拒绝。
+- `authz`：服务端方法级授权。`LoadPolicies(eventsv1.File_….Services().ByName(…), …)` 从生成 SDK 的服务描述读取 `(aipay.authz.v1.policy)`，任何方法缺少合法策略即启动失败；拦截器按传输层验证的服务身份匹配调用方规则，按要求核验 IAM 认证证明（紧凑 JWS ES256、`kid` 查本服务配置的 JWKS 公钥登记表、签发方、60 秒有效期、受众、权限、`amr` 含 `mfa` 与 `auth_time` 时限），单次使用的方法在调用业务前经 `ReplayGuard` 记录 `jti`（提供 PostgreSQL 实现）。`acting_scope` 按账户模型严格解析（`platform`、`account`、`business`、`application`；缺少所需 ID、类型未知、个人账户带组织 ID、出现其他成员或商户应用不在应用范围时一律拒绝）。核验结果以只读 `authz.Call` 交给业务：`Account()` 给出可信的资金账户，`RequireScope(authz.ScopeAccount)` 用于余额、地址簿、提现等账户级资金方法，业务或应用范围的角色因此不能借同一账户取得资金权限。原始证明从 metadata 中移除；拒绝只记录稳定原因，不记录证明内容。`rpc.ServerOptions.Authorizer` 为空时，除健康检查外的方法一律拒绝。
 - `signing`：业务签名器（ECDSA P-256、SHA-256、DER）。生产使用 `KMSKey` 适配的不可导出密钥，签名后本地复核；内存签名器只能经 `signing.Open` 在 `AIPAY_ENVIRONMENT=development` 下取得，未设置环境即按生产拒绝。`PublicKeys` 读取 JWKS，拒绝含私钥成员的文件。
 - `eventstream`：签名事件。产生端排序器在一个事务内锁流头、按 outbox 顺序分配连续序号、串接 `prev_digest`、签名并一次写入；`Reader` 按流清单限定接收方提供 `ListEvents`/`GetStreamHead`；接收端 `Puller` 校验序号、链、载荷摘要、签名与已知类型，校验通过的信封与游标同事务写入 inbox，任何失败都保存已验证前缀并把流置为停止，`CheckHead` 发现产生方历史回退或分叉同样停止；`Inbox` 在业务事务中一次性记录处理结果。表名由服务提供，列遵循数据库设计的共用模板。
 - `approval`：审批摘要 `SHA-256("AIPAY-APPROVAL-V1" || 规范请求)` 与 WebAuthn 断言校验（`webauthn.get`、`challenge`、来源、RP ID、UP/UV 标志、签名计数、COSE ES256 公钥、过期、自批与重复审批人）。签名计数恒为 0 的同步型 passkey 在已记录计数也为 0 时接受；计数一旦不为 0 就必须严格递增，回到 0 视为回退。
@@ -22,6 +22,31 @@
 组装根显式构造资源并注册业务 RPC；框架不自动发现业务。当前各私有服务仅注册标准 gRPC Health，空服务名表示进程及依赖就绪；不存在的业务服务返回 `NOT_FOUND`，不会报告业务可用。调用方身份仅证明服务身份，不能替代用户权限或资源范围检查。
 
 就绪检查覆盖数据库连接、schema 和已配置的 Redis。SIGINT/SIGTERM 后先标记不就绪，再排空 RPC，最后关闭连接池；到期强制退出并返回失败。unary 默认 5 秒、报文默认 1 MiB、停机默认 15 秒。流式 RPC 由调用者控制总时长，业务流必须传递并响应 context；健康 Watch 允许长期保持。客户端不配置应用层自动重试，业务重试必须结合幂等设计。
+
+## 传输与调用方身份
+
+本机与 Compose 默认使用 TLS 1.3 双向认证。K8s 显式选择明文 gRPC，每个 Pod 使用同名 ServiceAccount，分别为每个调用目标投射一个令牌文件，设置 `audience: kaivo:<目标服务>`、`expirationSeconds: 600`。配置约定见[架构决策 A129](https://github.com/Kaivodev/docs/blob/main/plan/decisions.md)。
+
+| 配置键 | 用法 |
+| --- | --- |
+| `AIPAY_RPC_TRANSPORT` | 默认 `mtls`，K8s 设为 `plaintext` |
+| `AIPAY_TLS_CA_FILE`、`AIPAY_TLS_CERT_FILE`、`AIPAY_TLS_KEY_FILE` | mTLS 必填，校验证书链、目标主机名与 SPIFFE 服务身份 |
+| `AIPAY_RPC_TOKEN_DIR` | 明文业务进程必填。调用目标 X 时从此目录读取文件 X |
+| `AIPAY_RPC_TOKEN_JWKS_FILE` | 明文服务端必填。挂载集群 ServiceAccount 签发方的公钥集 |
+| `AIPAY_RPC_TOKEN_ISSUER` | 明文服务端必填，必须与令牌的 `iss` 完全相同 |
+| `AIPAY_RPC_SERVICE_NAMESPACES` | 明文业务进程必填，例如 `iam=kaivo-business,ledger=kaivo-ledger`。键为服务名，与 SA 名相同 |
+
+混用 mTLS 身份材料与令牌配置会导致启动失败。组装根调用 `rpc.LoadTransport(cfg, service)`，将返回的传输对象交给 `rpc.NewServer`、`rpc.Connect` 和 `authz.Options.Peer`。仅发起调用的进程可用 `rpc.LoadClientTransport(service, os.Getenv)`，只需客户端侧配置。将 `transport.Check` 加入就绪检查，并随进程启动 `transport.Watch(ctx, cfg.TLS.ReloadInterval, log)`。明文服务端检查令牌目录可读和 JWKS 可用，轮换失败时保留上一次有效公钥并报告未就绪。
+
+每次 unary 调用或创建 stream 时，客户端按文件的修改时间、大小及文件身份复用缓存。文件缺失或为空会终止本次调用。服务端在方法授权前验证 `x-kaivo-service-token`，只接受按 `kid` 选取公钥的三段式 RS256 或 ES256 签名。除签发方外，还要核对以下声明。
+
+- `aud` 为字符串或字符串数组，须包含精确的 `kaivo:<本服务>`。
+- `exp`、`nbf`、`iat` 均必填，允许 30 秒时钟偏差。
+- `sub` 必须为 `system:serviceaccount:<命名空间>:<服务名>`。如果有 `kubernetes.io` 声明，其中的 `namespace` 和 `serviceaccount.name` 必须与主题一致。命名空间必须与该服务登记的值相同。
+
+验证成功后移除令牌 metadata。监听器检查 `AIPAY_RPC_ALLOWED_PEERS`，随后 protobuf 方法策略、IAM 证明和事件流接收方 ACL 使用同一个已验证的服务名。明文模式的 `grpc.health.v1.Health` 免令牌，kubelet 的原生 gRPC 探针可直接访问服务端口。空服务名报告就绪状态，`healthcheck` 子命令走同一路径。
+
+明文网络上的业务数据、IAM 证明和服务令牌都可被抓包。持有令牌的人可在其有效窗口内向同一目标重放。部署应按调用关系设置 NetworkPolicy，使用短期、限定受众的令牌并收紧节点访问权限。
 
 ## 使用与验证
 
@@ -94,7 +119,12 @@ RPC 耗时取秒，状态码使用 gRPC 的名称。健康服务从 RPC 与授�
 
 每个活跃的流和 outbox 只登记一次。在已有的流头检查计划里调用 `CheckHead`，首次成功后才有 lag 值。关闭连接池、替换 puller 前，调用 `ObservePool`、`ObserveLag` 返回的注销函数。停止采样器后再关闭它使用的数据库。
 
-## v0.7.0（待发布）
+## v0.8.0（待发布）
+
+- 新增明文 gRPC、ServiceAccount 投射令牌离线验签、JWKS 热加载以及同端口匿名健康探针。本机栈可选择本地签发方验证这条身份路径。
+- `rpc.NewServer` 和 `rpc.Connect` 的传输参数由 `*mtls.Material` 改为 `rpc.Transport`。已有直接传入 `material` 的调用保持源码兼容，默认仍使用 mTLS。
+
+## v0.7.0
 
 - 合入 v0.6.0 的 command digest 能力，包括可选的 `CommandSHA256`、`SessionID` 和 `WebEntry` 声明及其格式校验。
 - 新增可选的 gRPC、连接池、Asynq、签名事件流指标和业务采样器，以及本机遥测和日志开关。现有构造调用可继续使用，授权、就绪和排空语义兼容。原有 otelgrpc 追踪显式使用空的指标 provider。

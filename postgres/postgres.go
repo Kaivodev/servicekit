@@ -27,7 +27,8 @@ func Open(ctx context.Context, service string, cfg config.Database) (*pgxpool.Po
 	if err != nil {
 		return nil, errors.New("create PostgreSQL pool failed")
 	}
-	if err := pool.Ping(ctx); err != nil {
+	// A fresh pod may briefly be refused until NetworkPolicy admits its address.
+	if err := Retry(ctx, pool.Ping); err != nil {
 		pool.Close()
 		return nil, errors.New("PostgreSQL connection check failed; check connectivity and credentials")
 	}

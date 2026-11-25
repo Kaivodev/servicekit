@@ -23,6 +23,11 @@ func Load(path string, override string) (*Dataset, error) {
 	if err != nil {
 		return nil, errors.New("read chain dataset failed")
 	}
+	return Parse(data, override)
+}
+
+// Parse validates a read-only development chain projection.
+func Parse(data []byte, override string) (*Dataset, error) {
 	var d Dataset
 	if json.Unmarshal(data, &d) != nil || d.ChainID != 31337 || len(d.Blocks) == 0 || d.Receipts == nil {
 		return nil, errors.New("invalid development chain dataset")
@@ -35,6 +40,7 @@ func Load(path string, override string) (*Dataset, error) {
 		}
 		parent = b.Hash
 	}
+	var err error
 	if override != "" {
 		d.Finalized, err = strconv.ParseUint(override, 10, 64)
 	}

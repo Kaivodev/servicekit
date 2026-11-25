@@ -18,7 +18,7 @@ from stack_config import (DEPOSIT_SERVICES, LIBRARY, OWNERS, SERVICES, STATE, WO
 from deposit_scenario import SPEC, generate
 from verify import verify
 import telemetry
-from processes import health, request, service_env, services, start, stop, supervise
+from processes import health, request, service_env, services, start, stop, supervise, transport
 
 ROOT = STATE / "native"
 
@@ -29,7 +29,7 @@ def build(out, workspace=False):
     work = WORKSPACE / "go.work"
     if workspace and not work.is_file():
         raise ValueError("--workspace requires go.work in the workspace root")
-    for name in (*DEPOSIT_SERVICES, "demo"):
+    for name in (*DEPOSIT_SERVICES, "demo", "devtoken"):
         binary = "kaivo-" + name
         subprocess.run(["go", "build", "-mod=readonly", "-o", str(out / binary), "./cmd/" + binary],
                        cwd=LIBRARY / "dev/tools", env=env, check=True)
@@ -47,9 +47,6 @@ def build(out, workspace=False):
             shutil.copyfile(repo / "go.mod", mod)
             if (repo / "go.sum").exists():
                 shutil.copyfile(repo / "go.sum", mod.with_suffix(".sum"))
-            if svc in ("iam", "payment"):
-                subprocess.run(["go", "mod", "edit", "-require=github.com/Kaivodev/servicekit@v0.5.0", str(mod)],
-                               env=env, cwd=repo, check=True)
             target = "./cmd/upstream-sim" if svc == "upstream-sim" else "."
             subprocess.run(["go", "build", "-mod=mod", "-modfile", str(mod), "-o", str(out / svc), target],
                            cwd=repo, env=env, check=True)
@@ -98,6 +95,8 @@ def migrate():
 
 
 def deposits(root, seller, finalized, spec=None, delay_collection=False):
+    if seller is not None and transport(root) == "plaintext":
+        raise ValueError("deposits-on conflicts with plaintext because devcollection requires mTLS")
     if any(request(name, "pid") for name in (*DEPOSIT_SERVICES, "ledger", "reconciliation")):
         raise ValueError("run down before changing the deposit configuration")
     marker = root / "deposits.enabled"
@@ -124,10 +123,18 @@ def deposits(root, seller, finalized, spec=None, delay_collection=False):
 
 
 def change_mode(root, action, mode, endpoint=None):
-    if any(request(name, "pid") for name in (*telemetry.PROCESSES, "queue-redis", *DEPOSIT_SERVICES, *SERVICES, "ledger-reader")):
+    if any(request(name, "pid") for name in (*telemetry.PROCESSES, "devtoken", "queue-redis", *DEPOSIT_SERVICES, *SERVICES, "ledger-reader")):
         raise ValueError(f"run down before changing {action}")
     if action == "telemetry":
         telemetry.configure(root, mode, endpoint)
+    elif action == "transport":
+        marker = root / "transport.plaintext"
+        if mode == "plaintext":
+            if (root / "deposits.enabled").exists():
+                raise ValueError("plaintext conflicts with deposits-on because devcollection requires mTLS")
+            write(marker, "")
+        else:
+            marker.unlink(missing_ok=True)
     elif mode == "stdout":
         write(root / "logs.stdout", "")
     else:
@@ -150,6 +157,7 @@ def main():
     build_parser.add_argument("--bin-dir", type=Path, help="build separately before prepare")
     build_parser.add_argument("--workspace", action="store_true",
                               help="build the service repositories with the workspace go.work (pre-release checks)")
+    sub.add_parser("transport").add_argument("mode", choices=("mtls", "plaintext", "status"))
     modes = sub.add_parser("telemetry").add_subparsers(dest="mode", required=True)
     modes.add_parser("on").add_argument("--endpoint")
     modes.add_parser("off")
@@ -206,7 +214,9 @@ def main():
         if args.action == "telemetry" and args.mode == "status":
             config = telemetry.state(ROOT)
             print(config["mode"], config.get("endpoint", ""))
-        elif args.action in ("telemetry", "logs"):
+        elif args.action == "transport" and args.mode == "status":
+            print(transport(ROOT))
+        elif args.action in ("telemetry", "logs", "transport"):
             change_mode(ROOT, args.action, args.mode, getattr(args, "endpoint", None))
         elif args.action == "ledger-reader":
             if args.mode == "off":
@@ -273,16 +283,14 @@ def main():
             verify(ROOT)
             print("Verified certificates, public registries, identities and credentials")
         elif args.action == "refresh-market":
+            # reconciliation reloads the development market file when it changes.
             refresh(ROOT)
-            if request("reconciliation", "pid"):
-                stop("reconciliation")
-                start(ROOT, "reconciliation")
             print("Refreshed development market minute, coverage and ledger USDT/USD rate")
 
 
 if __name__ == "__main__":
     try:
-        if len(sys.argv) == 3 and sys.argv[1] == "_run" and sys.argv[2] in (*SERVICES, *DEPOSIT_SERVICES, *telemetry.PROCESSES, "queue-redis", "ledger-reader"):
+        if len(sys.argv) == 3 and sys.argv[1] == "_run" and sys.argv[2] in (*SERVICES, *DEPOSIT_SERVICES, *telemetry.PROCESSES, "devtoken", "queue-redis", "ledger-reader"):
             os.umask(0o077)
             supervise(Path.cwd().parent, sys.argv[2])
         else:
