@@ -55,7 +55,11 @@ func (d *driver) deliver(label string, user, chat int64, command func() string) 
 	var t delivery
 	if !d.read(key, &t) {
 		var serial int64
-		d.read("update_id", &serial)
+		if !d.read("update_id", &serial) {
+			// backend keeps update digests in the shared cache Redis for 24 hours,
+			// so a fresh state must not reuse an earlier stack's update IDs.
+			serial = time.Now().UnixMilli()
+		}
 		serial++
 		d.put("update_id", serial)
 		t = delivery{serial, int64(len(d.messages())), chat, user, command(), time.Now().Unix()}

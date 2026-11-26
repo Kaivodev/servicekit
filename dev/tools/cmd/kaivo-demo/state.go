@@ -103,6 +103,7 @@ type result struct {
 }
 type report struct {
 	Scenario, Started, Logs string
+	RefundFlow              string   `json:"refund_flow,omitempty"`
 	Checks                  []string `json:"checks,omitempty"`
 	SourceNotes             []string `json:"source_notes,omitempty"`
 	Steps                   []*result
@@ -149,7 +150,7 @@ func (d *driver) trace(s string) {
 }
 func (d *driver) evidence(k string, v any) { d.active.Evidence[k] = v }
 func (d *driver) report() {
-	out := filepath.Join(d.dir, "reports", d.scope)
+	out := filepath.Join(d.dir, "reports", d.history.Scenario)
 	reportJSON := func(v any) []byte {
 		var buf bytes.Buffer
 		enc := json.NewEncoder(&buf)
@@ -165,7 +166,7 @@ func (d *driver) report() {
 	if !d.native() {
 		logLabel = "服务日志"
 	}
-	fmt.Fprintf(&md, "# %s\n\n%s\n\n%s %s\n", d.scope, d.history.Started, logLabel, d.history.Logs)
+	fmt.Fprintf(&md, "# %s\n\n%s\n\n%s %s\n", d.history.Scenario, d.history.Started, logLabel, d.history.Logs)
 	if len(d.history.Checks) > 0 {
 		fmt.Fprint(&md, "\n## 验收步骤与证据\n\n")
 		for _, item := range d.history.Checks {
@@ -319,6 +320,13 @@ func newDriver(root, repo, scope string) *driver {
 }
 func driverAt(root, repo, scope, dir string) *driver {
 	d := &driver{ctx: context.Background(), root: root, repo: repo, dir: dir, scope: scope, data: map[string]json.RawMessage{}, browsers: map[string]*browser{}, history: report{Scenario: scope, Started: time.Now().UTC().Format(time.RFC3339), Logs: filepath.Join(root, "logs")}}
+	// Automatic-refund checkpoints contain different orders, approvals and balance
+	// baselines. Retain them and the shared setup while starting a manual sample.
+	switch scope {
+	case "refund-before-release", "refund-after-release", "dispute-refund-before-release", "dispute-refund-after-release", "refund-insufficient":
+		d.scope += "/manual"
+		d.history.RefundFlow = "manual"
+	}
 	d.demoEnvironment = nativeEnvironment{root, repo, d.dir}
 	b, e := os.ReadFile(filepath.Join(d.dir, "state.json"))
 	if e == nil {
@@ -328,7 +336,11 @@ func driverAt(root, repo, scope, dir string) *driver {
 	}
 	previous, e := os.ReadFile(filepath.Join(d.dir, "reports", scope+".json"))
 	if e == nil {
-		decode(previous, &d.history)
+		var saved report
+		decode(previous, &saved)
+		if saved.Scenario == scope && saved.RefundFlow == d.history.RefundFlow {
+			d.history = saved
+		}
 	} else if !errors.Is(e, os.ErrNotExist) {
 		check(e)
 	}

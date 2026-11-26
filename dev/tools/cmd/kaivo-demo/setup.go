@@ -249,9 +249,9 @@ func (d *driver) seller() {
 		d.invite("seller", "")
 		d.login("seller")
 	})
-	if kube, ok := d.demoEnvironment.(*kubeEnvironment); ok {
+	if reviewer, ok := d.demoEnvironment.(sellerReviewer); ok {
 		d.liveStep("开发卖方审核资料", func() {
-			kube.sellerReview(d.required("seller-account"), d.required("seller-owner"), d.required("seller-email"))
+			reviewer.sellerReview(d.required("seller-account"), d.required("seller-owner"), d.required("seller-email"))
 		})
 	}
 	d.deposits()

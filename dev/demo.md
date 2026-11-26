@@ -37,10 +37,10 @@ stack demo run cancel
 |---|---|---:|---|
 | 网关 `epay_v1` | `epay-demo`，PID 1001 | 101–10000000 | main、duplicates、dispute、seller-offline、bot-notices、statement、archived-work、cancel，每单 2.00 元 |
 | 网关 `epay_v1` 测试上游（显式开通） | 运营者提供的测试商户 | 111 | epay-live，1.11 元，优先级 0 |
-| 网关 `sim_form_md5` | `md5-demo` | 1–100 | refund-insufficient、refund-before-release、refund-after-release、dispute-refund-before-release、dispute-refund-after-release，每单 1.00 元 |
+| 网关 `sim_form_md5` | `md5-demo` | 1–100 | refund-insufficient、refund-before-release、refund-after-release、dispute-refund-before-release、dispute-refund-after-release、manual-refund、manual-refund-failure、late-payment，每单 1.00 元 |
 | 本机 plaintext、K8s 的 `sim_form_md5` | `md5-demo` | 1–10000000 | 按上述场景取 2.00 或 1.00 元，两种金额均走 form-md5 |
 
-同一卖方使用同一支付方式，payment 按金额筛选候选通道。渠道定价、风控、核验账户各按通道双批，商户平台默认定价只开通一次。报告从 `payment_orders` 读取原单通道和金额，随后按实际账户设置单笔测试场景。payment 用 `AIPAY_PLUGIN_CALLBACK_URL=http://<backend>/callback/{channel_code}` 派发通知地址，EPay 用 GET 通知，form-md5 用 POST。EPay 插件不提供退款，五个退款场景保留 form-md5 的自动退款验收，后续按 UG-8 切换演示为卖方人工退款。
+同一卖方使用同一支付方式，payment 按金额筛选候选通道。渠道定价、风控、核验账户各按通道双批，商户平台默认定价只开通一次。报告从 `payment_orders` 读取原单通道和金额，随后按实际账户设置单笔测试场景。payment 用 `AIPAY_PLUGIN_CALLBACK_URL=http://<backend>/callback/{channel_code}` 派发通知地址，EPay 用 GET 通知，form-md5 用 POST。退款单的收银与付款查询走原单通道。卖方提交人工退款凭证后，两名平台复核人使用 WebAuthn 签署当前版本。开发环境异议期为 10 秒，reconciliation 复核后签发 TradeRefundAuthorized，ledger 据此入账。
 
 交易和核验配置使用同一个 T。驱动从 payment.env 读取 `AIPAY_PLUGIN_INSTRUCTION_TTL`，加 1 小时后向上取整秒。默认 10 分钟得到 `"4200"`。EPay 的两笔 cancel 订单在商户关单前对各自的模拟器场景写入 `query_addtime_backdate_seconds=T+120`（默认 4320）。它只回拨查单应答的 `addtime`。插件在未付超时后返回 `closed`，上游收银页仍可付款。
 
@@ -91,13 +91,16 @@ V1 返回 HTTP 200 且 `code == 1` 时，驱动优先取 `payurl`，缺省时取
 | epay-live | 浏览器支付 1.11 元，核对网关建单和查单记录、独立 paid 观测、放币授权及余额，最后停用测试通道。 | 待验证机 |
 | main | V1 /mapi.php 下单。卖方门户冻结 Q 后显示模拟收银页，HTTPS POST 付款，模拟器向 backend 回调。payment 主动查单产生 OrderPaid，商户验签并回 success。风险到期后 reconciliation 独立查单、签授权，ledger 放币。卖方减少 Q，商户增加 N，三项费用合计增加 F，Q=N+F | 2026-11-26 本机 mTLS 栈在 EPay 通过 |
 | cancel | V2 /api/pay/create、/api/pay/close。两笔独立订单，首次需两条间隔至少五秒的 closed/unpaid 才归还 Q。EPay 查 payment 跳过关单审计、超时推定完成码和取消核验请求。嵌入模式迟付单使用 late_payment。在首条核验后收银付款，要求其后观察到 paid 且没有取消授权。payment 可能先于独立复查查到付款并转入放币核验，所以这条 paid 记在取消或放币核验下都算，再等待放币，按该单基线核对卖方 −Q、商户 +N、三项费用 +F | 2026-11-26 本机 mTLS 栈在 EPay 通过（迟付步骤在断言修正后续跑，沿用原样本证据） |
-| refund-insufficient | 已放币原单需由商户真实支用到余额低于 N。提交退款后核对零预留、上游无退款 | 待验证机 |
+| refund-insufficient | 已放币原单需由商户独立支用到可用余额低于 N。验签 V2 拒绝，核对 payment 的预留拒绝审计与 stopped/RESERVING、零退款预留、零卖方凭证、零上游退款调用。账本仍为 RELEASED，分录序号不变 | 待验证机 |
 | settle-refunds | 按演示卖方扫描已有人工退款，续办凭证与双人审批，核对 reconciliation 授权、ledger 核销和卖方余额。可处理旧场景留下的订单，无需原模拟器记录 | 待验证机 |
-| refund-before-release | V2 收银付款后、放币前请求全额 /api/pay/refund。查核 ledger PRE_RELEASE 占用、reconciliation 查退款、最终分录、/api/pay/refundquery 和余额复原 | 2026-11-26 form-md5 下单、付款通过；payment 已含 A139 人工退款，`/api/pay/refund` 进入 AWAITING_SELLER，待 UG-8 改写 |
-| refund-after-release | V2 放币后先核对 N、F，再全额退款。ledger 的 POST_RELEASE 预留等于 N。核实后商户和费用冲销、卖方恢复 Q。第二笔单要求商户实际可用低于 N 才发退款，核对无预留及模拟器独立 refund-query 查无退款 | 待验证机 |
+| refund-before-release | 商户 V2 全额退款返回已签名的受理回执及退款号。卖方提交凭证、平台双签，等待异议期结束和独立授权。核对 PRE_RELEASE 占用 Q、REFUNDED、原余额及 V2 退款终态查询 | 待验证机 |
+| refund-after-release | 先按锁定报价核对放币，商户 V2 再申请人工退款。核对 POST_RELEASE 预留 N，独立授权后卖方、商户和三项费用恢复下单前余额。商户查询终态时核对退款号与原金额 | 待验证机 |
+| manual-refund | 放币后运营经 WebAuthn 再认证发起全额退款。卖方以 TOTP 提交 v1，平台复核人驳回后卖方提交 v2。检查卖方监听对平台复核读取及批准接口均返回 404。两人签署 v2，异议期后独立核销，商户 −N、三项费用逐项冲回、卖方 +Q，并核对卖方待办与商户成功通知事件 | 待验证机 |
+| manual-refund-failure | 放币前运营发起退款，预留原担保 Q。风控申请判定失败，另两人批准。用 RefundFailed v2、人工复核记录及授权核对 ledger 恢复 RESERVED，payment 订单回到 RISK_HELD。随后核对正常放币的授权、分录与余额 | 待验证机 |
+| late-payment | 在原 form-md5 订单设置 late_payment，等待 ledger 退回担保及 payment 订单 CANCELLED 后，使用原收银链接付款。迟付记录的摘要须匹配主动查单。卖方举证、两人批准后立即 CLOSED。订单仍为 CANCELLED，账本版本、分录、余额及取消授权保持一致 | 待验证机 |
 | dispute | 运营登记原单和商户 /order 证据，卖方在本人门户追加原单证据。风控人员提交放给原收款人的裁决，两名审批人签署，等待 reconciliation 复核与 ledger 落账 | 2026-11-26 本机 mTLS 栈在 EPay 通过 |
-| dispute-refund-before-release | 已付款、未放币时登记争议，双方举证后双批退款。A118 将 DISPUTED 原子交接为 PRE_RELEASE 预留 Q。独立查退款成功并签发授权后，ledger 只核销一次，卖方恢复 Q，商户与费用余额不变 | 待验证机 |
-| dispute-refund-after-release | 放币后通过平台登记争议，核对原收款账户按争议 ID 从可用冻结 N 到 user_risk_held。双方举证、双批退款后，A119 将冻结转为 POST_RELEASE 预留 N。核销时冲回三项费用 F、卖方恢复 Q，原冻结与退款预留均结清 | 待验证机 |
+| dispute-refund-before-release | 已付款、未放币时登记争议，双方举证后双批退款。A118 将 DISPUTED 原子交接为 PRE_RELEASE 预留 Q。卖方凭证双签、异议期届满，reconciliation 独立授权后 ledger 只核销一次，卖方恢复 Q，商户与费用余额不变 | 待验证机 |
+| dispute-refund-after-release | 放币后通过平台登记争议，核对原收款账户按争议 ID 从可用冻结 N 到 user_risk_held。双方举证、双批退款后，A119 将冻结转为 POST_RELEASE 预留 N。卖方举证和平台双签后由 reconciliation 独立授权。核销时冲回三项费用 F、卖方恢复 Q，原冻结与退款预留均结清 | 待验证机 |
 | duplicates | 原单三份相同回调，待放币核对一次资金效果。另让两个真实 ledger 拉取器读取同一 collection 签名信封，核对完整字节摘要、游标冲突和唯一分录。另一笔单暂缓 ledger 拉取 matches，真实授权签发后由运营登记争议，再恢复拉取，要求原授权因旧版本隔离。风控人员以当前版本提交裁决，两名审批人签署，只有新授权可入账 | 2026-11-26 EPay 三份回调与放币通过；双 ledger 拉取步骤因 PostgreSQL 连接上限失败，待重跑 |
 | seller-offline | 卖方 TOTP 再认证后切换本单通道。两端意愿版本各加一，平台 control_version 保持原值；下线期间新单收到签名拒绝，原已付款订单仍放币，上线后另一下单成功 | 2026-11-26 本机 mTLS 栈在 EPay 通过 |
 | bot-notices | 用新单触发已收款、资金已可用。按事件 ID 和序号核对 backend 的 sent 投递，按两个单号及法币/USDT 金额核对私聊和群的四个消息 ID，并检查开通审核投递 | 2026-11-26 本机 mTLS 栈在 EPay 通过 |
@@ -118,8 +121,8 @@ V1 返回 HTTP 200 且 `code == 1` 时，驱动优先取 `payurl`，缺省时取
 - 报告记录真实步骤、入口、HTTP 状态、backend 业务码或协议错误、请求关联 ID、各步骤的余额和证据。错误时查状态目录 `logs/<服务>/process.log` 和 `logs/<服务>/runtime.log`。认证材料和模拟器收银令牌只进入私有状态。
 - 商户本人通过 bot /balance、/orders、/order 取证，卖方通过 `accounts/{seller_account_id}/balance`、`holds?order_id=…` 和订单详情取证。平台订单快照提供原收款账户和锁定报价 Q/N/F。商户主动退款场景使用签名的 V2 退款查询。
 - 服务缺少对外读模型的证据在显式 PostgreSQL READ ONLY 事务中读取。payment_outbox 给出事件类型、ID 与 sequence。reconciliation_verification_evidence、reconciliation_authorizations、reconciliation_outbox 给出独立查单、签发时刻及 sequence。ledger_trade_authorizations、ledger_trade_refunds、ledger_trade_reservations 给出执行版本、预留与释放分录。ledger_balances 汇总原三项平台费用；预存另查 ledger_inbox、ledger_trade_deposits 和 ledger_trade_unmatched_receipts。IAM 封存摘要仅用于恢复同一次开通仪式。
-- 争议退款的派发顺序使用同一 PostgreSQL 实例的数据库时钟。ledger 在写入预留后、同事务提交前记录交接成功审计。payment 的退款记录须持有同一预留 ID 和 seq，才能进入派发阶段。首次 `refund.dispatch_granted` 记录在上游调用之前，其时间必须严格晚于交接审计。PRE_RELEASE 的 reserve_seq 属于原担保，退款创建时间取自批准时间，两者都不能给出这次交接的时刻。
-- 单独记录 `DisputeRulingApproved` 的 disposition 和 reason，例如 `refund_execution_unsupported` 或 `no_matching_pre_release_dispute`。若读取时尚未处置，报告保留该状态。验收使用独立的 `query_refund` 记录、授权所引用的同一证据摘要、模拟器只读 `refund-query` 返回的原单号、退款号与全额，以及授权对应的唯一核销分录。放币后用风控冻结的 final_seq 和退款预留的 final_seq 分别核实转换与结清。
+- 人工退款以卖方凭证版本、平台审批 ID 和请求摘要为起点。报告核对 `reconciliation_manual_refund_resolutions` 的 authorized 记录、授权 ID 和账本核销分录。争议场景另核对裁决批准与退款成功事件，验证唯一核销来自签名授权，再按预留序号核对原冻结和退款预留的结清。
+- 运行已有本机栈时，停机后执行 `python3 -B dev/native/stack.py demo-config`，构建包含人工退款的工作区并迁移。预发运行同组场景时也需将 payment 异议期和 reconciliation 下限配置为 10 秒，并启用退款通知。旧自动退款场景与本轮人工场景使用独立的订单及审批断点，沿用同一套开户资料。已有未结人工退款时先运行 `stack demo run settle-refunds`，再开始新的余额基线。串行执行余额场景，避免其他订单改变基线。
 - 每份争议退款报告附有可能影响执行的服务端源码位置和判断依据。放币后登记若返回 404、405 或 501，场景在平台入口以“缺入口”结束。404 也可能表示属主找不到原单，409 可能来自控制版本冲突，需结合报告里的订单状态、版本和请求 ID 定位。
 - 2026-11-20 原有场景的实测结果见[验证机记录](README.md#2026-11-20-阶段-2-演示验收)。两个争议退款场景 2026-11-22 通过，第 11 轮各场景 2026-11-24 的结果见[验证机记录](README.md#2026-11-24-第-11-轮演示验收)。
 

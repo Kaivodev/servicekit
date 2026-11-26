@@ -144,7 +144,7 @@ func (b *browser) portalAPI(method, path, key string, body object, grant string,
 		Data    object
 		Message string `json:"msg"`
 	}
-	postReleaseEntry := b.d.scope == "dispute-refund-after-release" && method == "POST" && path == "/disputes"
+	postReleaseEntry := b.d.history.Scenario == "dispute-refund-after-release" && method == "POST" && path == "/disputes"
 	if postReleaseEntry && (code == 404 || code == 405 || code == 501) {
 		stop("已放币争议登记缺入口：POST %s 返回 HTTP %d", label, code)
 	}

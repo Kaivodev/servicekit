@@ -9,28 +9,17 @@ import (
 func disputeRefundPlan(after bool) ([]string, []string) {
 	barrier := "付款后立即登记争议。ledger_trade_reservations 的 DISPUTED、争议 ID 及原担保 seq 证明 Q 仍在担保。"
 	balances := "核对卖方门户可用恢复 Q、商户 bot 可用和三项费用余额维持下单前基线。"
-	notes := []string{
-		"payment/internal/channeladmin/disputes.go:274 拒绝原订单缺失 paid_verified_at 的退款裁决。用 OrderPaid 和登记前的订单状态核对。",
-		"payment/internal/channeladmin/disputes.go:325-328,430-445 在第二签提交后同步交接并处理退款。若接口报错，签署可能已提交。对照 payment_dispute_rulings.stage、ledger 预留和派发审计定位。",
-		"reconciliation/internal/streams/rulings.go:48-64 可能记录 refund_execution_unsupported、stale_control_version 或 no_matching_pre_release_dispute，取决于读取时的账本状态。reconciliation/internal/streams/triggers.go:120-143 另行处理退款终态，两次 ledger 读取不一致会留待重试。",
-		"reconciliation/internal/authorization/dispute.go:58-73,123-142 会复核预留留存的裁决与签署版本、摘要和有效期。独立查退款成功后仍可能没有授权。",
-		"reconciliation/internal/verification/state.go:63-71 检查整条 payment.orders 流。其他订单的隔离信封也可能使本单有成功查退款记录却无授权，可查 reconciliation_inbox 的 status 和 sequence。",
-	}
+	notes := []string{"payment/internal/channeladmin/disputes_postgres.go 保存已批准裁决、账本交接回执与卖方待办。登记放币前争议须在风控期内完成。"}
 	if after {
-		barrier = "先放币并检查商户 +N、三项费用 +F，再从平台登记争议。按争议 ID 核对 ledger_trade_released_disputes 和原账户 user_risk_held 的有效预留 N。"
-		balances = "相对放币后快照，商户可用减少 N、三项费用减少 F、卖方恢复 Q。按争议 ID 和退款 ID 检查两个预留的结清序号。"
-		notes = append(notes,
-			"backend/internal/transport/http/routes/platform_contracts.go:63 已声明 POST /api/v1/platform/disputes。payment/internal/channeladmin/disputes.go:103-109 只接受 Releasing/Completed 且担保已 RELEASED。backend/internal/transport/http/portal/request.go:179-180 将状态前提失败和并发冲突均映射为 409。",
-			"ledger/internal/trade/authorization_rules.go:250-257 要求客户资金钱包覆盖冲回费用后的负债。覆盖不足可能已有独立查退款、授权和预留，账本仍不能结清。")
-	} else {
-		notes = append(notes, "payment/internal/channeladmin/disputes.go:136-140 校验实际账本控制版本。若登记时 20 秒风控期已结束且放币已落账，放币前样本会在登记时被拒绝。")
+		barrier = "放币后登记争议，按争议 ID 核对原账户 user_risk_held 的预留 N。"
+		balances = "相对放币后，商户可用减少 N、三项费用减少 F、卖方恢复 Q。检查争议冻结和退款预留的结清序号。"
 	}
 	return []string{
-		"以真实收银和 OrderPaid 确认原单付款。" + barrier,
-		"商户 /order 与卖方门户分别举证，风控提交 refund，两名已登记审批人签署同一材料。按 payment 裁决 ID 比对 ledger_trade_refunds 的唯一记录、分支、金额及交接版本。",
-		"同一 PostgreSQL 实例上，ledger_audit_logs 在交接事务内记录成功（ledger/internal/trade/service.go:70-88）。payment 持久化同一预留 ID 和 seq 后才进入 dispatch（payment/internal/channeladmin/disputes_postgres.go:305-311）。实际调用前的首笔 refund.dispatch_granted 必须严格晚于交接审计（payment/internal/orders/refund.go:152-165）。PRE_RELEASE 的 reserve_seq 沿用下单分录。",
-		"独立 refund-query 按原单、退款号和原金额查成功。核对 reconciliation_verification_evidence 的 eligible query_refund、签发材料采用的证据摘要及 reconciliation_outbox 的签发序号。裁决触发的 disposition/reason 单列。",
-		"等待 REFUNDED，检查两个 payment 事件与退款授权在 ledger_transactions 中合计只有授权的一笔核销。" + balances,
+		"真实收银和 OrderPaid 确认付款。" + barrier,
+		"商户与卖方举证，风控提交退款裁决，两名审批人签署。",
+		"比对 payment、ledger 的预留 ID、分支、金额、seq 与裁决摘要。PRE_RELEASE 沿用原担保 Q。",
+		"卖方提交凭证，双人复核后等待异议期。以 reconciliation_manual_refund_resolutions 核对退款成功事件、审批及独立退款授权。",
+		"核对 REFUNDED 和唯一授权分录。" + balances,
 	}, notes
 }
 
@@ -47,7 +36,7 @@ func oneFact(rows []object, what string) object {
 }
 
 func (d *driver) disputeRefund(after bool) {
-	t := d.trade("争议退款", "v1")
+	t := d.refundTrade("争议退款", "v1")
 	t.paid(1)
 	var beforeRefund object
 	if after {
@@ -71,17 +60,7 @@ func (d *driver) disputeRefund(after bool) {
 	}
 	ruling := t.approveRefundRuling(dispute)
 	refund := t.checkRefundHandoff(after, dispute, ruling)
-	t.step("模拟上游独立查全额退款", func() {
-		waitFor("模拟上游独立查到退款", time.Minute, func() bool {
-			fact := d.simRefundQuery(t.order, refund)
-			d.evidence("sim_refund_query", fact)
-			if fact.Result == "rejected" && fact.Code == "not_found" {
-				return false
-			}
-			checkSimRefund(fact, t.order, refund)
-			return true
-		})
-	})
+	t.manualRefund(refund)
 	t.step("独立授权、唯一分录与余额", func() {
 		t.terminal("REFUNDED")
 		t.proveRefundExecution(after, dispute, ruling, refund)
@@ -143,7 +122,7 @@ func (t tradeRun) approveRefundRuling(dispute string) string {
 
 func (t tradeRun) checkRefundHandoff(after bool, dispute, ruling string) string {
 	d := t.d
-	step := t.step("核对唯一预留和首次派发顺序", func() {
+	step := t.step("核对裁决与人工退款预留", func() {
 		r := oneFact(t.reservations(), "ledger_trade_refunds")
 		p := oneFact(d.facts("payment", "payment_refunds 与已批准裁决", `SELECT f.id AS refund_id, dr.id AS ruling_id, dr.dispute_id,
 			f.data#>>'{reservation,refund_reservation_id}' AS refund_reservation_id,
@@ -159,27 +138,10 @@ func (t tradeRun) checkRefundHandoff(after bool, dispute, ruling string) string 
 		if after {
 			action, target = "ledger.resolve_released_trade_dispute", dispute
 		}
-		audit := oneFact(d.facts("ledger", "ledger_audit_logs 交接成功", `SELECT id,action,target_id,occurred_at FROM ledger_audit_logs
+		oneFact(d.facts("ledger", "ledger_audit_logs 交接成功", `SELECT id,action,target_id,occurred_at FROM ledger_audit_logs
 			WHERE actor_id='payment' AND result='succeeded' AND action=$1 AND target_id=$2`, action, target), "账本交接审计")
-		// Grants are audited against the order. Both owner receipts identify
-		// its only refund. The simulator independently confirms the send.
-		var grants []object
-		waitFor("payment 退款派发许可", time.Minute, func() bool {
-			grants = t.dispatchGrants()
-			return len(grants) > 0
-		})
-		if d.native() {
-			checkDispatchOrder(audit, grants)
-		} else {
-			d.evidence("跨库审计时间严格先后", "仅本机栈；预发已按预留 ID、seq 和裁决摘要核对交接。")
-		}
 	})
 	return str(step.Evidence, "refund_id")
-}
-
-func (t tradeRun) dispatchGrants() []object {
-	return t.d.facts("payment", "payment_audit_logs 派发许可", `SELECT id,action,target_id,occurred_at FROM payment_audit_logs
-		WHERE target_type='order' AND target_id=$1 AND action='refund.dispatch_granted' ORDER BY occurred_at,id`, t.order)
 }
 
 func (t tradeRun) reservations() []object {
@@ -202,23 +164,6 @@ func checkRefundReservation(after bool, r, p, h object, dispute, ruling string) 
 	} else {
 		require(r["branch"] == "PRE_RELEASE" && num(r, "reserved_usdt") == num(h, "escrow_usdt") && seq == num(h, "reserve_seq") && h["released_seq"] == nil, "放币前应延续原担保 Q")
 	}
-}
-
-func checkDispatchOrder(audit object, grants []object) {
-	at, err := time.Parse(time.RFC3339Nano, str(audit, "occurred_at"))
-	check(err)
-	require(len(grants) > 0, "缺少退款派发许可")
-	for _, g := range grants {
-		granted, err := time.Parse(time.RFC3339Nano, str(g, "occurred_at"))
-		check(err)
-		require(granted.After(at), "首次上游派发许可未严格晚于 ledger 预留交接")
-	}
-}
-
-func checkSimRefund(fact simRefundResult, order, refund string) {
-	f := fact.Refund
-	require(fact.Result == "accepted" && fact.Code == "refund_success" && f != nil && f.Account == "md5-demo" && f.Order == order &&
-		f.ID == refund && f.Status == "success" && f.Currency == "CNY" && f.Amount == 100, "模拟上游未确认本单 1.00 CNY 全额原路退款")
 }
 
 func (t tradeRun) releasedHold(dispute string) object {
@@ -286,11 +231,10 @@ func (t tradeRun) refundFailureEvidence() {
 	d.facts("ledger", "ledger_trade_released_disputes 失败时冻结", `SELECT dispute_id,account_id,status,held_usdt,shortfall_usdt,reserve_seq,close_seq,refund_id
 		FROM ledger_trade_released_disputes WHERE order_id=$1`, t.order)
 	t.reservations()
-	t.dispatchGrants()
-	t.refundExecutions()
+
 	t.rulingTriggers(0)
-	d.facts("reconciliation", "独立查退款尝试", `SELECT id,verified_at,eligible,category,convert_from(record_json,'UTF8')::jsonb->>'Outcome' AS outcome
-		FROM reconciliation_verification_evidence WHERE order_id=$1 AND operation='query_refund' ORDER BY verified_at`, t.order)
+	d.facts("reconciliation", "人工退款复核进度", `SELECT m.event_id,m.refund_id,s.outcome,s.invalid_reason,s.approval_request_id,s.authorization_id
+		FROM reconciliation_manual_refund_reviews m LEFT JOIN reconciliation_manual_refund_resolutions s USING(event_id) WHERE m.order_id=$1`, t.order)
 	issued := d.facts("reconciliation", "退款授权进度", `SELECT a.authorization_id,a.issued_at,o.sequence FROM reconciliation_authorizations a
 		JOIN reconciliation_outbox o ON o.event_id=a.authorization_id WHERE a.order_id=$1 AND a.event_type='TradeRefundAuthorized'`, t.order)
 	for _, a := range issued {
@@ -301,7 +245,7 @@ func (t tradeRun) refundFailureEvidence() {
 
 func (t tradeRun) proveRefundExecution(after bool, dispute, ruling, refund string) {
 	d := t.d
-	t.refundExecutions()
+	t.noUpstreamRefund()
 	events := t.rulingTriggers(8 * time.Second)
 	var trigger, succeeded string
 	for _, e := range events {
@@ -313,16 +257,13 @@ func (t tradeRun) proveRefundExecution(after bool, dispute, ruling, refund strin
 		}
 	}
 	require(len(events) == 2 && trigger != "" && succeeded != "", "缺少本裁决的批准事件或本退款的成功事件")
-	auth := oneFact(d.facts("reconciliation", "reconciliation_authorizations 与签名 outbox", `SELECT a.authorization_id,a.control_version,a.issued_at,o.sequence,
-		convert_from(a.evidence_material,'UTF8')::jsonb#>>'{Review,Evidence,SHA256}' AS query_digest,
-		convert_from(a.evidence_material,'UTF8')::jsonb#>>'{Review,Evidence,PendingRefundID}' AS refund_id
-		FROM reconciliation_authorizations a JOIN reconciliation_outbox o ON o.event_id=a.authorization_id
-		WHERE a.order_id=$1 AND a.event_type='TradeRefundAuthorized' AND o.stream='reconciliation.matches' AND o.signature IS NOT NULL`, t.order), "签名退款授权")
-	require(auth["refund_id"] == refund && num(auth, "sequence") > 0, "退款授权指向其他预留或未取得流序号")
-	verified := d.facts("reconciliation", "reconciliation_verification_evidence 独立查退款", `SELECT id,operation,eligible,verified_at,
-		convert_from(record_json,'UTF8')::jsonb->>'Outcome' AS outcome,encode(evidence_sha256,'base64') AS query_digest
-		FROM reconciliation_verification_evidence WHERE order_id=$1 AND operation='query_refund' ORDER BY verified_at`, t.order)
-	require(verifiedRefundQuery(auth, verified), "签发材料缺少匹配摘要的 eligible 独立查退款成功证据")
+	auth := oneFact(d.facts("reconciliation", "reconciliation_authorizations 与签名 outbox", `SELECT a.authorization_id,a.control_version,a.issued_at,o.sequence
+		FROM reconciliation_manual_refund_reviews m JOIN reconciliation_manual_refund_resolutions s USING(event_id)
+		JOIN reconciliation_authorizations a ON a.authorization_id=s.authorization_id AND a.order_id=m.order_id
+		JOIN reconciliation_outbox o ON o.event_id=a.authorization_id
+		WHERE m.order_id=$1 AND m.refund_id=$2 AND m.event_id=$3 AND s.outcome='authorized' AND a.event_type='TradeRefundAuthorized'
+		AND o.stream='reconciliation.matches' AND o.signature IS NOT NULL`, t.order, refund, succeeded), "签名人工退款授权")
+	require(num(auth, "sequence") > 0, "missing signed authorization sequence")
 
 	signed := str(auth, "authorization_id")
 	exec := oneFact(d.facts("ledger", "ledger_trade_authorizations 退款核销", `SELECT authorization_id,source_event_id,source_sequence,expected_version,
@@ -356,11 +297,6 @@ func (t tradeRun) proveRefundExecution(after bool, dispute, ruling, refund strin
 	}
 }
 
-func (t tradeRun) refundExecutions() {
-	t.d.facts("payment", "payment_plugin_executions 上游退款调用", `SELECT id,refund_id,operation,category,error_code,occurred_at
-		FROM payment_plugin_executions WHERE order_id=$1 AND operation='refund' ORDER BY occurred_at,id`, t.order)
-}
-
 func uniqueRefundPosting(rows []object, signed string, postingSeq, reserveSeq int64) object {
 	post := oneFact(rows, "裁决、退款事件和授权的资金分录")
 	require(post["source_event_id"] == signed && post["source_stream"] == "reconciliation.matches" && post["kind"] == "trade_refunded" &&
@@ -368,15 +304,6 @@ func uniqueRefundPosting(rows []object, signed string, postingSeq, reserveSeq in
 	return post
 }
 
-func verifiedRefundQuery(auth object, rows []object) bool {
-	digest := str(auth, "query_digest")
-	for _, r := range rows {
-		if r["query_digest"] == digest && r["operation"] == "query_refund" && r["eligible"] == true && r["outcome"] == "refund_succeeded" {
-			return true
-		}
-	}
-	return false
-}
 func checkClosedRiskHold(hold, reservation, post object) {
 	require(hold["status"] == "REFUND_PENDING" && hold["fund_status"] == "released" && hold["refund_id"] == str(reservation, "refund_id") &&
 		num(hold, "final_seq") == num(hold, "close_seq") && num(hold, "close_seq") > num(hold, "reserve_seq") &&

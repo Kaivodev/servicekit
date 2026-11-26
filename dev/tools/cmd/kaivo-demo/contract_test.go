@@ -66,8 +66,13 @@ func TestBackendRequestContracts(t *testing.T) {
 		}
 	}
 	for p, fields := range map[string]string{
-		"platform/channel-accounts/credentials": "channel_account_id channel_code credentials_json",
-		"platform/auth/password/reset":          "token new_password", "platform/auth/challenges/{id}/verify": "assertion", "seller/auth/challenges/{id}/verify": "method code",
+		"platform/orders/{order_id}/refunds":                             "escrow_reservation_id expected_control_version reason",
+		"platform/refunds/{id}/failure-requests":                         "reason",
+		"platform/seller-refund-evidence/{id}/rejection":                 "expected_evidence_version reason",
+		"seller/accounts/{seller_account_id}/refunds/{id}/process":       "expected_evidence_version upstream_refund_no refunded_at money files",
+		"seller/accounts/{seller_account_id}/late-payments/{id}/process": "expected_evidence_version upstream_refund_no refunded_at money files",
+		"platform/channel-accounts/credentials":                          "channel_account_id channel_code credentials_json",
+		"platform/auth/password/reset":                                   "token new_password", "platform/auth/challenges/{id}/verify": "assertion", "seller/auth/challenges/{id}/verify": "method code",
 		"platform/me/webauthn/enrollments": "name", "platform/me/webauthn/enrollments/{id}/confirm": "credential_id client_data_json attestation_object transports",
 		"seller/me/mfa/totp/enrollments": "", "seller/me/mfa/totp/confirm": "enrollment_id code", "platform/invitations/platform-staff": "email platform_roles", "platform/invitations/sellers": "email seller_account_id", "platform/invitations/{id}/approvals": "expected_version", "platform/plugins": "manifest_json plugin_wasm fixtures package_sha256", "platform/verification/plugins": "manifest_json plugin_wasm fixtures package_sha256", "platform/pricing-drafts": "configuration effective_at", "platform/pricing-versions/requests": "draft_id expected_revision expected_control_version", "platform/plugin-enables/requests": "channel_account_id expected_control_version plugin_version_id", "platform/verification/credentials": "channel_account_id credentials_json", "platform/verification/enables/requests": "verification_account_id expected_control_version plugin_version_id", "platform/payment-accesses/{id}/reviews": "expected_control_version expected_revision_version materials_sha256 decision reason evidence_sha256", "platform/disputes": "order_id escrow_reservation_id expected_control_version reason evidence", "platform/disputes/{id}/rulings": "expected_control_version outcome reason", "seller/accounts/{seller_account_id}/disputes/{id}/evidence": "expected_evidence_version evidence",
 	} {
@@ -76,7 +81,7 @@ func TestBackendRequestContracts(t *testing.T) {
 	for _, p := range []string{"channel-accounts", "payment-methods", "risk-policies", "verification/accounts"} {
 		check("platform/"+p+"/requests", "change")
 	}
-	for _, p := range []string{"channel-accounts", "payment-methods", "risk-policies", "verification/accounts", "plugins", "plugin-enables", "pricing-versions", "verification/plugins", "verification/enables", "dispute-rulings"} {
+	for _, p := range []string{"channel-accounts", "payment-methods", "risk-policies", "verification/accounts", "plugins", "plugin-enables", "pricing-versions", "verification/plugins", "verification/enables", "dispute-rulings", "seller-refund-reviews", "seller-refund-failures"} {
 		check("platform/"+p+"/approvals/{id}/assertions", "assertion")
 	}
 	for _, path := range []string{"/mapi.php", "/api/pay/create", "/api/pay/refund", "/api/pay/close", "/api/pay/refundquery", "/telegram/webhook", "/totp/enroll/{token}"} {

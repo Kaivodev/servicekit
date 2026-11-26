@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strings"
 	"syscall"
 )
 
@@ -112,9 +111,6 @@ func executeContext(ctx context.Context, args []string) (err error) {
 		d.history.Checks, d.history.SourceNotes = round11Plan(target)
 		if target == "dispute-refund-before-release" || target == "dispute-refund-after-release" {
 			d.history.Checks, d.history.SourceNotes = disputeRefundPlan(target == "dispute-refund-after-release")
-		}
-		if kube != nil && strings.HasPrefix(target, "dispute-refund-") {
-			d.history.Checks[2] = "核对 payment 和 ledger 的预留 ID、seq、裁决与派发审计。跨 CNPG 集群的时间戳顺序校验仅本机栈。"
 		}
 		d.report()
 		d.stepGroup(target, func() {

@@ -3,15 +3,12 @@ package main
 import (
 	"bytes"
 	"crypto"
-	"crypto/md5"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
 
 	"crypto/x509"
 	"encoding/base64"
-	"encoding/hex"
-	"encoding/json"
 	"encoding/pem"
 	"fmt"
 	"io"
@@ -29,7 +26,7 @@ func (d *driver) epay(version, path string, v url.Values) object {
 	if version == "v1" {
 		require(code == 200 && num(r, "code") == 1, fmt.Sprintf("%s HTTP %d EPay code %v", path, code, r["code"]))
 	} else {
-		pending := (path == "/api/pay/refund" || path == "/api/pay/close") && num(r, "code") == -1 && r["msg"] == "结果待确认"
+		pending := path == "/api/pay/close" && num(r, "code") == -1 && r["msg"] == "结果待确认"
 		if pending {
 			d.trace("EPay signed pending result; await owner evidence")
 		}
@@ -176,7 +173,7 @@ func (t tradeRun) checkOrderRoute(row object) (order, code, money string) {
 			fmt.Sprintf("order routed to %s channel account %s instead of the EPay test upstream", code, account))
 	}
 	gateway := d.gatewayMode()
-	amount, expected := scenarioOrder(d.scope, gateway)
+	amount, expected := scenarioOrder(d.history.Scenario, gateway)
 	require(code == expected, fmt.Sprintf("order %s routed to %s, expected %s", order, code, expected))
 	if gateway {
 		require(money == amount, "gateway order amount differs from scenario")
@@ -198,7 +195,7 @@ func (t tradeRun) baseline() {
 }
 
 func (d *driver) trade(name, proto string) tradeRun {
-	amount, _ := scenarioOrder(d.scope, d.gatewayMode())
+	amount, _ := scenarioOrder(d.history.Scenario, d.gatewayMode())
 	t := tradeRun{d: d, name: name, proto: proto, number: d.key(d.scope + "/" + name)}
 	k := d.scope + "/" + name
 	t.baseline()
@@ -486,37 +483,40 @@ func (d *driver) cancel(late bool) {
 	}
 }
 func (d *driver) refund(after bool) {
-	t := d.trade("退款", "v2")
+	t := d.refundTrade("退款", "v2")
 	t.paid(1)
 	branch := "PRE_RELEASE"
 	if after {
 		t.release()
 		branch = "POST_RELEASE"
 	}
-	t.step("全额退款", func() {
+	// Check the intended branch before the command. A lost response can be
+	// replayed even after payment has already reserved this refund.
+	t.step("核对退款前担保", func() {
 		h := d.ledgerTrade(t.order)
-		if !after {
-			require(h["released_seq"] == nil, "order already released")
-		}
-		d.epay("v2", "/api/pay/refund", url.Values{"out_trade_no": {t.number}, "out_refund_no": {t.number}, "money": {t.amount}})
+		require(after && h["status"] == "RELEASED" || !after && h["status"] == "RESERVED" && h["released_seq"] == nil, "wrong trade state before merchant refund")
 	})
-	t.step("独立核实并核销", func() {
-		t.terminal("REFUNDED")
-		verified := d.rows("reconciliation", "reconciliation_verification_evidence", "SELECT id,verified_at FROM reconciliation_verification_evidence WHERE order_id=$1 AND eligible AND operation='query_refund' AND convert_from(record_json,'UTF8')::jsonb->>'Outcome'='refund_succeeded'", t.order)
-		require(len(verified) > 0, "missing independent successful refund query")
-		d.evidence("verified_refund", verified)
-		r := d.rows("ledger", "ledger_trade_refunds", "SELECT branch,reserved_usdt,reserve_seq FROM ledger_trade_refunds WHERE order_id=$1", t.order)
-		require(len(r) == 1 && r[0]["branch"] == branch, "wrong refund reservation branch")
-		if after {
-			require(num(r[0], "reserved_usdt") == num(d.ledgerTrade(t.order), "recipient_usdt"), "merchant reserve differs from N")
-		}
-		d.epay("v2", "/api/pay/refundquery", url.Values{"out_refund_no": {t.number}})
+	step := t.step("商户申请人工退款", func() {
+		_, reply := d.signedEPay("v2", "/api/pay/refund", t.refundParams())
+		require(num(reply, "code") == -1 && reply["msg"] == "退款已受理，等待处理" && reply["out_refund_no"] == t.number, "missing signed manual refund acceptance")
+		d.evidence("refund_id", str(reply, "refund_no"))
+	})
+	refund := str(step.Evidence, "refund_id")
+	post := t.manualRefund(refund)
+	t.step("核对退款分支与余额", func() {
+		require(post["branch"] == branch, "wrong refund reservation branch")
+		t.noUpstreamRefund()
 		t.finish(false)
 	})
-	if after && d.native() {
-		d.insufficient()
-	}
+	t.step("商户查询退款终态", func() {
+		reply := d.epay("v2", "/api/pay/refundquery", url.Values{"out_refund_no": {t.number}})
+		require(reply["refund_no"] == refund && reply["out_refund_no"] == t.number && reply["money"] == t.amount, "signed refund query differs from settled refund")
+	})
 }
+func (t tradeRun) refundParams() url.Values {
+	return url.Values{"out_trade_no": {t.number}, "out_refund_no": {t.number}, "money": {t.amount}}
+}
+
 func (t tradeRun) registerDispute(after bool) {
 	d := t.d
 	t.step("登记争议与双方举证", func() {
@@ -571,6 +571,9 @@ var scenarios = map[string]func(*driver){
 	},
 	"cancel":                        func(d *driver) { d.cancel(false); d.cancel(true) },
 	"refund-insufficient":           (*driver).insufficient,
+	"manual-refund":                 (*driver).platformRefundSuccess,
+	"manual-refund-failure":         (*driver).platformRefundFailure,
+	"late-payment":                  (*driver).latePayment,
 	"settle-refunds":                (*driver).settleRefunds,
 	"refund-before-release":         func(d *driver) { d.refund(false) },
 	"refund-after-release":          func(d *driver) { d.refund(true) },
@@ -592,7 +595,7 @@ func (d *driver) run(s string) {
 		scenarios[s](d)
 		return
 	}
-	if d.read("finished/"+s, &complete) && complete {
+	if d.read("finished/"+d.scope, &complete) && complete {
 		if s == livePhase {
 			d.disableLiveEPay()
 		}
@@ -606,16 +609,25 @@ func (d *driver) run(s string) {
 		// IAM ends an idle Telegram session after 30 minutes. A merchant logs in
 		// again with /start, which is idempotent for an existing registration.
 		reply := d.bot(fmt.Sprintf("session/%s/%d", s, time.Now().UnixNano()), "/start")
+		if !strings.Contains(reply, "注册或登录已完成") {
+			// IAM counts every /start for this user (setup and earlier scenarios
+			// included), so the driver's local estimate can be short. Retry once
+			// after a full registration window.
+			_, window := startPolicy(d.env("iam"))
+			d.trace(fmt.Sprintf("商户 /start 被拒绝，等待一个完整的注册窗口 %s 后重试一次", window+startMargin))
+			d.sleep(window + startMargin)
+			reply = d.bot(fmt.Sprintf("session/%s/%d", s, time.Now().UnixNano()), "/start")
+		}
 		require(strings.Contains(reply, "注册或登录已完成"), "merchant Telegram login refused")
 		d.refreshMarket()
 	})
 	scenarios[s](d)
-	d.put("finished/"+s, true)
+	d.put("finished/"+d.scope, true)
 }
 
 // This branch can resume after an independently authorized spend of the recipient funds.
 func (d *driver) insufficient() {
-	t := d.trade("余额不足样本", "v2")
+	t := d.refundTrade("余额不足样本", "v2")
 	t.paid(1)
 	t.release()
 	t.step("可用不足时不先退法币", func() {
@@ -626,61 +638,42 @@ func (d *driver) insufficient() {
 		d.evidence("required_N", n)
 		d.evidence("merchant_available", available)
 		require(str(hold, "status") == "RELEASED", "negative sample must still be released")
-		if !d.native() && available >= n {
+		if available >= n {
 			stop("缺样本：本单已放币；请在商户独立支用余额至低于 N 后续跑负例")
 		}
-		require(available < n, "merchant still has N; clean stack has no merchant spending/withdrawal entry. Resume this sample only after an independently authorized debit")
-		v := d.epay("v2", "/api/pay/refund", url.Values{"out_trade_no": {t.number}, "money": {t.amount}, "out_refund_no": {t.number}})
-		require(v["msg"] == "结果待确认", "unexpected outcome for insufficient balance")
-		p := "/accounts/" + d.required("seller-account") + "/refunds?order_id=" + t.order
-		var refund string
-		waitFor("payment attempted the original refund reserve", 45*time.Second, func() bool {
-			list := d.browser("seller").api("GET", p, "", nil)
-			items, _ := list["items"].([]any)
-			for _, v := range items {
-				f := obj(v)
-				if f["order_id"] == t.order && f["status"] == "unknown" && f["upstream_refund_id"] == nil {
-					refund = str(f, "refund_id")
-					return true
-				}
+		_, reply := d.signedEPay("v2", "/api/pay/refund", t.refundParams())
+		require(num(reply, "code") == -1, "expected negative EPay refund receipt")
+		switch reply["msg"] {
+		case "当前状态不允许此操作":
+			// Payment maps a definitive ledger refusal to FailedPrecondition.
+		case "退款已受理，等待处理":
+			require(reply["out_refund_no"] == t.number, "wrong reserving refund receipt")
+			d.evidence("accepted_refund_id", str(reply, "refund_no"))
+		default:
+			stop("unexpected EPay refund refusal")
+		}
+		d.evidence("epay_reply", reply["msg"])
+		var refused object
+		waitFor("definitive refund reserve refusal", time.Minute, func() bool {
+			rows := d.rows("payment", "拒绝退款预留", `SELECT f.id,f.status,f.stage,a.action,
+				f.data ? 'reservation' AS reserved,f.data ? 'upstream_refund_id' AS sent
+				FROM payment_refunds f JOIN payment_audit_logs a ON a.target_type='refund' AND a.target_id=f.id::text
+				WHERE f.order_id=$1 AND f.out_refund_no=$2 AND f.mode='manual' AND a.action='refund.reserve_rejected_FailedPrecondition' AND a.result='failed'`, t.order, t.number)
+			if len(rows) == 0 {
+				return false
 			}
-			return false
+			refused = oneFact(rows, "refused refund")
+			d.evidence("refused_reservation", refused)
+			return true
 		})
-		require(len(d.rows("ledger", "ledger_trade_refunds", "SELECT reserve_seq FROM ledger_trade_refunds WHERE order_id=$1", t.order)) == 0, "unexpected debit reservation")
-		fact := d.simRefundQuery(t.order, refund)
-		require(fact.Result == "rejected" && fact.Code == "not_found", "simulator has a fiat refund or the read was inconclusive")
-		d.evidence("sim_refund_query", object{"refund_id": refund, "code": "not_found"})
-		d.chainEvidence(t.order)
+		require(refused["stage"] == "stopped" && num(refused, "status") == 1 && refused["reserved"] == false && refused["sent"] == false, "refund advanced past failed reservation")
+		if reply["refund_no"] != nil {
+			require(reply["refund_no"] == refused["id"], "refusal is for a different refund")
+		}
+		require(len(t.reservations()) == 0, "unexpected debit reservation")
+		require(len(d.facts("payment", "卖方退款凭证", "SELECT id FROM payment_seller_refund_evidence WHERE refund_id=$1", str(refused, "id"))) == 0, "seller evidence exists for a refused reservation")
+		t.noUpstreamRefund()
+		end := d.chainEvidence(t.order)
+		require(end["status"] == "RELEASED" && end["latest_seq"] == hold["latest_seq"], "reservation refusal changed the trade")
 	})
-}
-
-// Only the simulator's public refund fields can reach either report.
-type simRefundResult struct {
-	Result string `json:"result"`
-	Code   string `json:"code"`
-	Refund *struct {
-		Account  string `json:"account_id"`
-		Order    string `json:"order_id"`
-		ID       string `json:"refund_id"`
-		Status   string `json:"status"`
-		Currency string `json:"currency"`
-		Amount   int64  `json:"amount"`
-	} `json:"refund,omitempty"`
-}
-
-func (d *driver) simRefundQuery(order, refund string) simRefundResult {
-	var credentials map[string]string
-	decode(d.input("handoff/query.json"), &credentials)
-	fields := url.Values{"account_id": {"md5-demo"}, "operation": {"refund-query"}, "order_id": {order}, "refund_id": {refund}}
-	require(credentials["query_key"] != "", "missing independent query credential")
-	sum := md5.Sum([]byte(fields.Encode() + "&key=" + credentials["query_key"]))
-	fields.Set("sign", hex.EncodeToString(sum[:]))
-	resp, e := localHTTP.PostForm(d.addresses().sim+"/api/md5-demo/refund-query", fields)
-	require(e == nil, "sim refund-query unavailable")
-	defer resp.Body.Close()
-	var fact simRefundResult
-	e = json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&fact)
-	d.trace(fmt.Sprintf("POST /api/md5-demo/refund-query → HTTP %d", resp.StatusCode))
-	require(e == nil && resp.StatusCode == 200, "模拟上游独立查退款失败")
-	return fact
 }

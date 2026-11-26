@@ -3,9 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -64,43 +61,12 @@ func (k *kubeEnvironment) requireDevelopment(service string) {
 
 func (k *kubeEnvironment) sellerReview(seller, owner, email string) {
 	k.requireDevelopment("payment")
-	// Bind the development review to the actual IAM enrollment.
-	digest := fmt.Sprintf("%x", sha256.Sum256(encoded(object{"seller_account_id": seller, "user_id": owner, "email": email})))
-	const reviewer = "kaivo-demo-development"
 	k.updateConfigMap(k.namespaces["business"], "payment-inputs", func(data map[string]string) map[string]string {
-		var rows []json.RawMessage
-		require(json.Unmarshal([]byte(data[reviewsKey]), &rows) == nil && rows != nil, "invalid payment seller reviews")
-		index := -1
-		active := false
-		for i, raw := range rows {
-			var row struct {
-				Seller   string    `json:"seller_account_id"`
-				Reviewer string    `json:"reviewed_by"`
-				Digest   string    `json:"review_sha256"`
-				Until    time.Time `json:"valid_until"`
-			}
-			decode(raw, &row)
-			if row.Seller != seller {
-				continue
-			}
-			require(index == -1, "duplicate review for seller")
-			index = i
-			if row.Reviewer == reviewer {
-				require(row.Digest == digest, "development seller enrollment changed")
-			}
-			active = row.Until.After(time.Now())
-			require(active || row.Reviewer == reviewer, "existing seller review has expired")
-		}
-		if active {
+		out, changed := mergeSellerReview([]byte(data[reviewsKey]), seller, owner, email, time.Now())
+		if !changed {
 			return nil
 		}
-		row := encoded(object{"seller_account_id": seller, "review_sha256": digest, "reviewed_by": reviewer, "valid_until": time.Now().UTC().Add(7 * 24 * time.Hour).Truncate(time.Second)})
-		if index >= 0 {
-			rows[index] = row
-		} else {
-			rows = append(rows, row)
-		}
-		return map[string]string{reviewsKey: string(encoded(rows))}
+		return map[string]string{reviewsKey: string(out)}
 	})
 	// Also wait on resume: an earlier patch could have reached the API just before interruption.
 	k.waitProjection()

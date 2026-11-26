@@ -55,9 +55,9 @@ func materialBytes(b []byte, desc pr.MessageDescriptor, m object) []byte {
 				continue
 			}
 			if v == nil {
-				// Reconciliation encodes absent optional scalars with a zero
-				// presence byte, except for the two legacy extensions above.
-				require(desc.ParentFile().Package() == "aipay.reconciliation.v1", "missing approval field "+k)
+				// These owner encodings include an explicit absent-presence byte.
+				require(desc.ParentFile().Package() == "aipay.reconciliation.v1" ||
+					desc.Name() == "SellerRefundReviewMaterial" || desc.Name() == "SellerRefundFailureMaterial", "missing approval field "+k)
 				b = append(b, 0)
 				continue
 			}

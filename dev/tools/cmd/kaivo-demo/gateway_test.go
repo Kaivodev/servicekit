@@ -160,9 +160,12 @@ func TestDemoOrderRouting(t *testing.T) {
 		names, amount, channel, sim string
 	}{
 		{"main duplicates dispute seller-offline bot-notices statement archived-work cancel", "2.00", "epay_v1", "epay-demo"},
-		{"refund-insufficient refund-before-release refund-after-release dispute-refund-before-release dispute-refund-after-release", "1.00", "sim_form_md5", "md5-demo"},
+		{"refund-insufficient refund-before-release refund-after-release dispute-refund-before-release dispute-refund-after-release manual-refund manual-refund-failure late-payment", "1.00", "sim_form_md5", "md5-demo"},
 	} {
 		for _, name := range strings.Fields(group.names) {
+			if scenarios[name] == nil {
+				t.Fatalf("unregistered scenario %s", name)
+			}
 			for _, gateway := range []bool{true, false} {
 				channel, sim := group.channel, group.sim
 				if !gateway {

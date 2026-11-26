@@ -76,6 +76,13 @@ python3 -B dev/native/stack.py demo run epay-live
 
 放币并记录网关证据后，驱动自动停用测试通道。付款失败或中途放弃时，可单独执行 `python3 -B dev/native/stack.py demo setup epay-live-off` 停止新派单。可以重复执行，已停用时会跳过。停用不关单、不退款。凭据仍留在本机交易网关和核验网关的数据库中，随本机栈删除。
 
+### 从零重建本机栈
+
+在途订单无法收口（例如上游不可达、结果一直未知）时，可以清库重建。先停栈和 `demo serve`，把 `../.local/dev/native/` 整个改名保留，再用管理员连接对每个 `aipay_*` 库和 `collection_dev` 执行 `pg_dump -Fc` 备份，然后删除这些库以及注释为本栈标记（`kaivo-development-<uuid>`）的角色。`prepare` 会拒绝接管同名的旧角色。之后按本节开头执行 `prepare`、`build --workspace`（二进制未变时也可从备份目录复制）、`migrate`、`refresh-market`，启动 `demo serve` 和 `up`，再执行 `demo setup`。
+
+- 缓存 Redis 可能与其他栈共用，重建时不必清空。backend 把 Telegram 更新摘要按 update_id 在缓存中保留 24 小时；驱动在新状态下从当前毫秒时间起编号，不会与旧栈的编号冲突。旧版驱动建的栈若遇到 webhook 业务码 403（`kaivo:telegram:<bot>:update:<id>` 摘要不符），删除 backend 缓存库中 `kaivo:telegram:*` 键即可。
+- 卖方审核资料由 `demo setup seller` 自动写入，见下文运行要点。
+
 ## 预发开发材料
 
 从 servicekit 根目录构建 `kaivo-stagingseed`，再运行 deploy 的引导脚本。生成器从当前 kubectl context 读取四个预发命名空间中的受管对象，只通过 stdout 管道交付材料。对象、键名和挂载方式见 [deploy 的 servicekit 开发材料接口](../../deploy/README.md#servicekit-开发材料接口)。
@@ -150,14 +157,14 @@ export AIPAY_DEMO_TARGET=k8s
 demo() { "$STATE/bin/kaivo-demo" "$STATE" "$SERVICEKIT" "$@"; }
 demo setup -o "$STATE/setup.md"
 for scenario in main cancel refund-before-release refund-after-release dispute \
-  dispute-refund-before-release dispute-refund-after-release; do
+  dispute-refund-before-release dispute-refund-after-release manual-refund manual-refund-failure late-payment; do
   demo run "$scenario" -o "$STATE/$scenario.md"
 done
 ```
 
 单独执行 `demo setup seller` 可续跑卖方阶段。驱动把 IAM 登记资料的摘要合入 payment 的开发审核列表，刷新行情，发布同一份链、回执与地址绑定，然后依次重启并等待 devchain、devcollection、reconciliation 就绪。ledger 开启预存订阅后一直运行。驱动派生 `ledger-admin` 登记钱包、`collection-admin` 签发 normal 回执，并等待最多 90 秒确认到账。同一预发保留首个卖方和原始区块时间；`demo run deposits` 与卖方 setup 共用充值断点。
 
-状态在 `$STATE/demo-k8s/`；若挂载了内存盘，卸载后私有断点随之丢失。`-o` 支持 setup、单独阶段和 run，扩展名 .json 输出 JSON，其余输出 Markdown。争议退款在跨库环境按预留 ID、序号、裁决摘要和业务余额核对；同一数据库时钟的严格先后检查保留在本机。`refund-insufficient` 是另行运行的商户可用余额不足负例，需要独立支用样本。重复回执、`ledger-reader` 和 `ledger-matches` 仍为仅本机栈。通道的回调来源取登记时模拟器 Pod 的精确 IP，Pod IP 改变后按原审批流程更新。
+状态在 `$STATE/demo-k8s/`；若挂载了内存盘，卸载后私有断点随之丢失。`-o` 支持 setup、单独阶段和 run，扩展名 .json 输出 JSON，其余输出 Markdown。争议退款在跨库环境核对预留 ID、序号、裁决摘要、人工复核记录、签名授权与业务余额。`refund-insufficient` 是另行运行的商户可用余额不足负例，需要独立支用样本。重复回执、`ledger-reader` 和 `ledger-matches` 仍为仅本机栈。通道的回调来源取登记时模拟器 Pod 的精确 IP，Pod IP 改变后按原审批流程更新。
 
 ### 集群内夹具
 
@@ -240,9 +247,12 @@ stack up
 stack demo setup
 stack demo run main
 stack demo run cancel
+stack demo run settle-refunds
 stack demo run refund-before-release
 stack demo run refund-after-release
-stack demo run settle-refunds
+stack demo run manual-refund
+stack demo run manual-refund-failure
+stack demo run late-payment
 stack demo run dispute
 stack demo run dispute-refund-before-release -o ../.local/dev/native/demo/reports/dispute-refund-before-release.md
 stack demo run dispute-refund-after-release -o ../.local/dev/native/demo/reports/dispute-refund-after-release.md
@@ -251,16 +261,19 @@ stack demo run seller-offline
 stack demo run bot-notices
 stack demo run archived-work -o ../.local/dev/native/demo/reports/archived-work.md
 stack demo run statement -o ../.local/dev/native/demo/reports/statement.md
+# 需要商户独立支用余额至低于本单净额 N
+stack demo run refund-insufficient
 ```
 
 - `stack demo run settle-refunds` 扫描演示卖方待提交凭证、待复核和异议期内的退款，支持旧订单。驱动按原单金额提交演示 PNG，完成 TOTP 与双人 WebAuthn 复核，等待核验授权和账本入账，核对卖方可用余额增加 Q、退款占用归零。中断后重跑同一命令可续办。
-- 已有本机栈在停机时执行 `stack demo-config`，更新 IAM 路由、开启 payment 退款通知，并将 payment 异议期与 reconciliation 异议期下限设为 10 秒。使用含本轮修改的 kaivo-demo 和已迁移的服务启动。
+- 已有本机栈在停机时，从目标工作区包含本轮代码的 servicekit 根目录执行 `python3 -B dev/native/stack.py demo-config`，更新 IAM 路由、开启 payment 退款通知，并将 payment 异议期与 reconciliation 异议期下限设为 10 秒。使用含本轮修改的 kaivo-demo 和已迁移的服务启动。
 - `demo setup [iam|registry|packages|seller|channels|merchant]` 可单独运行某个阶段。无参数时依次开通，首个真实失败会停止。本机 mTLS 和 Compose 由 payment.env 中的网关地址选择 Rust ABI v3；本机 plaintext 和 UG-4b 之前的 K8s 演示使用 Go 1.27.3 与 upstream-plugins v0.2.2。Rust 工具链与预制包布局见[演示制包](demo.md#网关制包与凭据)。
 - 网关制包或预制包目录需要四包，分别是 `epay_v1`、`epay_v1_verify`、`sim_form_md5`、`sim_form_md5_verify`。默认两条模拟器通道按金额分流，101–10000000 分走 EPay（`epay-demo`，PID 1001），1–100 分走 form-md5（`md5-demo`）。本机 plaintext、K8s 的 form-md5 继续覆盖 1–10000000 分。
-- main、duplicates、dispute、seller-offline、bot-notices、statement、archived-work、cancel 下单 2.00 元。refund-insufficient、refund-before-release、refund-after-release、dispute-refund-before-release、dispute-refund-after-release 下单 1.00 元。EPay 插件不支持退款，退款场景保留在 form-md5，待 UG-8 人工退款演示接入。每笔原单的实际通道记录在报告中。
+- main、duplicates、dispute、seller-offline、bot-notices、statement、archived-work、cancel 下单 2.00 元。本轮退款和 late-payment 场景每单 1.00 元，使用 form-md5 收银。商户 V2、争议裁决及平台运营发起的退款共用卖方举证、双人复核、独立授权与账本核销流程。每笔原单的实际通道记录在报告中。
+- `manual-refund` 验证放币后驳回首版凭证、审批第二版，以及卖方监听对平台复核路由返回 404。`manual-refund-failure` 验证放币前失败授权恢复原担保后正常放币。`late-payment` 等待平台取消后才付款，经主动查单和凭证双签结案。`refund-insufficient` 单独运行，报告会记录所需 N 与商户可用余额。
 - EPay 两实例的 `unpaid_timeout_seconds` 等于 payment 的付款指令有效期加 1 小时，向上取整秒。默认 10 分钟对应 T=4200 秒。cancel 在关单前只回拨原单查单应答的建单时间 T+120 秒，未付单须经两次间隔至少 5 秒的独立观测才归还担保。迟付单在首次观测后仍可收银付款。
 - 第 11 轮四个场景已于 2026-11-24 在本机进程栈通过，结果见[验证机记录](#2026-11-24-第-11-轮演示验收)。卖方场景会切换该金额对应的通道，通知场景会绑定演示商户群。归档场景按 payment 的真实退避等待，可用 `AIPAY_DEMO_ARCHIVE_WAIT=0s` 立即检查并留待续跑。对账场景优先使用已有文件，新栈可能要等到下一次 UTC+8 零点。详见[步骤与证据](demo.md#第-11-轮运行条件)。
-- 两个争议退款场景已于 2026-11-22 在本机进程栈通过。各使用一笔新订单。放币后场景也通过平台登记争议，登记失败会把现场状态写入报告。重跑同名场景沿用原单和已签材料。
+- 2026-11-22 的争议退款记录验证的是旧自动退款流程。当前人工退款场景的栈验收待运行。放币后场景也通过平台登记争议，登记失败会把现场状态写入报告。重跑同名场景沿用原单和已签材料。
 - `demo run 场景 -o 文件` 在每步结束时更新报告，失败时保留已有证据和错误。`.json` 输出 JSON，其他文件名输出 Markdown。默认的两份场景报告仍位于 `demo/reports/`。
 - `demo setup iam` 由管理员 1 邀请风控人员（`platform-risk`），管理员 2 批准，风控人员接受邀请后注册自己的 WebAuthn 凭据。风控人员提交 20 秒风控策略和争议裁决；运营登记争议，提交通道、方式、定价、插件和核验账户申请。每份审批材料都按提交人的 IAM 用户 ID 核对，再由两名已登记的审批人分别签署。
 - `demo setup seller` 以独立卖方私聊 `/start`、`/balance` 取得账户 ID，再按账户与 Telegram 用户在 IAM 只读事务中查询 `iam_telegram_bindings.user_id`。驱动把六项声明写入 `demo/declarations/seller.json`，用 `iam sellers activate` 登记，管理员 1 随后向同一账户和邮箱发邀请。卖方接受邀请并绑定 TOTP。报告将 `verification_ref` 和 `declared_by` 标为演示值。新栈的 `prepare` 和已有本机栈的 `demo-config` 都从 IAM 迁移属主连接生成私有的 `env/iam-sellers.env`，仅供卖方仪式读取。
@@ -342,9 +355,10 @@ dc down
 
 运行要点：
 - 每个场景开始前刷新行情（`refresh-market`），报价有效期 10 分钟。
+- IAM 对同一 Telegram 用户的 `/start` 按 5 分钟 3 次限流，setup 和前面的场景都计入。驱动按本地记录排队，被拒绝时再等一个完整窗口重试一次；连续执行多个场景时，建议每个场景之间间隔约 2 分钟。
 - 驱动在每个场景开头发 `/start`，刷新商户的 Telegram 会话（IAM 闲置 30 分钟后过期）。
 - IAM 对每个账户的 TOTP 校验（含成功）按 5 分钟 5 次计数，驱动每个窗口最多使用 4 次。
-- 卖方审核资料由审核方写入 `inputs/payment/seller-reviews.json`，演示中由操作者代行。
+- 卖方审核资料写在 `inputs/payment/seller-reviews.json`。`demo setup seller` 的“开发卖方审核资料”步骤按 IAM 登记的账户、用户和邮箱生成摘要，以 `kaivo-demo-development` 名义写入 7 天有效的记录，本机与 K8s 相同；payment 每次核对时重读该文件，无需重启。
 
 ### 2026-11-24 第 11 轮演示验收
 

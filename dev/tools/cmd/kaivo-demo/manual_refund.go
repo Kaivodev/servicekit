@@ -10,6 +10,12 @@ import (
 	"time"
 )
 
+func (d *driver) refundTrade(name, protocol string) tradeRun {
+	t := d.trade(name, protocol)
+	require(t.amount == "1.00" && t.channel == md5Channel, "expected 1.00 CNY on form-md5")
+	return t
+}
+
 // manualRefund resumes a previously created refund using only its owner IDs.
 // The returned posting locates the seller credit relative to a balance snapshot.
 func (t tradeRun) manualRefund(refund string) object {
@@ -33,34 +39,16 @@ func (t tradeRun) manualRefund(refund string) object {
 		case "awaiting_seller":
 			detail := seller.api("GET", base+"/"+refund, "", nil)
 			require(detail["refund_id"] == refund && detail["order_id"] == t.order, "seller refund detail mismatch")
-			e := t.submitRefundEvidence(base+"/"+refund, refund, detail)
+			e := t.submitRefundEvidence(refundSubject(refund), detail)
 			d.evidence("evidence_id", str(e, "evidence_id"))
 		default:
 			stop("refund %s cannot submit evidence in state %v", refund, row["status"])
 		}
 	})
 
-	var approvalID, digest string
+	var header object
 	d.liveStep(label+" 双人复核", func() {
-		d.login(approvers[0])
-		review := d.browser(approvers[0]).api("GET", "/refunds/"+refund+"/review", "", nil)
-		r := obj(review["approval"])
-		m := obj(r["material"])
-		op := obj(m["seller_refund"])
-		trade := obj(op["trade"])
-		current := obj(review["refund"])
-		require(m["kind"] == "seller_refund" && obj(op["subject"])["refund_id"] == refund &&
-			trade["order_id"] == t.order && trade["seller_account_id"] == account && current["refund_id"] == refund &&
-			str(op, "out_refund_no") == current["out_refund_no"] && matchesProposal(obj(op["refunded_amount"]), obj(current["fiat_amount"])), "wrong seller refund approval")
-		d.evidence("out_refund_no", current["out_refund_no"])
-		history, ok := review["evidence"].([]any)
-		require(ok && len(history) > 0, "missing seller refund evidence")
-		e := obj(history[len(history)-1])
-		require(e["evidence_id"] == op["evidence_id"] && e["evidence_sha256"] == op["evidence_sha256"] &&
-			e["version"] == op["evidence_version"] && obj(e["subject"])["refund_id"] == refund, "approval is not for the current evidence")
-		header := obj(r["approval_request"])
-		approvalID, digest = str(header, "id"), str(header, "request_digest")
-		d.approveExisting("seller-refund/"+approvalID, "payment", str(e, "submitted_by"), "/seller-refund-reviews", r)
+		header = t.approveSellerEvidence(refundSubject(refund))
 	})
 
 	var posting object
@@ -85,22 +73,10 @@ func (t tradeRun) manualRefund(refund string) object {
 		verified, err := time.Parse(time.RFC3339Nano, str(row, "verified_at"))
 		check(err)
 		require(!verified.Before(deadline), "payment succeeded before objection deadline")
-		var resolution object
-		waitFor("manual refund resolution", 2*time.Minute, func() bool {
-			rows := d.rows("reconciliation", "reconciliation_manual_refund_resolutions", `SELECT s.event_id AS resolution_id,s.outcome,
-				s.approval_request_id,encode(s.request_digest,'hex') AS request_digest,s.authorization_id,a.event_type
-				FROM reconciliation_manual_refund_reviews m JOIN reconciliation_manual_refund_resolutions s USING(event_id)
-				LEFT JOIN reconciliation_authorizations a ON a.authorization_id=s.authorization_id AND a.order_id=m.order_id
-				WHERE m.order_id=$1 AND m.refund_id=$2`, t.order, refund)
-			if len(rows) == 0 {
-				return false
-			}
-			resolution = oneFact(rows, "manual refund resolution")
-			d.evidence("resolution", resolution)
-			require(resolution["outcome"] == "authorized" && resolution["approval_request_id"] == approvalID &&
-				resolution["request_digest"] == fmt.Sprintf("%x", raw(digest)) && resolution["event_type"] == "TradeRefundAuthorized", "manual refund resolution or authorization mismatch")
-			return true
-		})
+		resolution := t.awaitRefundResolution(refund, str(header, "id"), str(header, "request_digest"))
+		event := oneFact(d.facts("payment", "人工退款成功事件", `SELECT event_id,schema_version FROM payment_outbox
+			WHERE order_id=$1 AND refund_id=$2 AND stream='payment.orders' AND event_type='RefundSucceeded'`, t.order, refund), "RefundSucceeded")
+		require(num(event, "schema_version") == 2 && event["event_id"] == resolution["resolution_id"], "manual resolution differs from RefundSucceeded v2")
 		d.login("seller")
 		d.login("operations")
 		h := t.terminal("REFUNDED")
@@ -118,7 +94,73 @@ func (t tradeRun) manualRefund(refund string) object {
 	return posting
 }
 
-func (t tradeRun) submitRefundEvidence(path, refund string, detail object) object {
+type reviewSubject struct {
+	kind, id, collection string
+}
+
+func refundSubject(id string) reviewSubject { return reviewSubject{"refund", id, "/refunds"} }
+func latePaymentSubject(id string) reviewSubject {
+	return reviewSubject{"late_payment", id, "/late-payments"}
+}
+
+func (s reviewSubject) path() string { return s.collection + "/" + s.id }
+
+func (t tradeRun) approveSellerEvidence(s reviewSubject) object {
+	d := t.d
+	d.login(approvers[0])
+	review := d.browser(approvers[0]).api("GET", s.path()+"/review", "", nil)
+	r := obj(review["approval"])
+	m := obj(r["material"])
+	op := obj(m["seller_refund"])
+	trade := obj(op["trade"])
+	current := obj(review[s.kind])
+	field := s.kind + "_id"
+	require(m["kind"] == "seller_refund" && obj(op["subject"])[field] == s.id &&
+		trade["order_id"] == t.order && trade["seller_account_id"] == d.required("seller-account") &&
+		current[field] == s.id && matchesProposal(obj(op["refunded_amount"]), obj(current["fiat_amount"])), "wrong seller refund approval")
+	if s.kind == "refund" {
+		if d.scope != "settle-refunds" {
+			require(num(op, "objection_window_seconds") == 10, "demo refund requires the configured 10-second objection window")
+		}
+		require(str(op, "out_refund_no") == current["out_refund_no"], "refund number differs from approval")
+		d.evidence("out_refund_no", current["out_refund_no"])
+	} else {
+		require(num(op, "objection_window_seconds") == 0 && op["refund_reservation_id"] == nil, "late payment review has a refund hold or objection period")
+	}
+	history, ok := review["evidence"].([]any)
+	require(ok && len(history) > 0, "missing seller evidence")
+	e := obj(history[len(history)-1])
+	require(e["evidence_id"] == op["evidence_id"] && e["evidence_sha256"] == op["evidence_sha256"] &&
+		e["version"] == op["evidence_version"] && obj(e["subject"])[field] == s.id, "approval is not for the current evidence")
+	header := obj(r["approval_request"])
+	d.approveExisting("seller-refund/"+str(header, "id"), "payment", str(e, "submitted_by"), "/seller-refund-reviews", r)
+	d.evidence("approved_evidence_id", e["evidence_id"])
+	d.evidence("approved_version", e["version"])
+	return header
+}
+
+func (t tradeRun) awaitRefundResolution(refund, approvalID, digest string) object {
+	d := t.d
+	var resolution object
+	waitFor("manual refund resolution", 2*time.Minute, func() bool {
+		rows := d.rows("reconciliation", "reconciliation_manual_refund_resolutions", `SELECT s.event_id AS resolution_id,s.outcome,
+			s.approval_request_id,encode(s.request_digest,'hex') AS request_digest,s.authorization_id,a.event_type
+			FROM reconciliation_manual_refund_reviews m JOIN reconciliation_manual_refund_resolutions s USING(event_id)
+			LEFT JOIN reconciliation_authorizations a ON a.authorization_id=s.authorization_id AND a.order_id=m.order_id
+			WHERE m.order_id=$1 AND m.refund_id=$2 AND m.reason='seller_refund_review'`, t.order, refund)
+		if len(rows) == 0 {
+			return false
+		}
+		resolution = oneFact(rows, "manual refund resolution")
+		d.evidence("resolution", resolution)
+		require(resolution["outcome"] == "authorized" && resolution["approval_request_id"] == approvalID &&
+			resolution["request_digest"] == fmt.Sprintf("%x", raw(digest)) && resolution["event_type"] == "TradeRefundAuthorized", "manual refund resolution or authorization mismatch")
+		return true
+	})
+	return resolution
+}
+
+func (t tradeRun) submitRefundEvidence(s reviewSubject, detail object) object {
 	d := t.d
 	seller := d.browser("seller")
 	var version int64
@@ -128,17 +170,24 @@ func (t tradeRun) submitRefundEvidence(path, refund string, detail object) objec
 	money := obj(detail["fiat_amount"])
 	cents := units(money, "amount_minor")
 	require(money["currency"] == "CNY" && cents > 0, "expected positive CNY refund")
-	key := fmt.Sprintf("manual-refund/%s/evidence/%d", refund, version)
+	key := fmt.Sprintf("manual-refund/%s/evidence/%d", s.id, version)
+	// Keep the original PNG for any upload already checkpointed by an older driver.
+	imageSeed := d.value(key+"/image", func() string {
+		if version > 0 && d.data[key+"/time"] == nil {
+			return key
+		}
+		return s.id
+	})
 	when := d.value(key+"/time", func() string {
 		return time.Now().In(time.FixedZone("UTC+8", 8*3600)).Truncate(time.Microsecond).Format(time.RFC3339Nano)
 	})
 	body := object{"expected_evidence_version": version, "upstream_refund_no": "demo:" + t.order,
 		"refunded_at": when, "money": fmt.Sprintf("%d.%02d", cents/100, cents%100),
-		"files": []object{{"content_type": "image/png", "data": refundPNG(refund)}}}
-	c := portalCommand{path: path + "/process", template: "/accounts/:seller_account_id/refunds/:id/process",
+		"files": []object{{"content_type": "image/png", "data": refundPNG(imageSeed)}}}
+	c := portalCommand{path: "/accounts/" + d.required("seller-account") + s.path() + "/process", template: "/accounts/:seller_account_id" + s.collection + "/:id/process",
 		permission: "payment.refund.process", key: d.key(key), body: body}
 	e := seller.submitRecent(c)
-	require(obj(e["subject"])["refund_id"] == refund && num(e, "version") == version+1, "seller evidence version or refund mismatch")
+	require(obj(e["subject"])[s.kind+"_id"] == s.id && num(e, "version") == version+1, "seller evidence version or refund mismatch")
 	return e
 }
 

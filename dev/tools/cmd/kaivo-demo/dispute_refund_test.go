@@ -28,7 +28,7 @@ func TestDisputeRefundRegistrationAndReport(t *testing.T) {
 				t.Fatalf("unexpected run result %v", err)
 			}
 			data := string(file(out))
-			for _, want := range []string{tc.name, tc.branch, "payment/internal/channeladmin/disputes.go:", "refund.dispatch_granted", "failed"} {
+			for _, want := range []string{tc.name, tc.branch, "payment/internal/channeladmin/disputes_postgres.go", "reconciliation_manual_refund_resolutions", "failed"} {
 				if !strings.Contains(data, want) {
 					t.Errorf("report missing %q", want)
 				}
@@ -80,33 +80,6 @@ func TestDisputeRefundReservation(t *testing.T) {
 	}
 }
 
-func TestDisputeRefundDispatchOrder(t *testing.T) {
-	audit := object{"occurred_at": "2026-11-20T12:00:00.000002Z"}
-	after := object{"occurred_at": "2026-11-20T04:00:00.000003-08:00"}
-	checkDispatchOrder(audit, []object{after})
-	for _, grants := range [][]object{nil, {audit}, {after, {"occurred_at": "2026-11-20T12:00:00.000001Z"}}, {{"occurred_at": "unknown"}}} {
-		expectFailure(t, func() { checkDispatchOrder(audit, grants) })
-	}
-}
-
-func TestDisputeRefundVerificationEvidence(t *testing.T) {
-	auth := object{"query_digest": "issued"}
-	success := object{"query_digest": "issued", "operation": "query_refund", "eligible": true, "outcome": "refund_succeeded"}
-	if !verifiedRefundQuery(auth, []object{{}, success, {}}) {
-		t.Fatal("missed the successful query used at issuance")
-	}
-	for k, v := range map[string]any{"query_digest": "another", "eligible": false, "operation": "query_payment", "outcome": "refund_failed"} {
-		r := normalized(success)
-		r[k] = v
-		if verifiedRefundQuery(auth, []object{r}) {
-			t.Error("accepted mismatched " + k)
-		}
-	}
-	if verifiedRefundQuery(auth, nil) {
-		t.Fatal("accepted missing observation")
-	}
-}
-
 func TestDisputeRefundPostingAndHold(t *testing.T) {
 	r := normalized(object{"reserve_seq": 9, "refund_id": "f"})
 	post := normalized(object{"source_event_id": "auth", "source_stream": "reconciliation.matches", "kind": "trade_refunded", "seq": 10})
@@ -148,22 +121,6 @@ func TestDisputeRefundBalanceDeltas(t *testing.T) {
 		wrong := normalized(end)
 		wrong[field] = num(end, field) + 1
 		expectFailure(t, func() { checkBalanceDelta(released, normalized(wrong), 100, -93, -7) })
-	}
-}
-
-func TestSimSuccessfulDisputeRefund(t *testing.T) {
-	rawReply := object{"result": "accepted", "code": "refund_success", "refund": object{"account_id": "md5-demo", "order_id": "order", "refund_id": "refund", "amount": 100, "currency": "CNY", "status": "success"}, "order": object{"url": "https://localhost/cashier/private-cashier-sentinel"}}
-	var fact simRefundResult
-	decode(encoded(rawReply), &fact)
-	checkSimRefund(fact, "order", "refund")
-	if strings.Contains(string(encoded(fact)), "private-cashier-sentinel") {
-		t.Fatal("simulator report included unselected fields")
-	}
-	for k, v := range map[string]any{"account_id": "other", "order_id": "other", "refund_id": "other", "status": "unknown", "amount": 99, "currency": "USD"} {
-		test := normalized(rawReply)
-		obj(test["refund"])[k] = v
-		decode(encoded(test), &fact)
-		expectFailure(t, func() { checkSimRefund(fact, "order", "refund") })
 	}
 }
 
