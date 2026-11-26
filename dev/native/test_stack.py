@@ -21,6 +21,44 @@ import stack_config as cfg
 
 
 class Configuration(unittest.TestCase):
+    def test_gateway_configs_migrate_on_start(self):
+        import tomllib
+        for compose in (False, True):
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                for folder in ("inputs", "logs", "env"):
+                    (root / folder).mkdir()
+                passwords = {}
+                cfg.gateway_inputs(root, "postgresql://admin:secret@127.0.0.1:5432/postgres", passwords, compose)
+                for name in cfg.GATEWAYS:
+                    settings = tomllib.loads((root / "inputs" / name / "gateway.toml").read_text())
+                    self.assertEqual(settings["mode"], "development")
+                    self.assertIs(settings["migrate_on_start"], True)
+
+    def test_existing_gateway_configs_gain_migrate_on_start(self):
+        import tomllib
+        old = 'role = "trade"\nmode = "development"\nlisten = "127.0.0.1:9107"\n'
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            trade, verification = (root / "inputs" / name for name in cfg.GATEWAYS)
+            trade.mkdir(parents=True)
+            (trade / "gateway.toml").write_text(old)
+            # A gateway without inputs (for example a stack prepared before UG-4) is skipped.
+            for _ in range(2):
+                cfg.enable_gateway_migration(root)
+                text = (trade / "gateway.toml").read_text()
+                self.assertEqual(text.count("migrate_on_start"), 1)
+                self.assertIs(tomllib.loads(text)["migrate_on_start"], True)
+                self.assertTrue(text.startswith('role = "trade"\nmode = "development"\nmigrate_on_start = true\n'))
+            self.assertFalse(verification.exists())
+            # An explicit operator choice is kept.
+            (trade / "gateway.toml").write_text(old + "migrate_on_start = false\n")
+            cfg.enable_gateway_migration(root)
+            self.assertIs(tomllib.loads((trade / "gateway.toml").read_text())["migrate_on_start"], False)
+            (trade / "gateway.toml").write_text(old.replace("development", "production"))
+            with self.assertRaises(ValueError):
+                cfg.enable_gateway_migration(root)
+
     def test_demo_routes_and_reader_settings(self):
         routes = cfg.routes()
         by_key = {(r["method"], r["path"]): r for r in routes}

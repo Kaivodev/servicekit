@@ -268,6 +268,7 @@ def gateway_inputs(root, admin, passwords, compose):
         listen = "0.0.0.0" if compose else "127.0.0.1"
         write(inputs / "gateway.toml", f'''role = "{name.removeprefix('upstream-gateway-')}"
 mode = "development"
+{GATEWAY_MIGRATE_ON_START}
 listen = "{listen}:{PORTS[name]}"
 allowed_peers = ["{peer}"]
 database_url_env = "GATEWAY_DATABASE_URL"
@@ -281,6 +282,27 @@ ca_file = "{ca}"
 cert_file = "{certs}/tls.crt"
 key_file = "{certs}/tls.key"
 ''')
+
+
+# upstream-gateway v0.8.0 runs no DDL unless told to. Development stacks keep
+# applying the schema at start-up; production uses `upstream-gateway migrate`.
+GATEWAY_MIGRATE_ON_START = "migrate_on_start = true"
+
+
+def enable_gateway_migration(root):
+    """Add the start-up migration switch to gateway configs written before v0.8.0."""
+    for name in GATEWAYS:
+        path = root / "inputs" / name / "gateway.toml"
+        if not path.is_file():
+            continue
+        lines = path.read_text().splitlines(keepends=True)
+        if any(line.split("=")[0].strip() == "migrate_on_start" for line in lines):
+            continue
+        mode = [i for i, line in enumerate(lines) if line.strip() == 'mode = "development"']
+        if len(mode) != 1:
+            raise ValueError(name + " gateway.toml must contain exactly one development mode line")
+        lines.insert(mode[0] + 1, GATEWAY_MIGRATE_ON_START + "\n")
+        write(path, "".join(lines))
 
 
 def gateway_client_settings(name):
@@ -457,6 +479,7 @@ def upgrade_demo(root, compose=False):
             raise ValueError("conflicting IAM route: " + " ".join(key))
         by_path[key] = rule
     write(table, json.dumps(list(by_path.values()), separators=(",", ":")) + "\n")
+    enable_gateway_migration(root)
     review = root / "inputs/payment/seller-reviews.json"
     if not review.exists():
         write(review, "[]\n")
