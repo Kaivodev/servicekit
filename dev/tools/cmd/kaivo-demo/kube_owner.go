@@ -38,6 +38,11 @@ func (k *kubeEnvironment) owner(service, dbvar string, args ...string) []byte {
 	return logs
 }
 
+func gcpAudience(token object) bool {
+	audience, _ := token["audience"].(string)
+	return strings.HasPrefix(audience, "https://iam.googleapis.com/")
+}
+
 // Declarations contain identities, public keys and evidence digests. Preserve
 // their exact bytes (IAM hashes the manifest) using a downward API file.
 func ownerPod(deployment object, ns, name, service, dbvar, dir string, args []string) object {
@@ -54,12 +59,25 @@ func ownerPod(deployment object, ns, name, service, dbvar, dir string, args []st
 	spec["activeDeadlineSeconds"] = 240
 	// A service's ReadWriteOnce data PVC can be mounted by another Pod on
 	// the same node. Keep the admin Pod with that service on multi-node clusters.
+	// Drop service RPC tokens. A GCP workload identity token (K3 KMS) stays: the
+	// owner command needs the service's KMS keys, and GCP admits only the
+	// service's own ServiceAccount, so the owner then runs under that identity.
 	volumes, _ := spec["volumes"].([]any)
 	for _, v := range volumes {
 		volume := obj(v)
 		if projected, ok := volume["projected"].(object); ok {
 			sources, _ := projected["sources"].([]any)
-			keep := slices.DeleteFunc(sources, func(src any) bool { return obj(src)["serviceAccountToken"] != nil })
+			keep := slices.DeleteFunc(sources, func(src any) bool {
+				raw := obj(src)["serviceAccountToken"]
+				if raw == nil {
+					return false
+				}
+				if token, _ := raw.(object); gcpAudience(token) {
+					spec["serviceAccountName"] = service
+					return false
+				}
+				return true
+			})
 			if len(keep) == 0 {
 				delete(volume, "projected")
 				volume["emptyDir"] = object{"medium": "Memory"}

@@ -292,3 +292,36 @@ func TestKubeOwnerSharesPVCNode(t *testing.T) {
 		t.Fatal("owner may be scheduled away from the mounted PVC")
 	}
 }
+
+func TestKubeOwnerKeepsWorkloadIdentity(t *testing.T) {
+	var deployment object
+	decode(file("testdata/deployment.json"), &deployment)
+	spec := obj(obj(obj(deployment["spec"])["template"])["spec"])
+	gcp := object{"serviceAccountToken": object{"audience": "https://iam.googleapis.com/projects/1/locations/global/workloadIdentityPools/p/providers/cluster", "expirationSeconds": 3600, "path": "token"}}
+	rpc := object{"serviceAccountToken": object{"audience": "kaivo:ledger", "expirationSeconds": 600, "path": "ledger"}}
+	spec["volumes"] = append(spec["volumes"].([]any),
+		object{"name": "gcp-token", "projected": object{"sources": []any{gcp}}},
+		object{"name": "peer-tokens", "projected": object{"sources": []any{rpc}}})
+	pod := ownerPod(deployment, "business", "iam-admin-test", "iam", sellersDatabase, t.TempDir(), []string{"sellers", "list"})
+	podSpec := obj(pod["spec"])
+	if podSpec["serviceAccountName"] != "iam" {
+		t.Fatal("owner with a GCP token must use the service's own ServiceAccount")
+	}
+	for _, v := range podSpec["volumes"].([]any) {
+		volume := obj(v)
+		switch volume["name"] {
+		case "gcp-token":
+			if sources := obj(volume["projected"])["sources"].([]any); len(sources) != 1 {
+				t.Fatal("owner lost the GCP workload identity token")
+			}
+		case "peer-tokens":
+			if volume["projected"] != nil || volume["emptyDir"] == nil {
+				t.Fatal("owner kept a service RPC token")
+			}
+		}
+	}
+	plain := ownerPod(func() object { var d object; decode(file("testdata/deployment.json"), &d); return d }(), "business", "iam-admin-test", "iam", sellersDatabase, t.TempDir(), []string{"sellers", "list"})
+	if obj(plain["spec"])["serviceAccountName"] != "iam-migrate" {
+		t.Fatal("owner without a GCP token must keep the migrate ServiceAccount")
+	}
+}

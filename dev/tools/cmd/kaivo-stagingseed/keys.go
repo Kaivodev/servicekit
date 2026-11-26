@@ -9,9 +9,12 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 
@@ -69,19 +72,39 @@ func signingKey(old materials, id objectID, file, publicFile string) (*ecdsa.Pri
 	return key, string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})), nil
 }
 
-func publishPEM(old, result materials, name string, key any) error {
+func publishPEM(old, result materials, name string, key any, legacyReport *ecdsa.PublicKey) error {
 	der, err := x509.MarshalPKIXPublicKey(key)
 	if err != nil {
 		return errors.New("encode public key failed")
 	}
 	value := string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der}))
 	for _, id := range registries {
-		if saved, ok := old[id][name]; ok && !bytes.Equal(pemDER(saved, "PUBLIC KEY"), der) {
-			return invalid(id, name)
+		if saved, ok := old[id][name]; ok {
+			savedDER := pemDER(saved, "PUBLIC KEY")
+			if !bytes.Equal(savedDER, der) && !unmigratedReport(old[id], savedDER, legacyReport) {
+				return invalid(id, name)
+			}
 		}
 		result[id][name] = value
 	}
 	return nil
+}
+
+// Each namespace transitions independently during server-side apply. A report
+// registry already containing a KMS kid rules out the legacy PEM exception.
+func unmigratedReport(data fields, der []byte, legacy *ecdsa.PublicKey) bool {
+	if legacy == nil {
+		return false
+	}
+	pub, err := x509.ParsePKIXPublicKey(der)
+	if err != nil || !legacy.Equal(pub) {
+		return false
+	}
+	saved, exists := data[reportRegistry]
+	if !exists {
+		return true
+	}
+	return registrySubset(saved, publicKeys{"ledger-report-dev": legacy}, true)
 }
 
 func epayKey(old, result materials) error {
@@ -122,25 +145,33 @@ func epayKey(old, result materials) error {
 	for _, id := range holders {
 		result[id][file] = der
 	}
-	return publishPEM(old, result, "platform-public.pem", &key.PublicKey)
+	return publishPEM(old, result, "platform-public.pem", &key.PublicKey, nil)
 }
 
-func seedKeys(old, result materials) error {
+var devSigningKeys = []struct {
+	id                    objectID
+	file, publicFile, kid string
+}{
+	{iamPrivate, "signing.pem", "iam.jwks", "iam-dev"},
+	{paymentPrivate, "signing.pem", "payment.jwks", "payment-dev"},
+	{ledgerPrivate, "signing.pem", "ledger.jwks", "ledger-dev"},
+	{collectionPrivate, "signing.pem", "collection.jwks", "collection-dev"},
+	{reconPrivate, "signing.pem", "reconciliation.jwks", "reconciliation-dev"},
+	{ledgerPrivate, "report.pem", reportPEM, "ledger-report-dev"},
+}
+
+func seedKeys(old, result materials, kms *kmsMaterials) error {
 	if err := epayKey(old, result); err != nil {
 		return err
 	}
+	expected := map[string]publicKeys{}
+	if kms != nil {
+		for name, keys := range kms.registries {
+			expected[name] = maps.Clone(keys)
+		}
+	}
 	var seen []*ecdsa.PublicKey
-	for _, service := range []struct {
-		id                    objectID
-		file, publicFile, kid string
-	}{
-		{iamPrivate, "signing.pem", "iam.jwks", "iam-dev"},
-		{paymentPrivate, "signing.pem", "payment.jwks", "payment-dev"},
-		{ledgerPrivate, "signing.pem", "ledger.jwks", "ledger-dev"},
-		{collectionPrivate, "signing.pem", "collection.jwks", "collection-dev"},
-		{reconPrivate, "signing.pem", "reconciliation.jwks", "reconciliation-dev"},
-		{ledgerPrivate, "report.pem", "ledger-report-public.pem", "ledger-report-dev"},
-	} {
+	for _, service := range devSigningKeys {
 		key, value, err := signingKey(old, service.id, service.file, service.publicFile)
 		if err != nil {
 			return err
@@ -152,32 +183,83 @@ func seedKeys(old, result materials) error {
 		}
 		seen = append(seen, &key.PublicKey)
 		result[service.id][service.file] = value
-		if service.file == "report.pem" {
-			if err := publishPEM(old, result, service.publicFile, &key.PublicKey); err != nil {
+		name := service.publicFile
+		if name == reportPEM {
+			current := &key.PublicKey
+			var legacy *ecdsa.PublicKey
+			if kms != nil && kms.reportKID != "" {
+				current = expected[reportRegistry][kms.reportKID]
+				legacy = &key.PublicKey
+			}
+			if err := publishPEM(old, result, name, current, legacy); err != nil {
 				return err
 			}
-			continue
+			if kms == nil {
+				continue
+			}
+			name = reportRegistry
 		}
-		jwks, err := signing.MarshalJWKS(map[string]*ecdsa.PublicKey{service.kid: &key.PublicKey})
+		if expected[name] == nil {
+			expected[name] = publicKeys{}
+		}
+		expected[name][service.kid] = &key.PublicKey
+	}
+	return publishRegistries(old, result, expected, kms)
+}
+
+func publishRegistries(old, result materials, expected map[string]publicKeys, kms *kmsMaterials) error {
+	if kms != nil {
+		for _, id := range registries {
+			for name := range old[id] {
+				if strings.HasSuffix(name, ".jwks") && expected[name] == nil {
+					return fmt.Errorf("unexpected signing registry in %s/%s", id.namespace, id.name)
+				}
+			}
+		}
+	}
+	for name, keys := range expected {
+		kmsRegistry := kms != nil && (kms.registries[name] != nil || name == reportRegistry)
+		jwks, err := signing.MarshalJWKS(keys)
 		if err != nil {
 			return errors.New("encode signing registry failed")
 		}
 		destinations := registries
-		if service.id == collectionPrivate {
+		if name == "collection.jwks" {
 			destinations = append(slices.Clone(registries), collectionPrivate)
 		}
 		for _, id := range destinations {
-			if saved, ok := old[id][service.publicFile]; ok {
-				registry, err := signing.ParseJWKS([]byte(saved))
-				pub, found := registry.Lookup(service.kid)
-				if err != nil || !found || registry.Len() != 1 || !pub.Equal(&key.PublicKey) {
-					return invalid(id, service.publicFile)
-				}
+			if saved, ok := old[id][name]; ok && !registrySubset(saved, keys, kmsRegistry) {
+				return invalid(id, name)
 			}
-			result[id][service.publicFile] = string(jwks)
+			result[id][name] = string(jwks)
 		}
 	}
 	return nil
+}
+
+func registrySubset(saved string, allowed publicKeys, kmsRegistry bool) bool {
+	if kmsRegistry && !jsontext.Value(saved).IsValid() {
+		return false
+	}
+	// Receivers require at least one key. A well-formed empty set in a registry
+	// being seeded from KMS can still be filled with its expected keys.
+	registry, err := signing.ParseJWKS([]byte(saved))
+	if err != nil {
+		var set struct {
+			Keys []jsontext.Value `json:"keys"`
+		}
+		return kmsRegistry && json.Unmarshal([]byte(saved), &set) == nil && set.Keys != nil && len(set.Keys) == 0
+	}
+	matched := 0
+	for kid, key := range allowed {
+		if existing, found := registry.Lookup(kid); found {
+			if !existing.Equal(key) {
+				return false
+			}
+			matched++
+		}
+	}
+	return matched == registry.Len()
 }
 
 func randomBytes() []byte {

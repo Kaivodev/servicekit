@@ -53,6 +53,7 @@ type cluster map[objectID]manifest
 
 func setupKubectl(t *testing.T) {
 	t.Helper()
+	t.Setenv("KAIVO_STAGING_KMS_DIR", "")
 	t.Setenv("KUBECTL", "sh  testdata/kubectl.sh shell kaivo-k3s sudo k3s kubectl")
 	t.Setenv("SEED_TEST_CALLS", filepath.Join(t.TempDir(), "calls"))
 	t.Setenv("SEED_TEST_FAILURE", "")

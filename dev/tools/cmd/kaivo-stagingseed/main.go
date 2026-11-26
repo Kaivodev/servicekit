@@ -3,6 +3,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -206,17 +207,27 @@ func emit(out io.Writer, ids []objectID, m materials, versions map[objectID]stri
 }
 
 func run(args []string, out io.Writer, now time.Time) error {
+	if len(args) == 2 && args[0] == "kms-export" {
+		return exportKMS(context.Background(), args[1], out)
+	}
 	marketOnly := slices.Equal(args, []string{"market"})
 	if !marketOnly && len(args) != 0 {
-		return errors.New("usage: kaivo-stagingseed [market]")
+		return errors.New("usage: kaivo-stagingseed [market | kms-export <service>]")
 	}
 	command := strings.Fields(os.Getenv("KUBECTL"))
 	if len(command) == 0 {
 		command = []string{"kubectl"}
 	}
 	ids := allObjects
+	var kms *kmsMaterials
 	if marketOnly {
 		ids = marketObjects
+	} else if dir := os.Getenv("KAIVO_STAGING_KMS_DIR"); dir != "" {
+		var err error
+		kms, err = loadKMSDir(dir)
+		if err != nil {
+			return err
+		}
 	}
 	existing, versions, err := readExisting(command, ids, marketOnly)
 	if err != nil {
@@ -224,11 +235,16 @@ func run(args []string, out io.Writer, now time.Time) error {
 	}
 	result := newMaterials(ids)
 	if !marketOnly {
-		if err := seedKeys(existing, result); err != nil {
+		if err := seedKeys(existing, result, kms); err != nil {
 			return err
 		}
 		if err := seedInputs(existing, result, now); err != nil {
 			return err
+		}
+		if kms != nil {
+			if err := kms.seedWrappedFiles(existing, result); err != nil {
+				return err
+			}
 		}
 	}
 	if err := marketInputs(existing, result, now, marketOnly); err != nil {
