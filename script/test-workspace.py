@@ -117,6 +117,7 @@ with tempfile.TemporaryDirectory(prefix='aipay-runtime-test-') as temp:
             psql(f'CREATE ROLE aipay_{name} LOGIN')
             psql(f'CREATE DATABASE aipay_{name} OWNER aipay_{name}')
             envs[name] = env | {
+                'AIPAY_ENVIRONMENT':'development',
                 'AIPAY_DATABASE_URL':f'postgres://aipay_{name}@127.0.0.1:{pg_port}/aipay_{name}?sslmode=disable',
                 'AIPAY_REDIS_URL':f'redis://127.0.0.1:{redis_port}/0',
                 'AIPAY_GRPC_ADDR':f'127.0.0.1:{port()}',

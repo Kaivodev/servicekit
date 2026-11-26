@@ -2,7 +2,7 @@
 
 `github.com/Kaivodev/servicekit` 提供各私有服务共用的运行基础，采用官方 grpc-go。业务处理、用户认证、RBAC、资金模型、业务表结构与迁移仍由服务仓库维护；签名事件与已用认证证明的辅助只操作服务传入的表。
 
-- `config`：集中校验 `AIPAY_*` 配置；服务端必须提供 PostgreSQL、传输身份配置和明确的调用方名单。Redis 可选。`AIPAY_ENVIRONMENT` 由 `config.ParseEnvironment` 统一解析，只取 `development`、`test` 或 `production`，未设置按 `production` 处理，其他值（含已移除的 `staging`）启动失败。放宽开关分两档：`IsDevelopment()` 只在 `development` 下成立，`IsDevelopmentOrTest()` 在 `development` 和 `test` 下成立。
+- `config`：集中校验 `AIPAY_*` 配置；服务端必须提供 PostgreSQL、传输身份配置和明确的调用方名单。缓存 Redis 可选。在 `production` 环境中，缓存 Redis 和队列 Redis 的连接地址都必须使用 `rediss://`。`AIPAY_ENVIRONMENT` 由 `config.ParseEnvironment` 统一解析，只取 `development`、`test` 或 `production`，未设置按 `production` 处理，其他值（含已移除的 `staging`）启动失败。放宽开关分两档：`IsDevelopment()` 只在 `development` 下成立，`IsDevelopmentOrTest()` 在 `development` 和 `test` 下成立。
 - `mtls` / `rpc`：TLS 1.3、双向证书链校验、DNS 校验与 `spiffe://<trust-domain>/service/<name>` 身份绑定；连接复用、unary 超时、调用取消、报文大小限制、关联 ID 和访问日志。
 - `postgres` / `redis`：连接池和有界关闭；schema 版本、dirty 标记和服务属主校验。
 - `migration`：显式执行服务自身内嵌迁移；数据库级锁串行验证属主与执行迁移，拒绝跨服务和无属主的既有迁移历史。
@@ -79,7 +79,7 @@ go run ./cmd/devcert --out ../.local/certs
 
 服务启动时创建 observability/tracing Runtime；`rpc.ServerOptions.TracerProvider` / `ClientOptions.TracerProvider` 显式注入官方 otelgrpc StatsHandler。mTLS 先验证对端服务身份，再接收 W3C 上下文；trace ID 只用于关联。配置和采样约定见 [observability](https://github.com/Kaivodev/observability#追踪配置与兼容性)。各私有服务已接入运行时和 gRPC span，backend 已接入公网根 span；业务 RPC 尚未注册。
 
-`queue.Load(service, os.Getenv)` 只在确有任务的属主入口调用：`AIPAY_QUEUE_REDIS_URL` 必填并指向独立持久 Redis，不能沿用可淘汰缓存。其余后缀默认：`NAME=aipay.<service>`、`CONCURRENCY=10`、`POOL_SIZE=20`、`REDIS_TIMEOUT=3s`、`TASK_TIMEOUT=5m`、`MAX_RETRY=10`、`MAX_PAYLOAD_BYTES=1048576`、`SHUTDOWN_TIMEOUT=15s`。
+`queue.Load(service, os.Getenv)` 只在确有任务的属主入口调用：`AIPAY_QUEUE_REDIS_URL` 必填并指向独立持久 Redis，不能沿用可淘汰缓存。加载时按上文 `config` 条目中的生产 TLS 要求校验队列地址。其余后缀默认：`NAME=aipay.<service>`、`CONCURRENCY=10`、`POOL_SIZE=20`、`REDIS_TIMEOUT=3s`、`TASK_TIMEOUT=5m`、`MAX_RETRY=10`、`MAX_PAYLOAD_BYTES=1048576`、`SHUTDOWN_TIMEOUT=15s`。
 
 显式创建 `queue.NewProducer(ctx, cfg, provider, accessLog)` 和 `queue.NewWorker(ctx, cfg, provider, accessLog, runtimeLog, handler)`；不自动注册任务。producer 固定队列，允许按任务覆盖 timeout/retry/TaskID；Asynq 超时以秒存储，因此配置和覆盖值都必须是正整数秒，避免亚秒值被截成无效超时。可传 `WorkerOptions{RetryDelay: ownerRetryPolicy}`；默认使用 Asynq 指数退避。先启动依赖再运行 worker，`Check(ctx)` 可加入属主 readiness。停止进程时先停止新任务、排空已有执行；正常完成后释放 Redis。到期 `Run` 返回 `ErrShutdownTimeout` 并取消任务，框架清理继续完成后 `Done()` 关闭；不可提前关闭仍被 Asynq 使用的共享 Redis 连接。`Close()` 仅用于清理未运行实例。任务 handler 必须响应 context；强停/崩溃后任务可能由租约恢复而重复执行。
 

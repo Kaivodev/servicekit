@@ -287,7 +287,10 @@ func TestHTTPOutboxQueueRetryDownstreamTrace(t *testing.T) {
 func testQueueConfig(t *testing.T) queue.Config {
 	t.Helper()
 	cfg, err := queue.Load("fixture", func(key string) string {
-		if key == "AIPAY_QUEUE_REDIS_URL" {
+		switch key {
+		case "AIPAY_ENVIRONMENT":
+			return "test"
+		case "AIPAY_QUEUE_REDIS_URL":
 			return os.Getenv("AIPAY_TEST_REDIS_URL")
 		}
 		return ""

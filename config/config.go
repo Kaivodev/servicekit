@@ -68,6 +68,7 @@ type Database struct {
 }
 
 // An empty URL disables Redis; services only enable dependencies they use.
+// Services may restrict plaintext connections to development.
 type Redis struct {
 	URL      string
 	PoolSize int
@@ -159,8 +160,13 @@ func Load(service, defaultAddress string, get func(string) string) (Config, erro
 	if c.Database.MinConns > c.Database.MaxConns {
 		problems = append(problems, errors.New("database minimum pool size exceeds maximum"))
 	}
-	if c.Redis.URL != "" && !validURL(c.Redis.URL, "redis", "rediss") {
-		problems = append(problems, errors.New("AIPAY_REDIS_URL must be a redis:// or rediss:// URL with a host"))
+	if c.Redis.URL != "" {
+		scheme := urlSchemeWithHost(c.Redis.URL)
+		if scheme != "redis" && scheme != "rediss" {
+			problems = append(problems, errors.New("AIPAY_REDIS_URL must be a redis:// or rediss:// URL with a host"))
+		} else if envErr == nil && !environment.IsDevelopmentOrTest() && scheme != "rediss" {
+			problems = append(problems, errors.New("AIPAY_REDIS_URL requires rediss:// in production"))
+		}
 	}
 	if c.RPC.MaxConnectionAge > MaxConnectionAgeLimit || c.RPC.MaxConnectionAgeGrace > c.RPC.MaxConnectionAge {
 		problems = append(problems, errors.New("AIPAY_RPC_MAX_CONNECTION_AGE must be at most 1h and not shorter than its grace period"))
@@ -194,21 +200,16 @@ func ValidateTLS(c TLS) error {
 }
 
 func ValidateDatabase(raw string) error {
-	if !validURL(raw, "postgres", "postgresql") {
+	if scheme := urlSchemeWithHost(raw); scheme != "postgres" && scheme != "postgresql" {
 		return errors.New("AIPAY_DATABASE_URL must be a postgres:// or postgresql:// URL with a host")
 	}
 	return nil
 }
 
-func validURL(raw string, schemes ...string) bool {
+func urlSchemeWithHost(raw string) string {
 	u, err := url.Parse(raw)
 	if err != nil || strings.TrimSpace(u.Hostname()) == "" {
-		return false
+		return ""
 	}
-	for _, scheme := range schemes {
-		if u.Scheme == scheme {
-			return true
-		}
-	}
-	return false
+	return u.Scheme
 }
