@@ -27,7 +27,7 @@ import (
 	"github.com/Kaivodev/servicekit/signing"
 )
 
-func testSpec() kmsSpec {
+func legacyTestSpec() kmsSpec {
 	const prefix = "projects/test/locations/test/keyRings/"
 	const version = "/cryptoKeyVersions/1"
 	const iam = prefix + "business/cryptoKeys/iam-"
@@ -49,6 +49,16 @@ func testSpec() kmsSpec {
 			{"ledger-report-v1", ledger + "report" + version, "ledger-report.jwks", "ledger-report-public.pem"},
 		}},
 	}}
+}
+
+func testSpec() kmsSpec {
+	const keyPrefix = "projects/kaivokms/locations/asia-southeast1/keyRings/test-reconciliation/cryptoKeys/reconciliation-"
+	spec := legacyTestSpec()
+	spec.Services["reconciliation"] = serviceSpec{
+		Signing: []signingSpec{{"reconciliation-events-test-v1", keyPrefix + "events/cryptoKeyVersions/1", "reconciliation.jwks", ""}},
+		Sealing: []sealingSpec{{"sealing", keyPrefix + "sealing-kek", "sealing-keys.json"}},
+	}
+	return spec
 }
 
 func writeTestFile(t *testing.T, path, data string) {
@@ -79,12 +89,16 @@ func TestKMSSpec(t *testing.T) {
 		{"report dev kid", "iam-event-v1", "ledger-report-dev"},
 		{"another dev kid", "iam-event-v1", "payment-dev"},
 		{"global duplicate", "iam-event-v1", "ledger-event-v1"},
+		{"reconciliation dev kid", "reconciliation-events-test-v1", "reconciliation-dev"},
+		{"reconciliation duplicate", "reconciliation-events-test-v1", "ledger-event-v1"},
 		{"unversioned signer", "/cryptoKeyVersions/1", ""},
 		{"versioned kek", `iam-data"`, `iam-data/cryptoKeyVersions/1"`},
 		{"bad resource", "/keyRings/", "/invalid/"},
 		{"wrong registry", "iam.jwks", "payment.jwks"},
 		{"iam using ledger registry", "iam.jwks", "ledger-report.jwks"},
 		{"ledger using iam registry", "ledger.jwks", "iam-assertion.jwks"},
+		{"reconciliation using ledger registry", "reconciliation.jwks", "ledger-report.jwks"},
+		{"empty reconciliation registry", "reconciliation.jwks", ""},
 		{"pem name", "ledger-report-public.pem", "other.pem"},
 		{"empty pem", "ledger-report-public.pem", ""},
 		{"null pem", `"ledger-report-public.pem"`, "null"},
@@ -95,6 +109,9 @@ func TestKMSSpec(t *testing.T) {
 		{"duplicate purpose", `"purpose":"data"`, `"purpose":"epay"`},
 		{"duplicate file", "epay-keys.json", "data-keys.json"},
 		{"unknown file", "data-keys.json", "../data.json"},
+		{"iam using reconciliation file", "data-keys.json", "sealing-keys.json"},
+		{"reconciliation using iam file", "sealing-keys.json", "data-keys.json"},
+		{"reconciliation sealing purpose", `"purpose":"sealing"`, `"purpose":"data"`},
 		{"ledger sealing", `"ledger":{"signing"`, `"ledger":{"sealing":[{"purpose":"x","kek":"projects/p/locations/r/keyRings/r/cryptoKeys/k","file":"data-keys.json"}],"signing"`},
 		{"trailing JSON", "}\n", "}{}\n"},
 	} {
@@ -125,9 +142,8 @@ type fakeKMS struct {
 }
 
 // Exercise ADC and the real REST adapter through the CLI, without a listener.
-func setupKMSJob(t *testing.T, dir string) *fakeKMS {
+func setupKMSJob(t *testing.T, dir string, spec kmsSpec) *fakeKMS {
 	t.Helper()
-	spec := testSpec()
 	path := filepath.Join(dir, "keys.json")
 	writeTestFile(t, path, jsonFile(spec))
 	t.Setenv("KAIVO_KMS_SPEC_FILE", path)
@@ -247,11 +263,11 @@ func jobOutput(t *testing.T, svc string) string {
 
 func TestKMSExport(t *testing.T) {
 	dir := t.TempDir()
-	job := setupKMSJob(t, dir)
+	spec := testSpec()
+	job := setupKMSJob(t, dir, spec)
 	tmp := t.TempDir()
 	t.Setenv("TMPDIR", tmp)
-	spec := testSpec()
-	for _, svc := range []string{"iam", "ledger"} {
+	for _, svc := range []string{"iam", "ledger", "reconciliation"} {
 		data := jobOutput(t, svc)
 		var want bytes.Buffer
 		fmt.Fprintf(&want, `{"format":"kaivo.kms-export.v1","service":%q,"public":[`, svc)
@@ -292,11 +308,12 @@ func TestKMSExport(t *testing.T) {
 		}
 	}
 	entries := spec.Services["iam"].Sealing
-	if job.impersonations != 2 || !slices.Equal(job.decrypts, []string{entries[0].KEK, entries[1].KEK}) {
+	if job.impersonations != 3 || !slices.Equal(job.decrypts, []string{entries[0].KEK, entries[1].KEK, spec.Services["reconciliation"].Sealing[0].KEK}) {
 		t.Fatal("expected one credential exchange per Job and one unwrap per file")
 	}
 	job.failDecrypt = true
 	expectFailure(t, "kms-export", "iam")
+	expectFailure(t, "kms-export", "reconciliation")
 	left, err := os.ReadDir(tmp)
 	if err != nil || len(left) != 0 {
 		t.Fatal("temporary wrapped file left behind")
@@ -313,14 +330,14 @@ func TestKMSExport(t *testing.T) {
 	expectFailure(t, "kms-export", "iam")
 }
 
-func exportedDir(t *testing.T) (string, *fakeKMS) {
+func exportedDir(t *testing.T, spec kmsSpec) (string, *fakeKMS) {
 	t.Helper()
 	dir := t.TempDir()
-	job := setupKMSJob(t, dir)
+	job := setupKMSJob(t, dir, spec)
 	if err := os.Mkdir(filepath.Join(dir, "exports"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	for _, svc := range []string{"iam", "ledger"} {
+	for svc := range spec.Services {
 		writeTestFile(t, filepath.Join(dir, "exports", svc+".json"), jobOutput(t, svc))
 	}
 	// Offline import must work with no usable credentials.
@@ -341,13 +358,13 @@ func cloneCluster(c cluster) cluster {
 func TestKMSBootstrapAndReplay(t *testing.T) {
 	setupKubectl(t)
 	dev := generate(t, nil, testTime)
-	dir, job := exportedDir(t)
+	spec := legacyTestSpec()
+	dir, job := exportedDir(t, spec)
 	fresh := generate(t, nil, testTime)
 	if !reflect.DeepEqual(fresh, generate(t, fresh, testTime.Add(time.Hour))) {
 		t.Fatal("fresh KMS seed changed on replay")
 	}
 	got := generate(t, dev, testTime)
-	spec := testSpec()
 	for _, tc := range []struct {
 		file string
 		kids []string
@@ -465,17 +482,82 @@ func TestKMSBootstrapAndReplay(t *testing.T) {
 	expectFailure(t) // even a valid second Job result would replace the data keys
 }
 
+func TestKMSReconciliationBootstrapAndReplay(t *testing.T) {
+	setupKubectl(t)
+	spec := testSpec()
+	dir, job := exportedDir(t, spec)
+	specPath := filepath.Join(dir, "keys.json")
+	exportPath := filepath.Join(dir, "exports", "reconciliation.json")
+	var export kmsExport
+	if err := readKMSJSON(exportPath, &export); err != nil || len(export.Sealing) != 1 {
+		t.Fatal("expected one exported reconciliation sealing file")
+	}
+
+	writeTestFile(t, specPath, jsonFile(legacyTestSpec()))
+	legacy := generate(t, nil, testTime)
+	writeTestFile(t, specPath, jsonFile(spec))
+	got := generate(t, legacy, testTime)
+	want := cloneCluster(legacy)
+	const registry = "reconciliation.jwks"
+	devKeys, err := signing.ParseJWKS([]byte(legacy[registries[0]].Data[registry]))
+	if err != nil || devKeys.Len() != 1 {
+		t.Fatal("expected one legacy reconciliation key")
+	}
+	devKey, ok := devKeys.Lookup("reconciliation-dev")
+	if !ok {
+		t.Fatal("missing development reconciliation key")
+	}
+	signer := spec.Services["reconciliation"].Signing[0]
+	jwks, err := signing.MarshalJWKS(publicKeys{"reconciliation-dev": devKey, signer.KID: job.public[signer.Key].(*ecdsa.PublicKey)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range registries {
+		want[id].Data[registry] = string(jwks)
+	}
+	want[reconInputs].Data["sealing-keys.json"] = export.Sealing[0].Content
+	if !reflect.DeepEqual(got, want) {
+		t.Fatal("unexpected manifests after adding reconciliation to legacy KMS spec")
+	}
+	if !reflect.DeepEqual(got, generate(t, got, testTime.Add(time.Hour))) {
+		t.Fatal("reconciliation KMS replay changed materials")
+	}
+
+	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", filepath.Join(dir, "adc.json"))
+	writeTestFile(t, exportPath, jobOutput(t, "reconciliation"))
+	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", "missing-file")
+	serve(t, got, false)
+	expectFailure(t) // a new export would replace the delivered key
+
+	entries := spec.Services["reconciliation"]
+	entries.Sealing = nil
+	spec.Services["reconciliation"] = entries
+	export.Sealing = []sealingExport{}
+	writeTestFile(t, specPath, jsonFile(spec))
+	writeTestFile(t, exportPath, jsonFile(export))
+	if _, err := loadKMSDir(dir); err != nil {
+		t.Fatal(err)
+	}
+	expectFailure(t) // matching spec and export would drop the delivered file
+
+	// A partial apply may have delivered the file before publishing its service's JWKS.
+	writeTestFile(t, specPath, jsonFile(legacyTestSpec()))
+	legacy[reconInputs] = got[reconInputs]
+	serve(t, legacy, false)
+	expectFailure(t)
+}
+
 func TestKMSImportRejectsInvalidExports(t *testing.T) {
 	setupKubectl(t)
 	serve(t, nil, false)
-	dir, _ := exportedDir(t)
+	spec := testSpec()
+	dir, _ := exportedDir(t, spec)
 	path := filepath.Join(dir, "exports", "iam.json")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	original := decoded[kmsExport](t, string(data))
-	spec := testSpec()
 	for _, tc := range []struct {
 		name   string
 		change func(*kmsExport)

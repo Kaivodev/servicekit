@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"slices"
 
 	"github.com/Kaivodev/servicekit/kms/gcp"
 	"github.com/Kaivodev/servicekit/signing"
@@ -66,6 +67,24 @@ func readKMSJSON(path string, dest any) error {
 
 var sealingPurpose = regexp.MustCompile(`^[a-z]{1,32}$`)
 
+var kmsServices = map[string]struct {
+	registries   []string
+	inputs       objectID
+	sealingFiles map[string]string // An empty purpose allows any valid purpose from the spec.
+}{
+	"iam": {
+		registries:   []string{"iam.jwks", "iam-assertion.jwks"},
+		inputs:       iamInputs,
+		sealingFiles: map[string]string{"data-keys.json": "", "epay-keys.json": ""},
+	},
+	"ledger": {registries: []string{"ledger.jwks", reportRegistry}},
+	"reconciliation": {
+		registries:   []string{"reconciliation.jwks"},
+		inputs:       reconInputs,
+		sealingFiles: map[string]string{"sealing-keys.json": "sealing"},
+	},
+}
+
 func readKMSSpec(path string) (*kmsSpec, error) {
 	var spec kmsSpec
 	if err := readKMSJSON(path, &spec); err != nil {
@@ -81,13 +100,8 @@ func readKMSSpec(path string) (*kmsSpec, error) {
 	// Binding a resource name only checks its syntax; no client credentials or I/O.
 	var names gcp.Client
 	for service, entries := range spec.Services {
-		var extraRegistry string
-		switch service {
-		case "iam":
-			extraRegistry = "iam-assertion.jwks"
-		case "ledger":
-			extraRegistry = reportRegistry
-		default:
+		policy, ok := kmsServices[service]
+		if !ok {
 			return nil, errors.New("unsupported KMS service")
 		}
 		if entries.Signing == nil && entries.Sealing == nil {
@@ -99,7 +113,7 @@ func readKMSSpec(path string) (*kmsSpec, error) {
 			if err != nil || !signing.ValidKeyID(entry.KID) || kids[entry.KID] {
 				return nil, fmt.Errorf("invalid KMS %s signing[%d] key or kid", service, i)
 			}
-			if entry.Registry != service+".jwks" && entry.Registry != extraRegistry {
+			if !slices.Contains(policy.registries, entry.Registry) {
 				return nil, fmt.Errorf("invalid KMS %s signing[%d] registry", service, i)
 			}
 			if entry.PEM != "" {
@@ -113,8 +127,9 @@ func readKMSSpec(path string) (*kmsSpec, error) {
 		purposes, files := map[string]bool{}, map[string]bool{}
 		for i, entry := range entries.Sealing {
 			_, err := names.SymmetricKey(entry.KEK)
-			if err != nil || service != "iam" || !sealingPurpose.MatchString(entry.Purpose) || purposes[entry.Purpose] ||
-				(entry.File != "data-keys.json" && entry.File != "epay-keys.json") || files[entry.File] {
+			requiredPurpose, allowed := policy.sealingFiles[entry.File]
+			if err != nil || !allowed || (requiredPurpose != "" && entry.Purpose != requiredPurpose) ||
+				!sealingPurpose.MatchString(entry.Purpose) || purposes[entry.Purpose] || files[entry.File] {
 				return nil, fmt.Errorf("invalid KMS %s sealing[%d] assignment", service, i)
 			}
 			purposes[entry.Purpose], files[entry.File] = true, true

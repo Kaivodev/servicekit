@@ -13,7 +13,7 @@ import (
 type kmsMaterials struct {
 	registries map[string]publicKeys
 	reportKID  string
-	wrapped    fields
+	wrapped    map[string]fields // service to filename and original content
 }
 
 func loadKMSDir(dir string) (*kmsMaterials, error) {
@@ -21,7 +21,7 @@ func loadKMSDir(dir string) (*kmsMaterials, error) {
 	if err != nil {
 		return nil, err
 	}
-	m := &kmsMaterials{registries: map[string]publicKeys{}, wrapped: fields{}}
+	m := &kmsMaterials{registries: map[string]publicKeys{}, wrapped: map[string]fields{}}
 	for service, entries := range spec.Services {
 		var export kmsExport
 		if err := readKMSJSON(filepath.Join(dir, "exports", service+".json"), &export); err != nil {
@@ -48,11 +48,12 @@ func loadKMSDir(dir string) (*kmsMaterials, error) {
 				m.reportKID = entry.KID
 			}
 		}
+		m.wrapped[service] = fields{}
 		for i, entry := range export.Sealing {
 			if entry.sealingSpec != entries.Sealing[i] || !validWrappedFile(entry.Content, service, entry.Purpose) {
 				return nil, fmt.Errorf("invalid KMS %s sealing[%d] export", service, i)
 			}
-			m.wrapped[entry.File] = entry.Content
+			m.wrapped[service][entry.File] = entry.Content
 		}
 	}
 	return m, nil
@@ -83,13 +84,15 @@ func validWrappedFile(content, service, purpose string) bool {
 }
 
 func (m *kmsMaterials) seedWrappedFiles(old, result materials) error {
-	for _, name := range []string{"data-keys.json", "epay-keys.json"} {
-		content, present := m.wrapped[name]
-		if saved, exists := old[iamInputs][name]; exists && (!present || saved != content) {
-			return invalid(iamInputs, name)
-		}
-		if present {
-			result[iamInputs][name] = content
+	for service, policy := range kmsServices {
+		for name := range policy.sealingFiles {
+			content, present := m.wrapped[service][name]
+			if saved, exists := old[policy.inputs][name]; exists && (!present || saved != content) {
+				return invalid(policy.inputs, name)
+			}
+			if present {
+				result[policy.inputs][name] = content
+			}
 		}
 	}
 	return nil
