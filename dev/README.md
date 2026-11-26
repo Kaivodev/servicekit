@@ -1,6 +1,6 @@
 # 阶段 2 本地联调栈
 
-两个入口共用业务配置生成器。源码按同级目录布局。运行命令均从 servicekit 根目录开始。八个业务进程之外，开发 HTTPS 收银入口把浏览器请求转给 upstream-sim。验收依赖和目前阻塞资金闭环的具体环节见[演示清单](demo.md)。
+两个入口共用业务配置生成器。源码按同级目录布局。运行命令均从 servicekit 根目录开始。本机 mTLS 与 Compose 都运行两份 Rust 上游网关。开发 HTTPS 收银入口把浏览器请求转给 upstream-sim。验收依赖和目前阻塞资金闭环的具体环节见[演示清单](demo.md)。
 
 ## 本机进程
 
@@ -10,23 +10,28 @@
 python3 dev/native/stack.py prepare
 python3 dev/native/stack.py refresh-market
 python3 dev/native/stack.py verify
-python3 dev/native/stack.py build
+python3 dev/native/stack.py build --workspace
 python3 dev/native/stack.py migrate
 python3 dev/native/stack.py up
 python3 dev/native/stack.py status
 python3 dev/native/stack.py down
 ```
 
-- `prepare` 独占创建 `../.local/dev/native/`，检查证书、公钥、签名器和权限，再建六个业务库及独立的 `collection_dev` 开发库。已有目录会拒绝覆盖。只生成配置可用 `prepare --files-only`，之后用相同管理员连接执行 `provision`。数据库步骤失败时保留生成材料，用 `provision` 重试。角色带本栈标记，遇到同名旧角色或他栈库会拒绝接管。管理员 URL 不持久化。
+- `prepare` 独占创建 `../.local/dev/native/`，检查证书、公钥、签名器和权限，再建六个业务库、两个网关库及独立的 `collection_dev` 开发库。已有目录会拒绝覆盖。只生成配置可用 `prepare --files-only`，之后用相同管理员连接执行 `provision`。数据库步骤失败时保留生成材料，用 `provision` 重试。角色带本栈标记，遇到同名旧角色或他栈库会拒绝接管。管理员 URL 不持久化。
 - 数据库名为 `aipay_<服务>`，迁移角色为服务名。IAM、ledger、payment、reconciliation 以迁移脚本授权的 `<服务>_app` 非 owner 身份运行。backend、settlement 使用各自独立的开发角色。notifier 使用 payment 的二进制和自己的 mTLS 身份，upstream-sim 使用内存存储；两者都没有数据库或迁移。
 - 缓存 Redis 的 DB 0–5 依次分配给 backend、IAM、ledger、settlement、reconciliation、payment，传入 URL 的 DB 部分由栈替换。队列有独立实例，IAM 和 payment 分别用 DB 1、5。提供 `AIPAY_DEV_QUEUE_REDIS_URL` 会使用已有的持久化、noeviction 队列实例；仅有缓存 URL 时，栈用本机 `redis-server` 和 `redis-cli` 在 127.0.0.1:6389 管理第二个实例，启用 AOF 并将队列数据保存在状态目录。
-- `build` 以 `GOWORK=off` 构建七个业务二进制、两个预存开发工具、本地令牌签发方和演示驱动，继承调用方的 Go 构建缓存。可先用 `build --bin-dir <目录>` 仅做构建。各服务使用自身 go.mod 固定的版本。部署时各属主应自行确认并升级固定版本。发版前要验证尚未打标签的 observability、servicekit 改动时，用 `build --workspace` 按工作区根目录的 go.work 构建六个属主服务（upstream-sim 和开发工具不变）；新的校验和只写入 go.work.sum，不改各仓库。
+- `build` 构建 Go 服务、开发工具和同级 `upstream-gateway` 的 release 二进制。网关需要 Cargo、Rust 1.99.1 和 wasm-tools 1.263.0。Go 默认使用各模块固定版本。protobuf v0.18.0 发布前用 `build --workspace`，属主使用工作区根的 go.work，开发工具使用只含 dev/tools、servicekit、protobuf、observability 的临时 go.work。可用 `--bin-dir <目录>` 单独构建。
+- `upstream-gateway-trade` 在 9107 只接受 payment，`upstream-gateway-verification` 在 9108 只接受 reconciliation。两个实例分别拥有 `aipay_upstream_gateway_trade`、`aipay_upstream_gateway_verification` 数据库及同名 owner。网关当前通过私有连接访问开发 PostgreSQL，使用 `sslmode=disable`。各自的 `inputs/<实例>/gateway.toml` 引用独立 KEK 和 TLS 身份，DSN 从 `env/<实例>.env` 读取。网关启动时迁移，TCP 监听就绪后才启动属主。围栏退出可在各自的 `logs/<实例>/process.log` 查看，排除原因后再次执行 `up`。
 - 监听地址均为 127.0.0.1。IAM、ledger、settlement、reconciliation、payment、notifier 的 gRPC 端口分别为 9101、9102、9103、9104、9105、9115。backend 公网、平台与卖方监听分别为 8080、8081、8082。模拟上游 API 为 9080，浏览器收银链接用 HTTPS 9443，客户端仅需信任本栈的 `certs/ca.crt`。upstream-sim 重启后原模拟订单与收银链接失效。
 - `up` 逐个等待服务就绪；gRPC 使用属主 CLI（含 `notifier healthcheck`），backend 使用 `/health/ready`，upstream-sim 使用 `/healthz`，收银入口通过 HTTPS 转发该探针。失败时仅回收本次成功启动的进程。日志在 `logs/<service>/`，子 PID 在 `run/<service>.pid`。停机指令通过私有 Unix socket 交给持有子进程句柄的父进程。外部 PostgreSQL、缓存与自备队列不会收到停止指令。`status` 在有服务未就绪时返回非零。
 - 私有 env、7 天证书、持久化 ES256 签名密钥与公钥、EPay 平台 RSA、密封密钥、上游凭据分别存于 `env/`、`certs/`、`inputs/`、`handoff/`。目录 0700、文件 0600。保留整组状态以继续开发；证书过期应协调重签和重启。原有签名链、密封数据仍依赖原业务密钥。不要打印 env、私钥、数据库 URL、整个 Compose 配置或模拟器凭据接口的响应。
 - `prepare` 会生成首份行情。随后先运行一次 `refresh-market`，再生成预存数据集或发布任何资金事件。每次刷新使用刚结束的 UTC 分钟，生成 payment 的十分钟报价、reconciliation 的双来源行情和一小时覆盖事实。payment 每次报价重读文件，reconciliation 检测到行情文件变化后自动重新载入，不需要重启。演示中报价或覆盖即将过期时可再次刷新。
 - ledger 启动时从 `AIPAY_LEDGER_DEV_USD_RATES_FILE` 载入 `inputs/ledger/usd-rates.json`，默认每 30 秒重读。文件是 JSON 数组，每个行情分钟追加一条 USDT/USD 观测，`observed_at` 取该分钟的 UTC 起点，`dev-a` 和 `dev-b` 分别报价 `1.0000` 和 `0.9999`。同一分钟重复刷新沿用原记录。追加后超过 64 KiB 时会报错并保留原文件，可归档已登记的旧观测后再刷新。
 - 商户通知若要实际投递，在 prepare 前提供 `AIPAY_NOTIFIER_EGRESS_PROXY` 和 `AIPAY_NOTIFIER_ALLOWED_HOSTS`，并提供匹配商户地址的回执端。原生演示使用本地 CONNECT 代理 3128 和精确主机 localhost。开发 bot 已配置本地测试 token 和 webhook secret，Bot API 测试端预留 9081。本机驱动提供这两个测试端，浏览器 Cookie 处理方式见下文。
+
+### 从 UG-4 之前的栈升级
+
+先停栈，备份数据库、队列与整份私有状态目录，再把旧状态目录移出 prepare 的目标路径。devcert 每次都会重签整套身份，新栈要配套使用新数据库、缓存、队列和演示断点。本机使用空的专用 PostgreSQL 实例重新 `prepare`、`build --workspace`、`migrate`。Compose 重新 `prepare`，用新的 Compose 项目名（例如在每条命令加 `-p aipay-ug4`）创建空卷。`--add-missing-credentials` 只维护历史五服务栈，`demo-config` 只用于已具备相应身份和数据库的栈。
 
 ## 预发开发材料
 
@@ -140,7 +145,7 @@ stack down
 stack transport mtls
 ```
 
-`transport status` 可在运行中查询。切换模式要求所有受管进程已停止，包含独立的 ledger-reader。本机控制器沿用预存阶段的 mTLS 配置，明文模式与 `deposits-on` 互斥。line-6000 的 settlement 也只支持 mTLS，本机明文模式跳过该进程。收银模拟器继续提供 HTTPS，演示驱动与收银健康检查沿用栈的 CA。
+`transport status` 可在运行中查询。切换模式要求所有受管进程已停止，包含独立的 ledger-reader。本机控制器沿用预存阶段的 mTLS 配置，明文模式与 `deposits-on` 互斥。明文模式跳过两个网关与 settlement，payment 使用本机生成的 plugins.json，reconciliation 使用本地密封密钥。切回 mTLS 会恢复网关地址并移除 plugins.json。两种模式各自开通通道，插件版本、凭据引用与审批断点随模式绑定。收银模拟器继续提供 HTTPS，演示驱动与收银健康检查沿用栈的 CA。
 
 受管进程 `devtoken` 在业务进程之前启动、之后停止。签发私钥位于私有状态目录 `native/token-issuer/issuer.key`，权限为 0600。控制器从 `dev/stack_config.py` 的 `PEERS` 反推调用关系，令牌按 `native/tokens/<调用方>/<目标>` 独立存放，有效期 10 分钟，每 4 分钟原子替换。服务运行时仅收到自己的令牌目录、公钥集路径、签发方和命名空间映射。notifier 使用自己的身份，ledger-reader 复用 ledger 身份。磁盘上的服务 env 文件保留 mTLS 配置，Compose 继续使用 mTLS。
 
@@ -173,7 +178,7 @@ kaivo_queue_tasks{state="pending"}
 
 ## 阶段 2 演示驱动
 
-使用本机进程栈。工作目录为 servicekit。新栈按上节准备、构建和迁移。已有上一轮栈先执行 `down`、`provision`、`build`、`migrate`、`demo-config`。最后一条合并 IAM 路由，补齐 ledger 报表签名器、汇率、payment 对 ledger.trades 的拉取、backend 对 payment.account_notices 的拉取，以及 bot 和 notifier 配置。第 11 轮需要 IAM 000012、payment 000014、ledger 000016 和 backend 000003 迁移。状态、数据库、证书与签名材料沿用原栈。
+使用本机进程栈。从 servicekit 根目录按上节准备、构建和迁移。UG-4 之前的栈按[升级步骤](#从-ug-4-之前的栈升级)重新开通。
 
 先在一个终端启动模拟 Telegram API、商户接收端和 CONNECT 代理，并保持运行。
 
@@ -202,7 +207,7 @@ stack demo run archived-work -o ../.local/dev/native/demo/reports/archived-work.
 stack demo run statement -o ../.local/dev/native/demo/reports/statement.md
 ```
 
-- `demo setup [iam|registry|packages|seller|channels|merchant]` 可单独运行某个阶段。无参数时依次开通，首个真实失败会停止。独立制包只需已构建的驱动、同级 upstream-plugins 的 v0.2.2 和 go1.27.3 工具链。
+- `demo setup [iam|registry|packages|seller|channels|merchant]` 可单独运行某个阶段。无参数时依次开通，首个真实失败会停止。本机 mTLS 和 Compose 由 payment.env 中的网关地址选择 Rust ABI v3；本机 plaintext 和 UG-4b 之前的 K8s 演示使用 Go 1.27.3 与 upstream-plugins v0.2.2。Rust 工具链与预制包布局见[演示制包](demo.md#网关制包与凭据)。
 - 第 11 轮四个场景已于 2026-11-24 在本机进程栈通过，结果见[验证机记录](#2026-11-24-第-11-轮演示验收)。卖方场景会切换唯一通道，通知场景会绑定演示商户群。归档场景按 payment 的真实退避等待，可用 `AIPAY_DEMO_ARCHIVE_WAIT=0s` 立即检查并留待续跑。对账场景优先使用已有文件，新栈可能要等到下一次 UTC+8 零点。详见[步骤与证据](demo.md#第-11-轮运行条件)。
 - 两个争议退款场景已于 2026-11-22 在本机进程栈通过。各使用一笔新订单。放币后场景也通过平台登记争议，登记失败会把现场状态写入报告。重跑同名场景沿用原单和已签材料。
 - `demo run 场景 -o 文件` 在每步结束时更新报告，失败时保留已有证据和错误。`.json` 输出 JSON，其他文件名输出 Markdown。默认的两份场景报告仍位于 `demo/reports/`。
@@ -255,7 +260,7 @@ dc ps -a
 dc down
 ```
 
-已有阶段 2 Compose 栈执行 `dc down`、`python3 -B dev/prepare.py --demo-config`、`dc up -d --build`，重新载入 env 并执行迁移。两种栈都将专用报表私钥存于 `inputs/ledger/report.pem`（0600），公钥发布到 `handoff/ledger-report-public.pem`。升级复用原密钥。
+两个网关与 payment、reconciliation 共用 upstream-sim 的网络命名空间，插件从回环访问模拟器。upstream-sim 将 9107、9108 发布到宿主回环。网关镜像只从 Rust 构建阶段复制二进制，属主镜像构建时从同级 protobuf 取得本地契约。旧卷的处理见[升级步骤](#从-ug-4-之前的栈升级)。
 
 运行中再次执行 `python3 dev/prepare.py --refresh-market` 即可，reconciliation 会自动载入新行情。ledger 会定期重读挂载目录中的汇率文件。
 

@@ -20,11 +20,13 @@ OWNERS = tuple(s for s in SERVICES if s not in ("notifier", "upstream-sim", "cas
 APP_ROLES = ("iam", "ledger", "payment", "reconciliation")
 DEPOSIT_SERVICES = ("devchain", "devcollection")
 PORTS = {"otelcol": 4317, "prometheus": 9090, "devchain": 8545, "devcollection": 9106, "iam": 9101, "ledger": 9102, "settlement": 9103, "reconciliation": 9104, "payment": 9105,
+         "upstream-gateway-trade": 9107, "upstream-gateway-verification": 9108,
          "notifier": 9115, "upstream-sim": 9080, "cashier": 9443, "backend": 8080}
 CACHE_DB = {"backend": 0, "iam": 1, "ledger": 2, "settlement": 3, "reconciliation": 4, "payment": 5}
 PEERS = {"iam": "backend,payment,settlement", "ledger": "backend,payment,reconciliation,settlement",
          "payment": "backend,ledger,reconciliation,notifier", "reconciliation": "backend,ledger,settlement",
          "settlement": "backend"}
+GATEWAYS = {"upstream-gateway-trade": "payment", "upstream-gateway-verification": "reconciliation"}
 RP = "admin.aipay.test"
 ORIGIN = "https://" + RP
 LEDGER_RATE_FILE_LIMIT = 64 << 10  # ledger/internal/fx/devfile.go
@@ -157,6 +159,10 @@ def refresh(root, now=None):
     dump(root / "inputs/payment/rate.json", rate)
 
 
+TRADE_CREDENTIALS_ROUTE = {"method": "POST", "path": "/api/v1/platform/channel-accounts/credentials",
+                          "permission": "payment.channel.manage", "audiences": ["payment"]}
+
+
 def routes():
     rules = []
     for methods, path, perm in (
@@ -177,13 +183,12 @@ def generate_inputs(root, sim_listen):
             (root / parent / svc).mkdir(parents=True, mode=0o700)
     for directory in ("env", "handoff", "data/iam/mail", "data/ledger/anchors", "data/payment/evidence"):
         (root / directory).mkdir(mode=0o700)
-    ids = ",".join((*PEERS, "backend", "notifier", "collection", "probe", "cashier"))
+    ids = ",".join((*PEERS, *GATEWAYS, "backend", "notifier", "collection", "probe", "cashier"))
     subprocess.run(["go", "run", "-mod=readonly", "./cmd/devcert", "--services", ids,
                     "--signing-services", ",".join((*PEERS, "collection")),
                     "--out", str(root / "certs")], env=os.environ | {"GOWORK": "off"}, cwd=LIBRARY, check=True)
     inputs = root / "inputs"
     write(inputs / "iam/sealer.key", secrets.token_bytes(32))
-    write(inputs / "reconciliation/sealer.key", secrets.token_bytes(32))
     # IAM, backend and payment use the same platform RSA key for EPay V2.
     rsa = subprocess.check_output(["openssl", "genpkey", "-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:2048"],
                                   stderr=subprocess.DEVNULL)
@@ -193,15 +198,102 @@ def generate_inputs(root, sim_listen):
     write(root / "handoff/platform-public.pem", subprocess.check_output(["openssl", "pkey", "-pubout"], input=rsa))
     payment_secret, query_secret = secrets.token_hex(32), secrets.token_hex(32)
     dump(inputs / "payment/seller-reviews.json", [])
-    dump(inputs / "payment/plugins.json", {"credentials": {"sim-md5-v1": {"secrets": {"shared": b64(payment_secret.encode())}}},
-                                         "evidence_key": b64(secrets.token_bytes(32))})
+    dump(root / "handoff/trade.json", {"shared": payment_secret})
     dump(root / "handoff/query.json", {"query_key": query_secret})
     dump(inputs / "upstream-sim/config.json", dict(environment="test", listen=sim_listen, base_url="https://127.0.0.1:9443",
          control_token=secrets.token_urlsafe(32), accounts=[dict(id="md5-demo", style="form-md5",
          shared_secret=payment_secret, query_shared_secret=query_secret)]))
-    dump(inputs / "iam/routes.json", routes())
+    dump(inputs / "iam/routes.json", routes() + [TRADE_CREDENTIALS_ROUTE])
     write(inputs / "backend/bot-token", "10001:" + secrets.token_urlsafe(32))
     refresh(root)
+
+
+def gateway_inputs(root, admin, passwords, compose):
+    for name, peer in GATEWAYS.items():
+        inputs = root / "inputs" / name
+        inputs.mkdir(mode=0o700)
+        (root / "logs" / name).mkdir(mode=0o700)
+        db = "aipay_" + name.replace("-", "_")
+        password = secrets.token_hex(24)
+        passwords[name.upper().replace("-", "_") + "_DB_PASSWORD"] = password
+        save_env(root / "env" / (name + ".env"), {
+            "GATEWAY_DATABASE_URL": database_url(admin, db, password, db, prefix=""),
+        })
+        write(inputs / "kek", secrets.token_bytes(32))
+        certs = Path("/run/kaivo/identity") if compose else Path("../../certs") / name
+        ca = "/run/kaivo/ca.crt" if compose else "../../certs/ca.crt"
+        listen = "0.0.0.0" if compose else "127.0.0.1"
+        write(inputs / "gateway.toml", f'''role = "{name.removeprefix('upstream-gateway-')}"
+mode = "development"
+listen = "{listen}:{PORTS[name]}"
+allowed_peers = ["{peer}"]
+database_url_env = "GATEWAY_DATABASE_URL"
+local_kek_file = "kek"
+allow_loopback_http = true
+allow_uncommitted = false
+
+[tls]
+trust_domain = "aipay.test"
+ca_file = "{ca}"
+cert_file = "{certs}/tls.crt"
+key_file = "{certs}/tls.key"
+''')
+
+
+def gateway_client_settings(name):
+    prefix = "AIPAY_RECONCILIATION_" if GATEWAYS[name] == "reconciliation" else "AIPAY_"
+    return {prefix + "UPSTREAM_GATEWAY_ADDRESS": f"127.0.0.1:{PORTS[name]}"}
+
+
+def embedded_client_settings(root, peer):
+    if peer == "payment":
+        return {"AIPAY_PLUGIN_CREDENTIALS_FILE": root / "inputs/payment/plugins.json",
+                "AIPAY_PLUGIN_EVIDENCE_DIRECTORY": root / "data/payment/evidence",
+                "AIPAY_PLUGIN_TEST_ONLY_ALLOW_LOOPBACK": "true"}
+    return {"AIPAY_RECONCILIATION_VERIFICATION_ALLOW_HTTP": "on",
+            "AIPAY_RECONCILIATION_VERIFICATION_ALLOW_LOOPBACK": "on",
+            "AIPAY_RECONCILIATION_SECRET_SEALER": "local",
+            "AIPAY_RECONCILIATION_SECRET_KEY_FILE": root / "inputs/reconciliation/sealer.key"}
+
+
+def switch_gateway_clients(root, plaintext):
+    trade = root / "handoff/trade.json"
+    if not trade.is_file():
+        raise ValueError("UG-4 requires fresh prepare with gateway identities and databases (see dev/README.md)")
+    plugins = root / "inputs/payment/plugins.json"
+    if plaintext:
+        # Retain the two embedded-mode keys across transport switches.
+        evidence = root / "handoff/plaintext-evidence.key"
+        sealer = root / "inputs/reconciliation/sealer.key"
+        for key in (evidence, sealer):
+            if not key.exists():
+                write(key, secrets.token_bytes(32))
+        shared = json.loads(trade.read_bytes())["shared"]
+        dump(plugins, {"credentials": {"sim-md5-v1": {"secrets": {"shared": b64(shared.encode())}}},
+                       "evidence_key": b64(evidence.read_bytes())})
+    for name, peer in GATEWAYS.items():
+        env = root / "env" / (peer + ".env")
+        values = read_env(env)
+        gateway, embedded = gateway_client_settings(name), embedded_client_settings(root, peer)
+        remove, add = (gateway, embedded) if plaintext else (embedded, gateway)
+        prefix = "AIPAY_" if peer == "payment" else "AIPAY_RECONCILIATION_"
+        if plaintext:
+            for suffix in ("UPSTREAM_GATEWAY_CALL_TIMEOUT", "UPSTREAM_GATEWAY_SERVER_NAME"):
+                values.pop(prefix + suffix, None)
+        else:
+            suffixes = ("PLUGIN_EGRESS_PROXY", "PLUGIN_TEST_ONLY_ALLOW_PRIVATE", "PLUGIN_REQUEST_TIMEOUT") if peer == "payment" else (
+                "VERIFICATION_PROXY", "VERIFICATION_TIMEOUT", "VERIFICATION_TEST_ONLY_ALLOW_PRIVATE")
+            for suffix in suffixes:
+                values.pop(prefix + suffix, None)
+        for k in remove:
+            values.pop(k, None)
+        save_env(env, values | add)
+    table = root / "inputs/iam/routes.json"
+    current = json.loads(table.read_bytes())
+    rules = [rule for rule in current if rule != TRADE_CREDENTIALS_ROUTE]
+    dump(table, rules if plaintext else rules + [TRADE_CREDENTIALS_ROUTE])
+    if not plaintext:
+        plugins.unlink(missing_ok=True)
 
 
 def native_deposit_inputs(root, admin, passwords):
@@ -375,6 +467,7 @@ def prepare(root, admin, cache, queue, compose=False):
             passwords[svc.upper() + "_DB_PASSWORD"] = secrets.token_hex(24)
             if svc in APP_ROLES:
                 passwords[svc.upper() + "_APP_PASSWORD"] = secrets.token_hex(24)
+        gateway_inputs(root, admin, passwords, compose)
         if not compose:
             native_deposit_inputs(root, admin, passwords)
         save_env(root / "env/provision.env", passwords)
@@ -427,9 +520,9 @@ def prepare(root, admin, cache, queue, compose=False):
                               IAM_EVENT_KEYS_FILE=public / "iam.jwks",
                               PAYMENT_DISPATCHER_ENABLED="true", PAYMENT_WORKER_ENABLED="true",
                               PAYMENT_APPROVAL_RP_ID=RP, PAYMENT_APPROVAL_ORIGINS=ORIGIN, PAYMENT_DEV_RATE_FILE=inputs / "rate.json",
-                              PAYMENT_DEV_SELLER_REVIEWS_FILE=inputs / "seller-reviews.json", PAYMENT_DEV_RATE_MAX_AGE="10m", PLUGIN_ENABLED="true", PLUGIN_CREDENTIALS_FILE=inputs / "plugins.json",
-                              PLUGIN_EVIDENCE_DIRECTORY=data / "evidence", PLUGIN_TEST_ONLY_ALLOW_HTTP="true",
-                              PLUGIN_TEST_ONLY_ALLOW_LOOPBACK="true", PLUGIN_CALLBACK_URL=f"http://{address('backend', compose)}/callback/sim_form_md5",
+                              PAYMENT_DEV_SELLER_REVIEWS_FILE=inputs / "seller-reviews.json", PAYMENT_DEV_RATE_MAX_AGE="10m", PLUGIN_ENABLED="true",
+                              PLUGIN_TEST_ONLY_ALLOW_HTTP="true",
+                              PLUGIN_CALLBACK_URL=f"http://{address('backend', compose)}/callback/sim_form_md5",
                               PAYMENT_NOTIFICATION_IAM_ADDRESS=address("iam", compose), PAYMENT_NOTIFICATION_LOCAL_RSA_FILE=inputs / "epay.der")
             elif svc == "notifier":
                 values.update(NOTIFIER_GRPC_ADDR=f"{listen}:9115", NOTIFIER_PAYMENT_ADDRESS=address("payment", compose),
@@ -444,9 +537,7 @@ def prepare(root, admin, cache, queue, compose=False):
                               PAYMENT_EVENT_KEYS_FILE=public / "payment.jwks", RECONCILIATION_MARKET="on",
                               RECONCILIATION_MARKET_DEVELOPMENT_FILE=inputs / "market.json",
                               RECONCILIATION_COVERAGE_DEVELOPMENT_FILE=inputs / "coverage.json",
-                              RECONCILIATION_VERIFICATION="on", RECONCILIATION_VERIFICATION_ALLOW_HTTP="on",
-                              RECONCILIATION_VERIFICATION_ALLOW_LOOPBACK="on", RECONCILIATION_LATE_PAYMENT_WINDOW="5s",
-                              RECONCILIATION_SECRET_SEALER="local", RECONCILIATION_SECRET_KEY_FILE=inputs / "sealer.key",
+                              RECONCILIATION_VERIFICATION="on", RECONCILIATION_LATE_PAYMENT_WINDOW="5s",
                               RECONCILIATION_ADMIN="on", RECONCILIATION_ADMIN_PAYMENT_ADDRESS=address("payment", compose),
                               RECONCILIATION_ADMIN_RP_ID=RP, RECONCILIATION_ADMIN_ORIGINS=ORIGIN,
                               RECONCILIATION_DISPUTE_REGISTRY="on", RECONCILIATION_WEBAUTHN_RP_ID=RP, RECONCILIATION_WEBAUTHN_ORIGINS=ORIGIN,
@@ -464,6 +555,9 @@ def prepare(root, admin, cache, queue, compose=False):
                               TELEGRAM_WEBHOOK_URL="https://merchant.aipay.test/telegram/webhook", TELEGRAM_BOT_TOKEN_FILE=inputs / "bot-token",
                               TELEGRAM_WEBHOOK_SECRET=secrets.token_urlsafe(32), TELEGRAM_API_BASE_URL="http://127.0.0.1:9081")
             env = {"AIPAY_" + k: str(v) for k, v in values.items()}
+            for name, peer in GATEWAYS.items():
+                if peer == svc:
+                    env.update(gateway_client_settings(name))
             if svc == "upstream-sim":
                 env = {"UPSTREAM_SIM_CONFIG": str(inputs / "config.json")}
             elif svc == "cashier":

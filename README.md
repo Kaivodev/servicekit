@@ -50,7 +50,7 @@
 
 ## 使用与验证
 
-阶段 2 本机联调、开发预存工具与 Compose 用法见[本地联调栈](dev/README.md)，业务验收依赖见[演示前置条件](dev/demo.md)。
+本机 mTLS 和 Compose 分别在 9107、9108 运行交易与核验网关，演示使用 Rust ABI v3 插件。本机 plaintext 与 UG-4b 前的 K8s 演示沿用 Go 插件。构建、旧栈升级与凭据开通见[本地联调栈](dev/README.md)和[演示前置条件](dev/demo.md)。
 
 生产使用已发布固定版本，各服务示例配置位于自身 `.env.example`。CI 的只读 `AIPAY_MODULES_TOKEN` 需要读取 observability、protobuf 和 dev/tools 固定使用的已发布 servicekit。本机也可使用 Git 凭据。
 

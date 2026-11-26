@@ -4,7 +4,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-
 	"time"
 )
 
@@ -18,6 +17,20 @@ func (d *driver) channels() {
 		})
 	}
 	ch := d.key("channel")
+	gateway := d.gatewayMode()
+	if gateway {
+		d.step("交易凭据", func() {
+			var creds map[string]string
+			decode(d.input("handoff/trade.json"), &creds)
+			require(len(creds) == 1 && creds["shared"] != "", "missing simulator trade credential")
+			b := credentialBytes(creds)
+			r := op.write("seal-trade", "/channel-accounts/credentials", func() object {
+				return object{"channel_account_id": ch, "channel_code": "sim_form_md5", "credentials_json": b64.EncodeToString(b)}
+			})
+			d.put("trade-digest", verifiedCredentialDigest(r, b))
+			d.put("trade-ref", str(r, "credentials_ref"))
+		})
+	}
 	seller := d.required("seller-account")
 	conf := b64.EncodeToString(encoded(object{"account_id": "md5-demo", "gateway": d.addresses().gateway}))
 	effect := func() string {
@@ -42,7 +55,12 @@ func (d *driver) channels() {
 			}
 		}
 		require(len(digest) == 32, "payment requires a verified seller review in its configured development seller reviews file")
-		return object{"channel_account_id": ch, "channel_code": "sim_form_md5", "name": "Demo MD5", "seller_account_id": seller, "seller_review_sha256": b64.EncodeToString(digest), "payment_methods": []string{"alipay"}, "fiat_currency": "CNY", "min_amount_fiat_minor": "1", "max_amount_fiat_minor": "10000000", "daily_limit_fiat_minor": "100000000", "priority": 1, "weight": 1, "credentials_ref": "sim-md5-v1", "config_json": conf, "enabled": enabled, "callback_source_cidrs": d.callbackCIDRs()}
+		c := object{"channel_account_id": ch, "channel_code": "sim_form_md5", "name": "Demo MD5", "seller_account_id": seller, "seller_review_sha256": b64.EncodeToString(digest), "payment_methods": []string{"alipay"}, "fiat_currency": "CNY", "min_amount_fiat_minor": "1", "max_amount_fiat_minor": "10000000", "daily_limit_fiat_minor": "100000000", "priority": 1, "weight": 1, "credentials_ref": "sim-md5-v1", "config_json": conf, "enabled": enabled, "callback_source_cidrs": d.callbackCIDRs()}
+		if gateway {
+			c["credentials_ref"] = d.required("trade-ref")
+			c["credentials_sha256"] = d.required("trade-digest")
+		}
+		return c
 	}
 	d.step("卖方通道绑定", func() {
 		submit("channel", "channel-accounts", object{"change": object{"configuration": config(false), "expected_control_version": 0}})
@@ -107,14 +125,24 @@ func (d *driver) channels() {
 		}
 		require(ok, "query credential does not match independent simulator account")
 		b := encoded(creds)
+		if gateway {
+			require(len(creds) == 1, "unexpected simulator query credential")
+			b = credentialBytes(creds)
+		}
 		kid := d.key("attestation")
 		d.registry("attestations", kid, object{"id": kid, "channel_id": ch, "channel_code": "sim_form_md5", "credentials_sha256": fmt.Sprintf("%x", sha256.Sum256(b)), "valid_until": time.Now().Add(7 * 24 * time.Hour).UTC().Truncate(time.Second), "source": "upstream-sim/md5-demo/query_shared_secret", "witness": "demo-verification-witness"})
 		r := op.write("seal", "/verification/credentials", func() object { return object{"channel_account_id": ch, "credentials_json": b64.EncodeToString(b)} })
+		if gateway {
+			d.put("query-digest", verifiedCredentialDigest(r, b))
+		}
 		d.put("query-ref", str(r, "credentials_ref"))
 	})
 	d.step("核验账户与启用", func() {
 		p := "/verification/accounts"
 		c := object{"verification_account_id": verifyID, "channel_account_id": ch, "name": "Demo query", "config_json": conf, "credentials_ref": d.required("query-ref")}
+		if gateway {
+			c["credentials_sha256"] = d.required("query-digest")
+		}
 		op.approve("verification-account", "reconciliation", p+"/requests", p, object{"change": object{"expected_control_version": 0, "configuration": c}})
 		v := op.api("GET", p+"/"+verifyID, "", nil)
 		p = "/verification/enables"

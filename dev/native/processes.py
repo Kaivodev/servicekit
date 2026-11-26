@@ -13,7 +13,7 @@ import time
 
 import telemetry
 
-from stack_config import DEPOSIT_SERVICES, LIBRARY, PEERS, PORTS, SERVICES, deposit_settings, read_env, write
+from stack_config import DEPOSIT_SERVICES, GATEWAYS, LIBRARY, PEERS, PORTS, SERVICES, deposit_settings, read_env, write
 
 
 TOKEN_ISSUER = "kaivo-native"
@@ -35,6 +35,8 @@ def token_targets():
 def service_env(root, name):
     # In particular do not inherit admin DSNs, module tokens or another service's keys.
     env = {k: os.environ[k] for k in ("PATH", "LANG", "TZ", "TMPDIR") if k in os.environ}
+    if name in GATEWAYS:
+        return env | read_env(root / "env" / (name + ".env"))
     if name not in ("queue-redis", "devtoken", *telemetry.PROCESSES):
         owner = "ledger" if name == "ledger-reader" else name
         env.update(read_env(root / "env" / (owner + ".env")))
@@ -66,10 +68,14 @@ def services(root):
     issuer = ("devtoken",) if plaintext else ()
     # The line-6000 settlement binary only accepts mTLS and has no K2 workload.
     workloads = tuple(s for s in SERVICES if not (plaintext and s == "settlement"))
-    return issuer + managed + (("queue-redis",) if (root / "data/queue-redis/redis.conf").exists() else ()) + deposits + workloads
+    queue = ("queue-redis",) if (root / "data/queue-redis/redis.conf").exists() else ()
+    gateways = () if plaintext else tuple(GATEWAYS)
+    return issuer + managed + queue + deposits + gateways + workloads
 
 
 def command(root, name):
+    if name in GATEWAYS:
+        return [str(root / "bin/upstream-gateway"), "--config", str(root / "inputs" / name / "gateway.toml")]
     if name == "devtoken":
         return [str(root / "bin/kaivo-devtoken"), "-state", str(root), "-issuer", TOKEN_ISSUER,
                 "-targets", json.dumps(token_targets())]
@@ -91,8 +97,8 @@ def health(root, name):
     try:
         if name == "devtoken":
             return time.time() - (root / "token-issuer/ready").stat().st_mtime < 300
-        if name == "otelcol":
-            with socket.create_connection(("127.0.0.1", 4317), timeout=3):
+        if name == "otelcol" or name in GATEWAYS:
+            with socket.create_connection(("127.0.0.1", PORTS[name]), timeout=3):
                 return True
         if name == "prometheus":
             conn = http.client.HTTPConnection("127.0.0.1", 9090, timeout=3)
@@ -142,7 +148,7 @@ def health(root, name):
 def request(name, action):
     # Controller and supervisors use the private run/ as cwd (short AF_UNIX paths on macOS).
     with socket.socket(socket.AF_UNIX) as client:
-        client.settimeout(30)
+        client.settimeout(90 if name in GATEWAYS and action == "stop" else 30)
         try:
             client.connect(name + ".sock")
         except (FileNotFoundError, ConnectionRefusedError):
@@ -152,11 +158,11 @@ def request(name, action):
             return reply.readline(64).strip().decode()
 
 
-def shutdown(child):
+def shutdown(child, timeout=20):
     if child.poll() is None:
         child.terminate()
         try:
-            child.wait(timeout=20)
+            child.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
             child.kill()
             child.wait()
@@ -174,6 +180,7 @@ def supervise(root, name):
 
     signal.signal(signal.SIGTERM, stop_signal)
     signal.signal(signal.SIGINT, stop_signal)
+    drain_timeout = 80 if name in GATEWAYS else 20
     with socket.socket(socket.AF_UNIX) as server:
         server.bind(str(endpoint))
         try:
@@ -193,7 +200,7 @@ def supervise(root, name):
                             with client.makefile("rb") as query:
                                 action = query.readline(16)
                             if action == b"stop\n":
-                                shutdown(child)
+                                shutdown(child, drain_timeout)
                                 stopping = True
                                 client.sendall(b"stopped\n")
                             elif action == b"pid\n":
@@ -201,7 +208,9 @@ def supervise(root, name):
                         except (OSError, TimeoutError):
                             pass
             finally:
-                shutdown(child)
+                shutdown(child, drain_timeout)
+            if name in GATEWAYS and not stopping and child.returncode:
+                raise RuntimeError(f"{name} exited with status {child.returncode}")
         finally:
             pidfile.unlink(missing_ok=True)
             endpoint.unlink(missing_ok=True)

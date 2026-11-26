@@ -163,7 +163,8 @@ func (b *browser) write(label, path string, makeBody func() object) object {
 		return response
 	}
 	var body object
-	if path == "/plugins" || path == "/verification/plugins" || !d.native() && path == "/verification/credentials" {
+	if path == "/plugins" || path == "/verification/plugins" || path == "/channel-accounts/credentials" ||
+		path == "/verification/credentials" && (!d.native() || d.gatewayMode()) {
 		body = makeBody()
 		digest := fmt.Sprintf("%x", sha256.Sum256(encoded(body)))
 		require(d.value(k+"/body-sha", func() string { return digest }) == digest, "changed upload on retry")

@@ -13,8 +13,8 @@ import tempfile
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from stack_config import (DEPOSIT_SERVICES, LIBRARY, OWNERS, SERVICES, STATE, WORKSPACE,
-                          native_deposit_inputs, prepare, read_env, refresh, save_env, upgrade_demo, write)
+from stack_config import (DEPOSIT_SERVICES, GATEWAYS, LIBRARY, OWNERS, SERVICES, STATE, WORKSPACE,
+                          gateway_client_settings, native_deposit_inputs, prepare, read_env, refresh, save_env, switch_gateway_clients, upgrade_demo, write)
 from deposit_scenario import SPEC, generate
 from verify import verify
 import telemetry
@@ -23,16 +23,47 @@ from processes import health, request, service_env, services, start, stop, super
 ROOT = STATE / "native"
 
 
+def tools_workspace(directory):
+    directory = Path(directory).resolve()
+    modules = (LIBRARY / "dev/tools", LIBRARY, WORKSPACE / "protobuf", WORKSPACE / "observability")
+    subprocess.run(["go", "work", "init", *(os.path.relpath(p, directory) for p in modules)],
+                   cwd=directory, env=os.environ | {"GOWORK": "off"}, check=True)
+    return directory / "go.work"
+
+
+def build_gateway(out):
+    repo = WORKSPACE / "upstream-gateway"
+    if not (repo / "crates/upstream-gateway/Cargo.toml").is_file():
+        raise ValueError("missing sibling upstream-gateway repository (crates/upstream-gateway)")
+    if not shutil.which("cargo"):
+        raise ValueError("building upstream-gateway requires cargo and the pinned Rust toolchain")
+    if not shutil.which("wasm-tools"):
+        raise ValueError("building upstream-gateway requires wasm-tools (version in upstream-gateway/build-config.json)")
+    with tempfile.TemporaryDirectory(dir=out) as tmp:
+        stage = Path(tmp)
+        cache = ROOT / "build/cargo" if out == ROOT / "bin" else stage / "target"
+        target = (repo / os.environ.get("CARGO_TARGET_DIR", cache)).resolve()
+        subprocess.run(["cargo", "build", "--release", "--locked", "-p", "upstream-gateway"],
+                       cwd=repo, env=os.environ | {"CARGO_TARGET_DIR": str(target)}, check=True)
+        binary = stage / "upstream-gateway"
+        shutil.copy2(target / "release/upstream-gateway", binary)
+        binary.replace(out / binary.name)
+    print("built upstream-gateway", flush=True)
+
+
 def build(out, workspace=False):
     out.mkdir(mode=0o700, parents=True, exist_ok=True)
     env = os.environ | {"GOWORK": "off"}
     work = WORKSPACE / "go.work"
     if workspace and not work.is_file():
         raise ValueError("--workspace requires go.work in the workspace root")
-    for name in (*DEPOSIT_SERVICES, "demo", "devtoken"):
-        binary = "kaivo-" + name
-        subprocess.run(["go", "build", "-mod=readonly", "-o", str(out / binary), "./cmd/" + binary],
-                       cwd=LIBRARY / "dev/tools", env=env, check=True)
+    build_gateway(out)
+    with tempfile.TemporaryDirectory() as tmp:
+        tools_env = env | {"GOWORK": str(tools_workspace(tmp))} if workspace else env
+        for name in (*DEPOSIT_SERVICES, "demo", "devtoken"):
+            binary = "kaivo-" + name
+            subprocess.run(["go", "build", "-mod=readonly", "-o", str(out / binary), "./cmd/" + binary],
+                           cwd=LIBRARY / "dev/tools", env=tools_env, check=True)
     for svc in (*OWNERS, "upstream-sim"):
         repo = WORKSPACE / svc
         if workspace and svc != "upstream-sim":
@@ -123,7 +154,7 @@ def deposits(root, seller, finalized, spec=None, delay_collection=False):
 
 
 def change_mode(root, action, mode, endpoint=None):
-    if any(request(name, "pid") for name in (*telemetry.PROCESSES, "devtoken", "queue-redis", *DEPOSIT_SERVICES, *SERVICES, "ledger-reader")):
+    if any(request(name, "pid") for name in (*telemetry.PROCESSES, "devtoken", "queue-redis", *DEPOSIT_SERVICES, *GATEWAYS, *SERVICES, "ledger-reader")):
         raise ValueError(f"run down before changing {action}")
     if action == "telemetry":
         telemetry.configure(root, mode, endpoint)
@@ -132,8 +163,10 @@ def change_mode(root, action, mode, endpoint=None):
         if mode == "plaintext":
             if (root / "deposits.enabled").exists():
                 raise ValueError("plaintext conflicts with deposits-on because devcollection requires mTLS")
+            switch_gateway_clients(root, plaintext=True)
             write(marker, "")
         else:
+            switch_gateway_clients(root, plaintext=False)
             marker.unlink(missing_ok=True)
     elif mode == "stdout":
         write(root / "logs.stdout", "")
@@ -156,7 +189,7 @@ def main():
     build_parser = sub.add_parser("build")
     build_parser.add_argument("--bin-dir", type=Path, help="build separately before prepare")
     build_parser.add_argument("--workspace", action="store_true",
-                              help="build the service repositories with the workspace go.work (pre-release checks)")
+                              help="build owners and development tools with local workspace modules (pre-release checks)")
     sub.add_parser("transport").add_argument("mode", choices=("mtls", "plaintext", "status"))
     modes = sub.add_parser("telemetry").add_subparsers(dest="mode", required=True)
     modes.add_parser("on").add_argument("--endpoint")
@@ -253,6 +286,12 @@ def main():
         elif args.action == "migrate":
             migrate()
         elif args.action == "up":
+            gateway_mode = transport(ROOT) == "mtls"
+            for name, peer in GATEWAYS.items():
+                owner_env = read_env(ROOT / "env" / (peer + ".env"))
+                configured = all(owner_env.get(key) for key in gateway_client_settings(name))
+                if configured != gateway_mode:
+                    raise ValueError("inconsistent transport configuration; rerun transport MODE or prepare a fresh UG-4 stack")
             started = []
             try:
                 for name in names:
@@ -290,7 +329,7 @@ def main():
 
 if __name__ == "__main__":
     try:
-        if len(sys.argv) == 3 and sys.argv[1] == "_run" and sys.argv[2] in (*SERVICES, *DEPOSIT_SERVICES, *telemetry.PROCESSES, "devtoken", "queue-redis", "ledger-reader"):
+        if len(sys.argv) == 3 and sys.argv[1] == "_run" and sys.argv[2] in (*SERVICES, *GATEWAYS, *DEPOSIT_SERVICES, *telemetry.PROCESSES, "devtoken", "queue-redis", "ledger-reader"):
             os.umask(0o077)
             supervise(Path.cwd().parent, sys.argv[2])
         else:

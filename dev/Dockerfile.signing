@@ -1,14 +1,25 @@
 # syntax=docker/dockerfile:1
-# Built against the sibling iam or payment context. These two still pin v0.4.0.
+# Build each owner against the same local protobuf used by the demo driver.
 FROM --platform=$BUILDPLATFORM golang:1.27.3-bookworm@sha256:972b4110ba0f47539a975c31e52c64765e1ff19f2d74469ae4a595c6676e80a5 AS build
 WORKDIR /src
 ENV GOWORK=off GOPRIVATE=github.com/Kaivodev/*
+COPY --from=contract . /protobuf
+COPY --from=module_auth --chmod=0755 with-private-modules.sh /usr/local/bin/with-private-modules
 COPY . .
 ARG TARGETOS
 ARG TARGETARCH
 RUN --mount=type=secret,id=aipay_modules_token,env=AIPAY_MODULES_TOKEN,required=true \
-    go mod edit -require=github.com/Kaivodev/servicekit@v0.5.0 && \
-    CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH ./script/with-private-modules.sh go build -mod=mod -trimpath -o /out/service .
+    go mod edit -replace=github.com/Kaivodev/protobuf=../protobuf && \
+    CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH with-private-modules go build -mod=mod -trimpath -o /out/service .
+
+# The backend readiness probe uses wget, as in its owner image.
+FROM alpine:3.23 AS backend
+RUN apk add --no-cache ca-certificates tzdata
+WORKDIR /app
+COPY --from=build --chmod=0755 /out/service /app/service
+USER 65532:65532
+ENTRYPOINT ["/app/service"]
+CMD ["serve"]
 
 FROM debian:bookworm-slim@sha256:7ff6ba31527b9e336162fa061746c366c4b2032f4d2cff2078bea43f78efe3f8
 WORKDIR /app

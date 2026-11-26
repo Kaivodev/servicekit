@@ -3,6 +3,8 @@
 set -eu
 export PGUSER="${PGUSER:-${POSTGRES_USER:-postgres}}" PGDATABASE="${PGDATABASE:-postgres}"
 : "${STACK_ID:?missing private provisioning environment}"
+: "${UPSTREAM_GATEWAY_TRADE_DB_PASSWORD:?prepare a fresh UG-4 stack}"
+: "${UPSTREAM_GATEWAY_VERIFICATION_DB_PASSWORD:?prepare a fresh UG-4 stack}"
 # One session lock covers preflight and all DDL. psql reads secrets from its
 # environment. Do not echo the expanded SQL or pass passwords as argv.
 {
@@ -21,6 +23,13 @@ INSERT INTO dev_roles VALUES ('collection_dev', :'pw');
 INSERT INTO dev_databases VALUES ('collection_dev', 'collection_dev', 'collection_dev');
 SQL
   fi
+  for role in trade verification; do
+    db="aipay_upstream_gateway_$role"
+    upper=$(echo "$role" | tr '[:lower:]' '[:upper:]')
+    printf '\\getenv pw UPSTREAM_GATEWAY_%s_DB_PASSWORD\n' "$upper"
+    echo "INSERT INTO dev_roles VALUES ('$db', :'pw');"
+    echo "INSERT INTO dev_databases VALUES ('$db', '$db', '$db');"
+  done
   for svc in iam ledger payment reconciliation settlement backend; do
     upper=$(echo "$svc" | tr '[:lower:]' '[:upper:]')
     printf '\\getenv pw %s_DB_PASSWORD\n' "$upper"

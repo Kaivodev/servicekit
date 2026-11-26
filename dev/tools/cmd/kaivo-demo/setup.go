@@ -166,6 +166,10 @@ func (d *driver) registry(kind, kid string, decl object) {
 	require(time.Now().Before(expiry), "registry record expired")
 }
 func (d *driver) packages() {
+	if d.gatewayMode() {
+		d.gatewayPackages()
+		return
+	}
 	for _, code := range []string{"sim_form_md5", "sim_form_md5_verify"} {
 		d.step("制作 "+code, func() {
 			local := filepath.Join(filepath.Dir(d.repo), "upstream-plugins")
@@ -214,7 +218,14 @@ func (d *driver) upload(code string) object {
 	check(e)
 	hash, e := hex.DecodeString(d.required("hash/" + code))
 	check(e)
-	return object{"manifest_json": b64.EncodeToString(canonicalManifest(file(pkg + "/manifest.json"))), "package_sha256": b64.EncodeToString(hash), "plugin_wasm": b64.EncodeToString(file(pkg + "/plugin.wasm")), "fixtures": fixtures}
+	manifest, wasm := file(filepath.Join(pkg, "manifest.json")), file(filepath.Join(pkg, "plugin.wasm"))
+	if d.gatewayMode() {
+		_, digest := gatewayPackage(code, manifest, wasm, d.gatewayHead(false))
+		require(bytes.Equal(digest, hash), "gateway package changed since setup packages")
+	} else {
+		manifest = canonicalManifest(manifest)
+	}
+	return object{"manifest_json": b64.EncodeToString(manifest), "package_sha256": b64.EncodeToString(hash), "plugin_wasm": b64.EncodeToString(wasm), "fixtures": fixtures}
 }
 
 // canonicalManifest re-encodes the package manifest the way payment,

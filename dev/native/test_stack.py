@@ -1,5 +1,4 @@
 """Offline orchestration tests. Generated development secrets stay in memory."""
-import base64
 from datetime import datetime, timedelta, timezone
 import json
 import os
@@ -83,7 +82,7 @@ class Configuration(unittest.TestCase):
                     self.assertIn("AIPAY_LOG_OUTPUT=file", files[root / "env/devchain.env"])
                 else:
                     self.assertNotIn(root / "env/devcollection.env", files)
-                for name in ("notifier", "collection", "iam", "payment", "reconciliation"):
+                for name in ("notifier", "collection", "iam", "payment", "reconciliation", *cfg.GATEWAYS):
                     self.assertIn(name, cert_calls[0][cert_calls[0].index("--services") + 1].split(","))
                 envs = {name: dict(line.split("=", 1) for line in files[root / "env" / (name + ".env")].splitlines())
                         for name in cfg.SERVICES}
@@ -110,9 +109,19 @@ class Configuration(unittest.TestCase):
                 self.assertFalse(any("DATABASE" in k or "SIGNING" in k or "REDIS" in k for k in envs["notifier"]))
                 sim = json.loads(files[root / "inputs/upstream-sim/config.json"])["accounts"][0]
                 query = json.loads(files[root / "handoff/query.json"])["query_key"]
-                payment = json.loads(files[root / "inputs/payment/plugins.json"])["credentials"]["sim-md5-v1"]
-                self.assertTrue(query == sim["query_shared_secret"] != sim["shared_secret"])
-                self.assertTrue(base64.b64decode(payment["secrets"]["shared"]).decode() == sim["shared_secret"])
+                trade = json.loads(files[root / "handoff/trade.json"])["shared"]
+                self.assertTrue(query == sim["query_shared_secret"] != sim["shared_secret"] == trade)
+                self.assertNotIn(root / "inputs/payment/plugins.json", files)
+                for name, peer in cfg.GATEWAYS.items():
+                    self.assertNotIn(name, cfg.PEERS)
+                    self.assertNotIn(name, cert_calls[0][cert_calls[0].index("--signing-services") + 1].split(","))
+                    self.assertEqual(len(files[root / "inputs" / name / "kek"]), 32)
+                    self.assertTrue(cfg.gateway_client_settings(name).items() <= envs[peer].items())
+                    self.assertFalse(cfg.embedded_client_settings(root, peer).keys() & envs[peer].keys())
+                    self.assertNotIn("AIPAY_GRPC_ADDR", files[root / "env" / (name + ".env")])
+                    db = "aipay_" + name.replace("-", "_")
+                    self.assertIn("://" + db + ":", files[root / "env" / (name + ".env")])
+                    self.assertIn("/" + db + "?", files[root / "env" / (name + ".env")])
                 der = files[root / "inputs/iam/epay.der"]
                 self.assertTrue(all(der == files[root / "inputs" / s / "epay.der"] for s in ("backend", "payment")))
                 self.assertTrue(subprocess.check_output(["openssl", "pkey", "-inform", "DER", "-pubout"], input=der)
@@ -305,7 +314,8 @@ class Configuration(unittest.TestCase):
             sql = Path(tmp) / "commands.sql"
             wrapper.write_text('#!/bin/sh\ncat > "$CAPTURE_SQL"\n')
             wrapper.chmod(0o700)
-            env = {"PATH": tmp + os.pathsep + os.environ["PATH"], "STACK_ID": "test", "CAPTURE_SQL": str(sql)}
+            env = {"PATH": tmp + os.pathsep + os.environ["PATH"], "STACK_ID": "test", "CAPTURE_SQL": str(sql),
+                   "UPSTREAM_GATEWAY_TRADE_DB_PASSWORD": "trade", "UPSTREAM_GATEWAY_VERIFICATION_DB_PASSWORD": "verify"}
             subprocess.run(["sh", str(cfg.LIBRARY / "dev/init-databases.sh")], check=True, env=env)
             self.assertNotIn("collection_dev", sql.read_text())
             subprocess.run(["sh", str(cfg.LIBRARY / "dev/init-databases.sh")], check=True,
@@ -315,6 +325,10 @@ class Configuration(unittest.TestCase):
             self.assertIn("('collection_dev', 'collection_dev', 'collection_dev')", commands)
             for svc in cfg.OWNERS:
                 self.assertIn("\\getenv pw " + svc.upper() + "_DB_PASSWORD\n", commands)
+            for name in cfg.GATEWAYS:
+                db = "aipay_" + name.replace("-", "_")
+                self.assertIn(f"('{db}', '{db}', '{db}')", commands)
+                self.assertIn("\\getenv pw " + name.upper().replace("-", "_") + "_DB_PASSWORD\n", commands)
             for svc in cfg.APP_ROLES:
                 self.assertIn("\\getenv pw " + svc.upper() + "_APP_PASSWORD\n", commands)
             self.assertLess(commands.index("AS collision"), commands.index("CREATE ROLE"))
@@ -334,6 +348,10 @@ class Transport(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "env").mkdir()
+            for directory in ("handoff", "inputs/iam", "inputs/payment", "inputs/reconciliation"):
+                (root / directory).mkdir(parents=True)
+            cfg.dump(root / "inputs/iam/routes.json", cfg.routes())
+            cfg.dump(root / "handoff/trade.json", {"shared": "demo-shared"})
             tls = {"AIPAY_TLS_CERT_FILE": "cert", "AIPAY_NOTIFIER_TLS_KEY_FILE": "private"}
             for name in cfg.SERVICES:
                 cfg.save_env(root / "env" / (name + ".env"), tls)
@@ -344,6 +362,8 @@ class Transport(unittest.TestCase):
             stack.change_mode(root, "transport", "plaintext")
             self.assertEqual(processes.services(root)[0], "devtoken")
             self.assertNotIn("settlement", processes.services(root))
+            self.assertFalse(set(cfg.GATEWAYS) & set(processes.services(root)))
+            self.assertTrue((root / "inputs/payment/plugins.json").is_file())
             self.assertEqual(list(reversed(processes.services(root)))[-1], "devtoken")
             self.assertEqual(json.loads(processes.command(root, "devtoken")[-1]), processes.token_targets())
             self.assertEqual({(c, t) for c, ts in processes.token_targets().items() for t in ts},
@@ -357,7 +377,10 @@ class Transport(unittest.TestCase):
                 self.assertEqual(env["AIPAY_RPC_TOKEN_ISSUER"], processes.TOKEN_ISSUER)
                 self.assertIn(owner + "=local", env["AIPAY_RPC_SERVICE_NAMESPACES"].split(","))
                 self.assertFalse(env.keys() & tls.keys())
-                self.assertEqual(cfg.read_env(root / "env" / (owner + ".env")), tls)
+                expected = dict(tls)
+                if owner in cfg.GATEWAYS.values():
+                    expected.update({k: str(v) for k, v in cfg.embedded_client_settings(root, owner).items()})
+                self.assertEqual(cfg.read_env(root / "env" / (owner + ".env")), expected)
             self.assertNotIn("AIPAY_RPC_TRANSPORT", processes.service_env(root, "cashier"))
             with self.assertRaisesRegex(ValueError, "devcollection requires mTLS"):
                 stack.deposits(root, "seller", None)
@@ -366,6 +389,10 @@ class Transport(unittest.TestCase):
                     stack.change_mode(root, "transport", "mtls")
             stack.change_mode(root, "transport", "mtls")
             self.assertNotIn("devtoken", processes.services(root))
+            self.assertFalse((root / "inputs/payment/plugins.json").exists())
+            for name, peer in cfg.GATEWAYS.items():
+                self.assertLess(processes.services(root).index(name), processes.services(root).index("payment"))
+                self.assertEqual(cfg.read_env(root / "env" / (peer + ".env")), tls | cfg.gateway_client_settings(name))
             self.assertEqual(processes.service_env(root, "notifier")["AIPAY_NOTIFIER_TLS_KEY_FILE"], "private")
             (root / "deposits.enabled").touch()
             with self.assertRaisesRegex(ValueError, "devcollection requires mTLS"):
@@ -474,6 +501,60 @@ class Telemetry(unittest.TestCase):
                 with self.subTest(value=value), self.assertRaisesRegex(ValueError, "^metrics endpoint requires"):
                     telemetry.configure(root, "on", value)
             self.assertFalse((root / "telemetry.json").exists())
+
+
+class GatewayLifecycle(unittest.TestCase):
+    def test_fenced_instance_exits_independently(self):
+        # Exercise the real supervisor and TCP probe without a PostgreSQL server.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            for folder in ("env", "run", "bin"):
+                (root / folder).mkdir()
+            binary = root / "bin/upstream-gateway"
+            binary.write_text("""#!/usr/bin/env python3
+import os, socket, sys
+from pathlib import Path
+flag, config = sys.argv[1:]
+assert flag == "--config" and Path(config).parent.name == os.environ["GATEWAY_DATABASE_URL"]
+with socket.socket() as server:
+    server.bind(("127.0.0.1", int(Path(config).read_text())))
+    server.listen()
+    while True:
+        client, _ = server.accept()
+        with client:
+            if client.recv(8) == b"fence":
+                sys.exit(17)
+""")
+            binary.chmod(0o700)
+            ports = {}
+            workers = {}
+            cwd = Path.cwd()
+            os.chdir(root / "run")
+            try:
+                for name in cfg.GATEWAYS:
+                    with socket.socket() as probe:
+                        probe.bind(("127.0.0.1", 0))
+                        ports[name] = probe.getsockname()[1]
+                    (root / "inputs" / name).mkdir(parents=True)
+                    (root / "logs" / name).mkdir(parents=True)
+                    (root / "inputs" / name / "gateway.toml").write_text(str(ports[name]))
+                    cfg.save_env(root / "env" / (name + ".env"), {"GATEWAY_DATABASE_URL": name})
+                    with patch.dict(processes.PORTS, ports):
+                        workers[name] = processes.start(root, name)
+                trade, query = cfg.GATEWAYS
+                with socket.create_connection(("127.0.0.1", ports[trade]), timeout=2) as conn:
+                    conn.sendall(b"fence")
+                self.assertNotEqual(workers[trade].wait(5), 0)
+                self.assertIsNone(processes.request(trade, "pid"))
+                with patch.dict(processes.PORTS, ports):
+                    self.assertTrue(processes.health(root, query))
+                processes.stop(query)
+                self.assertEqual(workers[query].wait(5), 0)
+            finally:
+                for name in reversed(workers):
+                    processes.stop(name)
+                    workers[name].wait(5)
+                os.chdir(cwd)
 
 
 @unittest.skipUnless(os.getenv("AIPAY_TEST_SIM_BINARY"), "supply the built upstream-sim binary for process tests")

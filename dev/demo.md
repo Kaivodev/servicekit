@@ -2,6 +2,14 @@
 
 验收以 [开发计划](../../docs/plan/development-plan.md)、[审批和资金契约](../../docs/design/contracts.md) 及验证机生成的 `demo/reports` 为准。命令见 [本机运行步骤](README.md#阶段-2-演示驱动)。以下状态区分了驱动覆盖、已执行的验证和仍需属主提供的入口。
 
+## 网关制包与凭据
+
+本机 mTLS 和 Compose 从准备好的 payment.env 读取网关地址。交易实例 `upstream-gateway-trade:9107` 服务 payment，核验实例 `upstream-gateway-verification:9108` 服务 reconciliation。本机 plaintext 与 UG-4b 之前的 K8s 演示继续使用 Go 1.27.3、upstream-plugins v0.2.2 和原凭据流程。旧栈的证书、数据库与断点按[升级步骤](README.md#从-ug-4-之前的栈升级)处理。
+
+`demo setup packages` 从同级 upstream-gateway 的 HEAD 克隆已提交内容，用该提交的 pluginctl 对 `sim_form_md5`、`sim_form_md5_verify` 分别 build、package、replay。使用 Git、Cargo、Rust 1.99.1（`wasm32-unknown-unknown`）、wasm-tools 1.263.0 和 Python 3.14.7，构建主机见网关的 build-config.json。源码已含生成好的绑定，重新生成绑定时使用 wit-bindgen-cli 0.63.0。也可将 `KAIVO_DEMO_PLUGIN_PACKAGES` 指向含 `<code>/manifest.json`、`plugin.wasm`、`fixtures/` 的包根目录。驱动校验 ABI v3、提交及规范 manifest，与存在的同级仓库核对 HEAD，并对原始 manifest 和 wasm 的连续字节计算 SHA-256。
+
+`prepare` 在私有 handoff 目录写入 `trade.json`（shared）和 `query.json`（query_key）。驱动按预分配通道 ID 写入交易凭据，核验凭据仍需独立见证。两个属主返回的摘要都需与本地规范凭据摘要一致，通道和核验账户的双批材料分别绑定各自的 ref 与摘要。
+
 ## 开通清单
 
 | 操作 | 入口及成功条件 | 当前状态 |
@@ -9,7 +17,7 @@
 | 初始管理员 | IAM 属主 `bootstrap` 封存同一份声明，通过安全邮件及平台 `auth/password/reset` 设置各自密码。两人分别登录、注册 ES256 凭据、重新登录并完成挑战 | 驱动已接入，go-webauthn 已独立验证注册、断言和计数 |
 | 邀请人员 | 管理员 1 在平台 `invitations/platform-staff` 邀请两名审批人和审核、运营、风控人员各一名。受保护邀请由管理员 2 批准。每人用自己的邮件令牌接受邀请，注册 WebAuthn 并登录 | 待验证机 |
 | 登记审批人 | payment `approvers register`；reconciliation `registry approvers/dispute-approvers register`。争议登记使用 payment 返回的 key ID 和同一自然人。重试先 list 并核对指纹 | 待验证机 |
-| 制包 | 从本地仓库克隆干净 v0.2.2，检查 HEAD 及工作树，用 go1.27.3 对两包 build、package、replay、verify | 两包已在临时私有状态目录完成四项操作 |
+| 制包 | 按栈配置选择两份 Rust v3 包或 Go v0.2.2 包，上传前核对包摘要 | Rust 两包已在临时目录构建并通过离线回放 |
 | 卖方 | Telegram 私聊 `/start` 注册，`/balance` 取账户 ID，按账户 ID 和 Telegram 用户 ID 只读核对 `iam_telegram_bindings.user_id`。将六项声明持久化后执行 IAM 属主 `sellers activate`。管理员邀请同一账户和邮箱，卖方接受邀请、绑定 TOTP 并登录。指定已登记账户时用 `sellers list` 核对 | 报告用 `demo_verification_ref`、`demo_declared_by` 标出演示核验引用与声明人，记录 IAM 返回的登记时间 |
 | 钱包与预存 | `deposits-on` 为实际卖方生成绑定，ledger `wallets register` 开立 collection_wallet。normal、replay、延后原回执的第三块样本，逐笔核对卖方门户与钱包 | 驱动已接入。验收要求原始转账仅一笔钱包分录 |
 | 双域发布 | 运营分别在平台 `plugins`、`verification/plugins` 上传，两名登记审批人各自签署属主生成的规范材料。核对实际提交人的 `requested_by`、材料摘要、两份签署记录和最终状态 | 已接入 IAM 000010 授权，待验证机 |
@@ -19,6 +27,8 @@
 | 收款资格 | /access_apply、逐提示 /access_next、/access_submit。审核员在平台读取 revision 及材料哈希后提交 reviews，商户按 /access 返回的版本 /access_enable | 待验证机核对真实资格、来源与应用投影 |
 
 ## 资金场景清单
+
+下表注明日期的结果来自切换网关前的运行。UG-4 的端到端结果以新栈的场景报告为准。
 
 每个担保样本取余额基线前都会等待卖方和商户的在途持有归零，上一场景遗留的风控持有会先自然放币。若 2 分钟内仍未归零，驱动会停止，并在报告中列出非零余额、待释放笔数和卖方冻结订单。
 

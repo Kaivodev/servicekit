@@ -12,6 +12,26 @@ x-probe: &probe
   timeout: 5s
   retries: 20
   start_period: 10s
+x-owner-build: &owner-build
+  dockerfile: ../servicekit/dev/Dockerfile.signing
+  additional_contexts: {contract: ../../protobuf, module_auth: ../script}
+  secrets: [aipay_modules_token]
+x-gateway: &gateway
+  image: kaivo-p2/upstream-gateway:dev
+  build:
+    context: ../../upstream-gateway
+    dockerfile: ../servicekit/dev/Dockerfile.gateway
+  user: '${AIPAY_DEV_UID}:${AIPAY_DEV_GID}'
+  read_only: true
+  tmpfs: [/tmp]
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  stop_grace_period: 80s
+  restart: on-failure
+  network_mode: service:upstream-sim
+  depends_on:
+    postgres: {condition: service_healthy}
+    upstream-sim: {condition: service_healthy}
 services:
   postgres:
     image: postgres:18
@@ -77,9 +97,8 @@ services:
     <<: *service
     image: kaivo-p2/iam:dev
     build:
+      <<: *owner-build
       context: ../../iam
-      dockerfile: ../servicekit/dev/Dockerfile.signing
-      secrets: [aipay_modules_token]
     env_file:
       - path: ${AIPAY_DEV_DIR}/env/iam-migrate.env
         format: raw
@@ -104,9 +123,8 @@ services:
     <<: *service
     image: kaivo-p2/payment:dev
     build:
+      <<: *owner-build
       context: ../../payment
-      dockerfile: ../servicekit/dev/Dockerfile.signing
-      secrets: [aipay_modules_token]
     env_file:
       - path: ${AIPAY_DEV_DIR}/env/payment-migrate.env
         format: raw
@@ -118,8 +136,8 @@ services:
     <<: *service
     image: kaivo-p2/reconciliation:dev
     build:
+      <<: *owner-build
       context: ../../reconciliation
-      secrets: [aipay_modules_token]
     env_file:
       - path: ${AIPAY_DEV_DIR}/env/reconciliation-migrate.env
         format: raw
@@ -144,8 +162,9 @@ services:
     <<: *service
     image: kaivo-p2/backend:dev
     build:
+      <<: *owner-build
       context: ../../backend
-      secrets: [aipay_modules_token]
+      target: backend
     env_file:
       - path: ${AIPAY_DEV_DIR}/env/backend-migrate.env
         format: raw
@@ -178,9 +197,35 @@ services:
       - '127.0.0.1:9080:9080'
       - '127.0.0.1:9104:9104'
       - '127.0.0.1:9105:9105'
+      - '127.0.0.1:9107:9107'
+      - '127.0.0.1:9108:9108'
     healthcheck:
       <<: *probe
       test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:9080/healthz]
+  upstream-gateway-trade:
+    <<: *gateway
+    env_file:
+      - path: ${AIPAY_DEV_DIR}/env/upstream-gateway-trade.env
+        format: raw
+    volumes:
+      - ${AIPAY_DEV_DIR}/inputs/upstream-gateway-trade:/run/kaivo/inputs:ro
+      - ${AIPAY_DEV_DIR}/certs/ca.crt:/run/kaivo/ca.crt:ro
+      - ${AIPAY_DEV_DIR}/certs/upstream-gateway-trade:/run/kaivo/identity:ro
+    healthcheck:
+      <<: *probe
+      test: [CMD, /bin/bash, -c, 'exec 3<>/dev/tcp/127.0.0.1/9107']
+  upstream-gateway-verification:
+    <<: *gateway
+    env_file:
+      - path: ${AIPAY_DEV_DIR}/env/upstream-gateway-verification.env
+        format: raw
+    volumes:
+      - ${AIPAY_DEV_DIR}/inputs/upstream-gateway-verification:/run/kaivo/inputs:ro
+      - ${AIPAY_DEV_DIR}/certs/ca.crt:/run/kaivo/ca.crt:ro
+      - ${AIPAY_DEV_DIR}/certs/upstream-gateway-verification:/run/kaivo/identity:ro
+    healthcheck:
+      <<: *probe
+      test: [CMD, /bin/bash, -c, 'exec 3<>/dev/tcp/127.0.0.1/9108']
   cashier:
     <<: *service
     image: python:3.13-alpine
@@ -265,6 +310,8 @@ services:
       test: [CMD, /app/service, healthcheck]
     depends_on:
       payment-migrate: {condition: service_completed_successfully}
+      upstream-gateway-trade: {condition: service_healthy}
+      upstream-gateway-verification: {condition: service_healthy}
       redis: {condition: service_healthy}
       queue-redis: {condition: service_healthy}
       iam: {condition: service_healthy}
@@ -309,9 +356,11 @@ services:
       - ${AIPAY_DEV_DIR}/certs/public:/run/kaivo/public:ro
     healthcheck:
       <<: *probe
-      test: [CMD, /app/kaivo-reconciliation, healthcheck]
+      test: [CMD, /app/service, healthcheck]
     depends_on:
       reconciliation-migrate: {condition: service_completed_successfully}
+      upstream-gateway-trade: {condition: service_healthy}
+      upstream-gateway-verification: {condition: service_healthy}
       redis: {condition: service_healthy}
       ledger: {condition: service_healthy}
       payment: {condition: service_healthy}

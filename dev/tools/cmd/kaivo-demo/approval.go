@@ -20,6 +20,9 @@ import (
 // amounts as decimal strings and enum values without their protobuf prefix.
 func materialBytes(b []byte, desc pr.MessageDescriptor, m object) []byte {
 	fields := desc.Fields()
+	if m["credentials_sha256"] != nil {
+		require(fields.ByName("credentials_sha256") != nil, "credentials_sha256 requires protobuf v0.18.0; rebuild with --workspace")
+	}
 	byNumber := make([]pr.FieldDescriptor, fields.Len())
 	for i := range byNumber {
 		byNumber[i] = fields.Get(i)
@@ -45,7 +48,7 @@ func materialBytes(b []byte, desc pr.MessageDescriptor, m object) []byte {
 			}
 			b = binary.BigEndian.AppendUint32(b, uint32(f.Number()))
 		} else if f.HasOptionalKeyword() {
-			if k == "expected_plugin_control_version" && v == nil {
+			if (k == "expected_plugin_control_version" || k == "credentials_sha256") && v == nil {
 				continue
 			}
 			require(v != nil, "missing approval field "+k)
