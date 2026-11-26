@@ -141,9 +141,16 @@ func (d *driver) platformRefundSuccess() {
 	})
 }
 
+// payment syncs a ledger cancellation on its next order poll. Under A140 an
+// unpaid order may be polled only every 10 minutes from creation, so a
+// cancellation needs a longer wait than the other transitions.
 func (t tradeRun) awaitOrderStatus(status string) object {
+	timeout := 2 * time.Minute
+	if status == "cancelled" {
+		timeout = 12 * time.Minute
+	}
 	var order object
-	waitFor("payment order "+status, 2*time.Minute, func() bool {
+	waitFor("payment order "+status, timeout, func() bool {
 		order = t.d.browser("operations").api("GET", "/orders/"+t.order, "", nil)
 		return order["status"] == status
 	})
