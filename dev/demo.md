@@ -4,7 +4,7 @@
 
 ## 网关制包与凭据
 
-本机 mTLS 和 Compose 从准备好的 payment.env 读取网关地址。交易实例 `upstream-gateway-trade:9107` 服务 payment，核验实例 `upstream-gateway-verification:9108` 服务 reconciliation。本机 plaintext 与 UG-4b 之前的 K8s 演示继续使用 Go 1.27.3、upstream-plugins v0.2.2 和原凭据流程。
+Native and Compose read the gateway address from payment.env. Kubernetes selects the same gateway setup when payment-config and reconciliation-config both specify their respective gateways. Embedded deployments use upstream-plugins v0.2.2. [Kubernetes configuration and package versions](README.md#kubernetes-gateway-overlay)
 
 `demo setup packages` 从同级 upstream-gateway 的 HEAD 克隆已提交内容，用该提交的 pluginctl 对 `sim_form_md5`、`sim_form_md5_verify`、`epay_v1`、`epay_v1_verify` 分别 build、package、replay。使用 Git、Cargo、Rust 1.99.1（`wasm32-unknown-unknown`）、wasm-tools 1.263.0 和 Python 3.14.7，构建主机见网关的 build-config.json。源码已含生成好的绑定，重新生成绑定时使用 wit-bindgen-cli 0.63.0。也可将 `KAIVO_DEMO_PLUGIN_PACKAGES` 指向含上述四个包的目录，每包提供 `<code>/manifest.json`、`plugin.wasm`、`fixtures/`。驱动校验 ABI v3、提交及规范 manifest，与存在的同级仓库核对 HEAD，并对原始 manifest 和 wasm 的连续字节计算 SHA-256。
 
@@ -38,11 +38,11 @@ stack demo run cancel
 | 网关 `epay_v1` | `epay-demo`，PID 1001 | 101–10000000 | main、duplicates、dispute、seller-offline、bot-notices、statement、archived-work、cancel，每单 2.00 元 |
 | 网关 `epay_v1` 测试上游（显式开通） | 运营者提供的测试商户 | 111 | epay-live，1.11 元，优先级 0 |
 | 网关 `sim_form_md5` | `md5-demo` | 1–100 | refund-insufficient、refund-before-release、refund-after-release、dispute-refund-before-release、dispute-refund-after-release、manual-refund、manual-refund-failure、late-payment，每单 1.00 元 |
-| 本机 plaintext、K8s 的 `sim_form_md5` | `md5-demo` | 1–10000000 | 按上述场景取 2.00 或 1.00 元，两种金额均走 form-md5 |
+| Embedded `sim_form_md5` (native or Kubernetes) | `md5-demo` | 1–10000000 | 按上述场景取 2.00 或 1.00 元，两种金额均走 form-md5 |
 
 同一卖方使用同一支付方式，payment 按金额筛选候选通道。渠道定价、风控、核验账户各按通道双批，商户平台默认定价只开通一次。报告从 `payment_orders` 读取原单通道和金额，随后按实际账户设置单笔测试场景。payment 用 `AIPAY_PLUGIN_CALLBACK_URL=http://<backend>/callback/{channel_code}` 派发通知地址，EPay 用 GET 通知，form-md5 用 POST。退款单的收银与付款查询走原单通道。卖方提交人工退款凭证后，两名平台复核人使用 WebAuthn 签署当前版本。开发环境异议期为 10 秒，reconciliation 复核后签发 TradeRefundAuthorized，ledger 据此入账。
 
-交易和核验配置使用同一个 T。驱动从 payment.env 读取 `AIPAY_PLUGIN_INSTRUCTION_TTL`，加 1 小时后向上取整秒。默认 10 分钟得到 `"4200"`。EPay 的两笔 cancel 订单在商户关单前对各自的模拟器场景写入 `query_addtime_backdate_seconds=T+120`（默认 4320）。它只回拨查单应答的 `addtime`。插件在未付超时后返回 `closed`，上游收银页仍可付款。
+Both EPay accounts use the same T. The driver reads `AIPAY_PLUGIN_INSTRUCTION_TTL` from payment.env or the Kubernetes payment-config, adds one hour and rounds up to whole seconds. The default of 10 minutes gives `"4200"`. EPay 的两笔 cancel 订单在商户关单前对各自的模拟器场景写入 `query_addtime_backdate_seconds=T+120`（默认 4320）。它只回拨查单应答的 `addtime`。插件在未付超时后返回 `closed`，上游收银页仍可付款。
 
 ## EPay 测试上游联调
 

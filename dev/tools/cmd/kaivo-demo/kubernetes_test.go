@@ -147,12 +147,12 @@ func TestKubeForwards(t *testing.T) {
 		t.Run("failed="+fail, func(t *testing.T) {
 			k := fakeKube(t)
 			t.Setenv("FAIL_FORWARD", fail)
-			// Pick an ephemeral base with eight free consecutive ports.
+			// Reserve a test range for the eight base ports and the simulator.
 			for {
 				k.base = 20000 + rand.IntN(20000)
 				if k.base <= 65527 {
 					var held []net.Listener
-					for i := 0; i < 8; i++ {
+					for i := 0; i < 9; i++ {
 						l, e := net.Listen("tcp4", k.local(i))
 						if e != nil {
 							break
@@ -162,7 +162,8 @@ func TestKubeForwards(t *testing.T) {
 					for _, l := range held {
 						l.Close()
 					}
-					if len(held) == 8 {
+					if len(held) == 9 {
+						k.simPort = k.base + 8
 						break
 					}
 				}
@@ -175,8 +176,11 @@ func TestKubeForwards(t *testing.T) {
 			if fail == "" && len(k.forwards) != 7 {
 				t.Fatal("missing port-forward")
 			}
+			if !strings.Contains(string(file(filepath.Join(k.dir, "calls"))), fmt.Sprintf(`"service/upstream-sim", "%d:9080"`, k.simPort)) {
+				t.Fatal("incorrect upstream-sim port mapping")
+			}
 			k.closeForwards()
-			for _, port := range []string{k.local(0), k.local(3), k.local(7), "127.0.0.1:9080"} {
+			for _, port := range []string{k.local(0), k.local(3), k.local(7), k.local(8)} {
 				if c, e := net.DialTimeout("tcp", port, time.Second); e == nil {
 					c.Close()
 					t.Fatal("listener survived", port)
@@ -232,10 +236,11 @@ func TestKubeCashier(t *testing.T) {
 	k := fakeKube(t)
 	d := newDriver(t.TempDir(), "", "main")
 	d.demoEnvironment = k
-	l, e := net.Listen("tcp4", "127.0.0.1:9080")
+	l, e := net.Listen("tcp4", "127.0.0.1:0")
 	if e != nil {
 		t.Fatal(e)
 	}
+	k.simPort = l.Addr().(*net.TCPAddr).Port
 	calls := make(chan string, 2)
 	srv := http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls <- r.Method; w.WriteHeader(200) })}
 	go srv.Serve(l)

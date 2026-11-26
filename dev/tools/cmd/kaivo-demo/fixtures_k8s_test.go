@@ -28,15 +28,31 @@ func TestServeKubeFixtures(t *testing.T) {
 	check(atomic(tokenPath, []byte("test-only-bot")))
 	t.Setenv("AIPAY_TELEGRAM_BOT_TOKEN_FILE", tokenPath)
 	ctx, cancel := context.WithCancel(t.Context())
-	done := make(chan error, 1)
-	go func() { done <- executeContext(ctx, []string{"serve-k8s"}) }()
+	listeners := map[string]net.Listener{}
+	for _, addr := range []string{"0.0.0.0:8081", "0.0.0.0:8082", "0.0.0.0:3128", "127.0.0.1:8088"} {
+		l, err := net.Listen("tcp4", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { l.Close() })
+		listeners[addr] = l
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		serveKubeFixturesWithListeners(ctx, fixtureDir(nil), listeners["0.0.0.0:8082"].Addr().String(), func(network, addr string) (net.Listener, error) {
+			if l, ok := listeners[addr]; ok && network == "tcp4" {
+				return l, nil
+			}
+			return nil, fmt.Errorf("unexpected fixture listener %s %s", network, addr)
+		})
+	}()
 	defer func() {
 		cancel()
-		if e := <-done; e != nil {
-			t.Error(e)
-		}
+		<-done
 	}()
-	control := "http://127.0.0.1:8088"
+	controlAddr := listeners["127.0.0.1:8088"].Addr().String()
+	control := "http://" + controlAddr
 	if !pollUntil(3*time.Second, func() bool {
 		res, e := localHTTP.Get(control + "/messages.json")
 		if e != nil {
@@ -71,7 +87,7 @@ func TestServeKubeFixtures(t *testing.T) {
 		}
 	}
 	send := func(path string, body object) int {
-		r, e := localHTTP.Post("http://127.0.0.1:8081/bot"+cfg.Token+"/"+path, "application/json", bytes.NewReader(encoded(body)))
+		r, e := localHTTP.Post("http://"+listeners["0.0.0.0:8081"].Addr().String()+"/bot"+cfg.Token+"/"+path, "application/json", bytes.NewReader(encoded(body)))
 		if e != nil {
 			t.Fatal(e)
 		}
@@ -81,7 +97,7 @@ func TestServeKubeFixtures(t *testing.T) {
 	if send("sendMessage", object{"chat_id": merchantUser, "text": "test delivery"}) != 200 {
 		t.Fatal("Bot API")
 	}
-	read := func(path string) string { return string(getLocal("127.0.0.1:8088", path, 4096)) }
+	read := func(path string) string { return string(getLocal(controlAddr, path, 4096)) }
 	if !strings.Contains(read("/messages.json"), "test delivery") {
 		t.Fatal("missing bot control record")
 	}
@@ -89,7 +105,7 @@ func TestServeKubeFixtures(t *testing.T) {
 		t.Fatal("message deletion")
 	}
 	connect := func(target string) (net.Conn, *bufio.Reader, int) {
-		c, e := net.DialTimeout("tcp", "127.0.0.1:3128", time.Second)
+		c, e := net.DialTimeout("tcp", listeners["0.0.0.0:3128"].Addr().String(), time.Second)
 		if e != nil {
 			t.Fatal(e)
 		}

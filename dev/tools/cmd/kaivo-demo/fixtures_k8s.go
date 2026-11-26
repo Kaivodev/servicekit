@@ -143,7 +143,7 @@ type proxyConnection struct {
 	At     time.Time
 }
 
-func (f *fixtures) proxy(w http.ResponseWriter, r *http.Request) {
+func (f *fixtures) proxy(w http.ResponseWriter, r *http.Request, localMerchant string) {
 	if r.Method != "CONNECT" {
 		w.WriteHeader(403)
 		return
@@ -170,7 +170,7 @@ func (f *fixtures) proxy(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	connectMerchant(w, r, "127.0.0.1:8082", func() error {
+	connectMerchant(w, r, localMerchant, func() error {
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		p := filepath.Join(f.dir, "connections.json")
@@ -182,6 +182,10 @@ func (f *fixtures) proxy(w http.ResponseWriter, r *http.Request) {
 	})
 }
 func serveKubeFixtures(ctx context.Context, dir string) {
+	serveKubeFixturesWithListeners(ctx, dir, "127.0.0.1:8082", net.Listen)
+}
+
+func serveKubeFixturesWithListeners(ctx context.Context, dir, localMerchant string, listen func(string, string) (net.Listener, error)) {
 	check(os.MkdirAll(dir, 0700))
 	// Undeleted Bot messages can contain a newly issued merchant key.
 	if runtime.GOOS == "linux" && os.Getenv("KUBERNETES_SERVICE_HOST") != "" {
@@ -209,15 +213,16 @@ func serveKubeFixtures(ctx context.Context, dir string) {
 	check(os.Chmod(path, 0600))
 	go f.configure(l)
 	errs := make(chan error, 4)
+	proxy := func(w http.ResponseWriter, r *http.Request) { f.proxy(w, r, localMerchant) }
 	for _, s := range []struct {
 		port    int
 		handler http.HandlerFunc
-	}{{8081, f.bot}, {8082, f.notify}, {3128, f.proxy}, {8088, f.control}} {
+	}{{8081, f.bot}, {8082, f.notify}, {3128, proxy}, {8088, f.control}} {
 		host := "0.0.0.0"
 		if s.port == 8088 {
 			host = "127.0.0.1"
 		}
-		l, e := net.Listen("tcp4", fmt.Sprintf("%s:%d", host, s.port))
+		l, e := listen("tcp4", fmt.Sprintf("%s:%d", host, s.port))
 		check(e)
 		srv := &http.Server{Handler: s.handler, ReadTimeout: 10 * time.Second, WriteTimeout: 15 * time.Second, IdleTimeout: 15 * time.Second}
 		defer srv.Close()

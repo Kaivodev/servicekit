@@ -28,6 +28,7 @@
   {"method": "GET", "path": "/api/v1/platform/invitations", "permission": "iam.invitation.read", "audiences": ["iam"]},
   {"method": "DELETE", "path": "/api/v1/platform/invitations/:id", "permission": "iam.invitation.manage", "audiences": ["iam"]},
   {"method": "POST", "path": "/api/v1/platform/channel-accounts/requests", "permission": "payment.channel.manage", "audiences": ["payment"]},
+  {"method": "POST", "path": "/api/v1/platform/channel-accounts/credentials", "permission": "payment.channel.manage", "audiences": ["payment"]},
   {"method": "POST", "path": "/api/v1/platform/channel-accounts/approvals/:id/assertions", "permission": "payment.channel.approve", "audiences": ["payment"]},
   {"method": "POST", "path": "/api/v1/platform/channel-accounts/:id/emergency-disable", "permission": "payment.channel.disable", "audiences": ["payment"]},
   {"method": "POST", "path": "/api/v1/platform/payment-methods/requests", "permission": "payment.method.manage", "audiences": ["payment"]},

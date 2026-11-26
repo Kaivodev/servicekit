@@ -102,6 +102,7 @@ func executeContext(ctx context.Context, args []string) (err error) {
 	}
 	start := func() {
 		if kube != nil && len(kube.forwards) == 0 {
+			d.gatewayMode() // Reject a partial overlay before making setup or scenario changes.
 			kube.startForwards()
 			kube.syncMerchantKeys()
 		}

@@ -246,7 +246,7 @@ def generate_inputs(root, sim_listen):
     dump(inputs / "upstream-sim/config.json", dict(environment="test", listen=sim_listen, base_url="https://127.0.0.1:9443",
          control_token=secrets.token_urlsafe(32), accounts=[dict(id="md5-demo", style="form-md5",
          shared_secret=payment_secret, query_shared_secret=query_secret), epay]))
-    dump(inputs / "iam/routes.json", routes() + [TRADE_CREDENTIALS_ROUTE])
+    dump(inputs / "iam/routes.json", routes())
     write(inputs / "backend/bot-token", "10001:" + secrets.token_urlsafe(32))
     refresh(root)
 

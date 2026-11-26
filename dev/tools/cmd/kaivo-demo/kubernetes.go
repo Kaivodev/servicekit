@@ -33,14 +33,14 @@ func setting(key, fallback string) string {
 }
 
 type kubeEnvironment struct {
-	ctx        context.Context
-	command    []string
-	namespaces map[string]string
-	syncDelay  time.Duration
-	base       int
-	seed, dir  string
-	forwards   []*forward
-	dbForwards map[string]*dbForward
+	ctx           context.Context
+	command       []string
+	namespaces    map[string]string
+	syncDelay     time.Duration
+	base, simPort int
+	seed, dir     string
+	forwards      []*forward
+	dbForwards    map[string]*dbForward
 	// Within one invocation all consumers use the same owner secret and forwarding endpoint.
 	databases map[string]*pgx.ConnConfig
 	configs   map[string]map[string]string
@@ -59,7 +59,10 @@ func newKubeEnvironment(ctx context.Context, dir string) *kubeEnvironment {
 	k.syncDelay, err = time.ParseDuration(setting("AIPAY_DEMO_CONFIGMAP_SYNC", "75s"))
 	require(err == nil && k.syncDelay > 0 && k.syncDelay <= 10*time.Minute, "invalid AIPAY_DEMO_CONFIGMAP_SYNC (use a duration up to 10m)")
 	k.base, err = strconv.Atoi(setting("AIPAY_DEMO_PORT_BASE", "18080"))
-	require(err == nil && k.base > 0 && k.base <= 65535-7 && !(k.base <= 9080 && k.base+7 >= 9080), "invalid AIPAY_DEMO_PORT_BASE")
+	require(err == nil && k.base > 0 && k.base <= 65535-7, "invalid AIPAY_DEMO_PORT_BASE")
+	k.simPort, err = strconv.Atoi(setting("AIPAY_DEMO_SIM_PORT", "9080"))
+	require(err == nil && k.simPort >= 1 && k.simPort <= 65535, "invalid AIPAY_DEMO_SIM_PORT (expected 1..65535)")
+	require(k.simPort < k.base || k.simPort > k.base+7, "AIPAY_DEMO_SIM_PORT overlaps the eight ports starting at AIPAY_DEMO_PORT_BASE")
 	for _, domain := range []string{"business", "sim", "ledger", "reconciliation"} {
 		name := setting("AIPAY_DEMO_NS_"+strings.ToUpper(domain), "kaivo-"+domain)
 		require(len(name) <= 63 && dnsLabel.MatchString(name), "invalid namespace for "+domain)
@@ -78,9 +81,9 @@ func (k *kubeEnvironment) local(offset int) string {
 	return net.JoinHostPort("127.0.0.1", strconv.Itoa(k.base+offset))
 }
 func (k *kubeEnvironment) addresses() endpoints {
-	sim := "http://127.0.0.1:9080"
+	sim := fmt.Sprintf("http://127.0.0.1:%d", k.simPort)
 	suffix := "." + k.namespaces["sim"] + ".svc.cluster.local"
-	return endpoints{k.local(0), k.local(1), k.local(2), sim, "http://upstream-sim" + suffix + ":9080", sim, "http://" + fixtureService + suffix + ":8082"}
+	return endpoints{k.local(0), k.local(1), k.local(2), sim, "http://upstream-sim" + suffix + ":9080", "http://127.0.0.1:9080", "http://" + fixtureService + suffix + ":8082"}
 }
 func (k *kubeEnvironment) bin(ctx context.Context, args ...string) *exec.Cmd {
 	return exec.CommandContext(ctx, k.command[0], append(slices.Clone(k.command[1:]), args...)...)
@@ -153,6 +156,25 @@ func (k *kubeEnvironment) input(name string) []byte {
 		return k.field(k.namespaces["sim"], "configmap", "deposit-dataset", "scenario.json")
 	case "handoff/query.json":
 		b = k.field(k.namespaces["reconciliation"], "secret", "reconciliation-handoff", "query.json")
+	case "handoff/epay.json":
+		b = k.field(k.namespaces["reconciliation"], "secret", "reconciliation-handoff", "epay.json")
+	case "handoff/trade.json":
+		// The existing simulator Secret already holds the form-md5 trade key.
+		var cfg struct {
+			Accounts []struct {
+				ID     string
+				Style  string
+				Shared string `json:"shared_secret"`
+			}
+		}
+		require(decodeJSON(k.input("inputs/upstream-sim/config.json"), &cfg) == nil, "invalid upstream-sim-private/config.json")
+		for _, a := range cfg.Accounts {
+			if a.ID == simulatorAccount(md5Channel) && a.Style == "form-md5" && a.Shared != "" {
+				b = encoded(map[string]string{"shared": a.Shared})
+				break
+			}
+		}
+		require(b != nil, "missing md5-demo trade credential in upstream-sim-private/config.json")
 	case "inputs/upstream-sim/config.json":
 		b = k.field(k.namespaces["sim"], "secret", "upstream-sim-private", "config.json")
 	case "handoff/platform-public.pem", "handoff/ledger-report-public.pem":
@@ -207,7 +229,15 @@ func (k *kubeEnvironment) callbackCIDRs() []string {
 	slices.Sort(cidrs)
 	return cidrs
 }
-func (*kubeEnvironment) cashierClient() *http.Client { return localHTTP }
+func (k *kubeEnvironment) cashierClient() *http.Client {
+	// Cashier links always advertise the seeded loopback origin. Dial this
+	// invocation's port-forward after cashier() has validated the full link.
+	var dialer net.Dialer
+	tr := &http.Transport{DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+		return dialer.DialContext(ctx, network, net.JoinHostPort("127.0.0.1", strconv.Itoa(k.simPort)))
+	}}
+	return &http.Client{Transport: tr, Timeout: localHTTP.Timeout, CheckRedirect: localHTTP.CheckRedirect}
+}
 func getLocal(address, path string, limit int64) []byte {
 	res, e := localHTTP.Get("http://" + address + path)
 	require(e == nil, "forwarded HTTP endpoint unavailable")

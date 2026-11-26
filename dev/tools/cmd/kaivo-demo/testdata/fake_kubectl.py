@@ -46,6 +46,8 @@ elif verb == "get":
         print(json.dumps(spec))
     elif args[0] == "pod":
         print(os.getenv("POD_PHASE", "Succeeded"))
+    elif args[0] in ("secret", "configmap") and cm_path(args[1]).exists():
+        print(cm_path(args[1]).read_text())
     elif args[0] == "secret":
         value = os.environ["DEMO_TEST_VALUE"]
         print(json.dumps({"data": {key:base64.b64encode(value.encode()).decode() for key in ("uri","bot-token","telegram-webhook-secret")}}))

@@ -220,7 +220,7 @@ func (d *driver) upload(code string) object {
 	check(e)
 	manifest, wasm := file(filepath.Join(pkg, "manifest.json")), file(filepath.Join(pkg, "plugin.wasm"))
 	if d.gatewayMode() {
-		_, digest := gatewayPackage(code, manifest, wasm, d.gatewayHead(false))
+		_, digest := d.checkGatewayPackage(code, manifest, wasm, d.gatewayHead(false))
 		require(bytes.Equal(digest, hash), "gateway package changed since setup packages")
 	} else {
 		manifest = canonicalManifest(manifest)

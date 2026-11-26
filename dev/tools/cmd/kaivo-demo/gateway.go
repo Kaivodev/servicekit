@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -47,7 +48,12 @@ func versionAtLeast(version, minimum string) bool {
 }
 
 func (d *driver) gatewayMode() bool {
-	return d.native() && d.env("payment")["AIPAY_UPSTREAM_GATEWAY_ADDRESS"] != ""
+	trade := d.env("payment")["AIPAY_UPSTREAM_GATEWAY_ADDRESS"] != ""
+	if !d.native() {
+		verification := d.env("reconciliation")["AIPAY_RECONCILIATION_UPSTREAM_GATEWAY_ADDRESS"] != ""
+		require(trade == verification, "payment-config/AIPAY_UPSTREAM_GATEWAY_ADDRESS and reconciliation-config/AIPAY_RECONCILIATION_UPSTREAM_GATEWAY_ADDRESS must both be configured or both be absent")
+	}
+	return trade
 }
 
 func (d *driver) gatewayRepo() string {
@@ -63,6 +69,25 @@ func (d *driver) gatewayHead(required bool) string {
 		check(err)
 	}
 	return strings.TrimSpace(string(command(repo, os.Environ(), "git", "rev-parse", "--verify", "HEAD^{commit}")))
+}
+
+func (d *driver) checkGatewayPackage(code string, manifest, wasm []byte, head string) (string, []byte) {
+	if !d.native() {
+		var m struct {
+			Version string
+			Domains []string
+		}
+		decode(manifest, &m)
+		minimum := "0.3.1"
+		if code == epayChannel+"_verify" {
+			minimum = "0.2.1"
+		}
+		require(versionAtLeast(m.Version, minimum), fmt.Sprintf("%s requires version %s or newer in Kubernetes (manifest version %q)", code, minimum, m.Version))
+		sim, err := url.Parse(d.addresses().gateway)
+		check(err)
+		require(slices.Contains(m.Domains, sim.Hostname()), fmt.Sprintf("%s manifest domains must include %s", code, sim.Hostname()))
+	}
+	return gatewayPackage(code, manifest, wasm, head)
 }
 
 // Read the exact bytes written by Rust pluginctl. Go's JSON escaping rules differ.
@@ -147,7 +172,7 @@ func (d *driver) gatewayPackages() {
 				receipt = pluginCommand(source, env, ctl, "package", "--dir", build, "--out", pkg)
 				pluginCommand(source, env, ctl, "replay", "--dir", pkg, "--out", filepath.Join(source, "dist", code+"-replay.json"))
 			}
-			commit, digest := gatewayPackage(code, file(filepath.Join(pkg, "manifest.json")), file(filepath.Join(pkg, "plugin.wasm")), head)
+			commit, digest := d.checkGatewayPackage(code, file(filepath.Join(pkg, "manifest.json")), file(filepath.Join(pkg, "plugin.wasm")), head)
 			fixtures, err := os.ReadDir(filepath.Join(pkg, "fixtures"))
 			check(err)
 			require(len(fixtures) > 0, "missing gateway package fixtures: "+code)

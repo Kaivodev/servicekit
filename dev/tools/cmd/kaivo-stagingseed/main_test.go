@@ -31,7 +31,7 @@ var contract = map[objectID]string{
 	{"kaivo-business", "Secret", "payment-private"}:                "epay.der plugins.json signing.pem",
 	{"kaivo-ledger", "Secret", "ledger-private"}:                   "report.pem signing.pem",
 	{"kaivo-reconciliation", "Secret", "reconciliation-private"}:   "sealer.key signing.pem",
-	{"kaivo-reconciliation", "Secret", "reconciliation-handoff"}:   "query.json",
+	{"kaivo-reconciliation", "Secret", "reconciliation-handoff"}:   "epay.json query.json",
 	{"kaivo-sim", "ConfigMap", "deposit-dataset"}:                  "chain.json",
 	{"kaivo-sim", "Secret", "collection-private"}:                  "collection.jwks signing.pem",
 	{"kaivo-sim", "Secret", "demo-fixtures-private"}:               "bot-token",
@@ -208,7 +208,7 @@ func checkKeys(t *testing.T, c cluster) {
 func checkPair(t *testing.T, c cluster) {
 	t.Helper()
 	cfg := decoded[simConfig](t, raw(t, c, simPrivate, "config.json"))
-	if cfg.Environment != "test" || cfg.Listen != "0.0.0.0:9080" || cfg.BaseURL != "http://127.0.0.1:9080" || len(cfg.Accounts) != 1 || !encoded32(base64.RawURLEncoding, cfg.Control) {
+	if cfg.Environment != "test" || cfg.Listen != "0.0.0.0:9080" || cfg.BaseURL != "http://127.0.0.1:9080" || len(cfg.Accounts) != 2 || !encoded32(base64.RawURLEncoding, cfg.Control) {
 		t.Fatal("invalid simulator config")
 	}
 	a := cfg.Accounts[0]
@@ -224,6 +224,14 @@ func checkPair(t *testing.T, c cluster) {
 			t.Fatal("invalid simulator secret format")
 		}
 	}
+	// The simulator rejects a query_shared_secret field on EPay (even empty).
+	wire := decoded[struct{ Accounts []map[string]any }](t, raw(t, c, simPrivate, "config.json"))
+	epay := cfg.Accounts[1]
+	key := decoded[fields](t, raw(t, c, handoff, "epay.json"))
+	if epay.ID != "epay-demo" || epay.Style != "epay-v1" || epay.PID != 1001 || !validMerchantKey(epay.Shared) ||
+		len(key) != 1 || key["merchant_key"] != epay.Shared || len(wire.Accounts[1]) != 4 {
+		t.Fatal("invalid EPay simulator account or merchant key handoff")
+	}
 }
 
 func TestBootstrapAndReplay(t *testing.T) {
@@ -231,6 +239,18 @@ func TestBootstrapAndReplay(t *testing.T) {
 	c := generate(t, nil, testTime)
 	checkInventory(t, c, contract)
 	checkKeys(t, c)
+	var credentialsRoutes int
+	for _, r := range decoded[[]map[string]any](t, raw(t, c, iamInputs, "routes.json")) {
+		if r["path"] == "/api/v1/platform/channel-accounts/credentials" {
+			credentialsRoutes++
+			if r["method"] != "POST" || r["permission"] != "payment.channel.manage" || !reflect.DeepEqual(r["audiences"], []any{"payment"}) {
+				t.Fatal("incorrect trade credentials route policy")
+			}
+		}
+	}
+	if credentialsRoutes != 1 {
+		t.Fatal("expected exactly one trade credentials route")
+	}
 	calls, err := os.ReadFile(os.Getenv("SEED_TEST_CALLS"))
 	if err != nil || !slices.Equal(strings.Fields(string(calls)), []string{business, ledger, recon, sim}) {
 		t.Fatal("wrong kubectl namespaces")
@@ -257,6 +277,30 @@ func TestBootstrapAndReplay(t *testing.T) {
 	replay := generate(t, c, testTime.Add(time.Hour))
 	if !reflect.DeepEqual(c, replay) {
 		t.Fatal("bootstrap replaced existing data or lost resourceVersion")
+	}
+}
+
+func TestUpgradeFormMD5Seed(t *testing.T) {
+	setupKubectl(t)
+	c := generate(t, nil, testTime)
+	cfg := decoded[map[string]any](t, raw(t, c, simPrivate, "config.json"))
+	accounts := cfg["accounts"].([]any)[:1]
+	accounts[0].(map[string]any)["scenario"] = map[string]any{"query_unknown": true}
+	cfg["accounts"] = accounts
+	c[simPrivate].Data["config.json"] = base64.StdEncoding.EncodeToString([]byte(jsonFile(cfg)))
+	delete(c[handoff].Data, "epay.json")
+
+	next := generate(t, c, testTime.Add(time.Hour))
+	checkPair(t, next)
+	upgraded := decoded[map[string]any](t, raw(t, next, simPrivate, "config.json"))
+	upgraded["accounts"] = upgraded["accounts"].([]any)[:1]
+	if !reflect.DeepEqual(upgraded, cfg) ||
+		next[handoff].Data["query.json"] != c[handoff].Data["query.json"] ||
+		next[paymentPrivate].Data["plugins.json"] != c[paymentPrivate].Data["plugins.json"] {
+		t.Fatal("upgrade changed existing simulator credentials")
+	}
+	if !reflect.DeepEqual(next, generate(t, next, testTime.Add(2*time.Hour))) {
+		t.Fatal("repeated upgrade changed staged materials")
 	}
 }
 
@@ -342,6 +386,10 @@ func TestRejectConflict(t *testing.T) {
 		}},
 		{"sealers equal", func(c cluster) { c[iamPrivate].Data["sealer.key"] = c[reconPrivate].Data["sealer.key"] }},
 		{"transaction mismatch", func(c cluster) { c[paymentPrivate].Data["plugins.json"] = other[paymentPrivate].Data["plugins.json"] }},
+		{"EPay merchant key mismatch", func(c cluster) { c[handoff].Data["epay.json"] = other[handoff].Data["epay.json"] }},
+		{"malformed EPay handoff", func(c cluster) {
+			c[handoff].Data["epay.json"] = base64.StdEncoding.EncodeToString([]byte(`{"merchant_key":"secret-in-handoff"}`))
+		}},
 		{"query mismatch", func(c cluster) { c[handoff].Data["query.json"] = other[handoff].Data["query.json"] }},
 		{"query reused for transactions", func(c cluster) {
 			cfg := decoded[simConfig](t, raw(t, c, simPrivate, "config.json"))

@@ -48,7 +48,7 @@ func (k *kubeEnvironment) startForwards() {
 		mappings        []string
 	}{
 		{"business", "backend", []string{fmt.Sprintf("%d:8080", k.base), fmt.Sprintf("%d:8081", k.base+1), fmt.Sprintf("%d:8082", k.base+2)}},
-		{"sim", "upstream-sim", []string{"9080:9080"}},
+		{"sim", "upstream-sim", []string{fmt.Sprintf("%d:9080", k.simPort)}},
 		{"sim", "mailpit", []string{fmt.Sprintf("%d:8025", k.base+3)}},
 		{"sim", fixtureService, []string{fmt.Sprintf("%d:8088", k.base+4)}},
 		{"business", "business-pg-rw", []string{fmt.Sprintf("%d:5432", k.base+5)}},

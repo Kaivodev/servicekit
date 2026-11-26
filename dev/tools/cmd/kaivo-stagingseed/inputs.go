@@ -1,12 +1,16 @@
 package main
 
 import (
+	"crypto/rand"
 	_ "embed"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/json/jsontext"
 	jsonv2 "encoding/json/v2"
 	"errors"
+	"math/big"
+	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -24,15 +28,19 @@ type simAccount struct {
 	ID     string `json:"id"`
 	Style  string `json:"style"`
 	Shared string `json:"shared_secret"`
-	Query  string `json:"query_shared_secret"`
+	Query  string `json:"query_shared_secret,omitempty"`
+	PID    int    `json:"pid,omitzero"`
+	// Preserve simulator-owned settings such as a seeded order scenario on upgrade.
+	Extra jsontext.Value `json:",embed"`
 }
 
 type simConfig struct {
-	Environment string       `json:"environment"`
-	Listen      string       `json:"listen"`
-	BaseURL     string       `json:"base_url"`
-	Control     string       `json:"control_token"`
-	Accounts    []simAccount `json:"accounts"`
+	Environment string         `json:"environment"`
+	Listen      string         `json:"listen"`
+	BaseURL     string         `json:"base_url"`
+	Control     string         `json:"control_token"`
+	Accounts    []simAccount   `json:"accounts"`
+	Extra       jsontext.Value `json:",embed"`
 }
 
 type credential struct {
@@ -67,17 +75,58 @@ func pairedSecret(left, right string) (string, error) {
 	return randomHex(), nil
 }
 
+const merchantKeyAlphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+
+func validMerchantKey(key string) bool {
+	return len(key) == 32 && strings.Trim(key, merchantKeyAlphabet) == ""
+}
+
+// EPay V1 uses the same merchant key for payment and verification. Recover
+// either surviving copy before creating one on a fresh or form-md5-only seed.
+func epayMerchantKey(accountKey string, old fields) (string, error) {
+	if file, ok := old["epay.json"]; ok {
+		var cred fields
+		if jsonv2.Unmarshal([]byte(file), &cred) != nil || len(cred) != 1 || !validMerchantKey(cred["merchant_key"]) ||
+			(accountKey != "" && accountKey != cred["merchant_key"]) {
+			return "", invalid(handoff, "epay.json")
+		}
+		return cred["merchant_key"], nil
+	}
+	if accountKey != "" {
+		return accountKey, nil
+	}
+	var key [32]byte
+	limit := big.NewInt(int64(len(merchantKeyAlphabet)))
+	for i := range key {
+		n, err := rand.Int(rand.Reader, limit)
+		if err != nil {
+			return "", errors.New("could not generate simulator merchant key")
+		}
+		key[i] = merchantKeyAlphabet[n.Int64()]
+	}
+	return string(key[:]), nil
+}
+
 func simulatorInputs(old, result materials) error {
-	var account simAccount
+	var cfg simConfig
+	var account, epay simAccount
 	simFile, hasSim := old[simPrivate]["config.json"]
 	if hasSim {
-		var c simConfig
-		if jsonv2.Unmarshal([]byte(simFile), &c) != nil || c.Environment != "test" || c.Listen != "0.0.0.0:9080" ||
-			c.BaseURL != "http://127.0.0.1:9080" || len(c.Control) < 16 || len(c.Accounts) != 1 {
+		if jsonv2.Unmarshal([]byte(simFile), &cfg) != nil || cfg.Environment != "test" || cfg.Listen != "0.0.0.0:9080" ||
+			cfg.BaseURL != "http://127.0.0.1:9080" || len(cfg.Control) < 16 {
 			return invalid(simPrivate, "config.json")
 		}
-		account = c.Accounts[0]
-		if account.ID != "md5-demo" || account.Style != "form-md5" || account.Shared == "" || account.Query == "" {
+		for _, a := range cfg.Accounts {
+			switch {
+			case a.ID == "md5-demo" && a.Style == "form-md5" && a.Shared != "" && a.Query != "" && a.PID == 0 && account.ID == "":
+				account = a
+			case a.ID == "epay-demo" && a.Style == "epay-v1" && a.PID == 1001 && validMerchantKey(a.Shared) && a.Query == "" && epay.ID == "":
+				epay = a
+			default:
+				return invalid(simPrivate, "config.json")
+			}
+		}
+		if account.ID == "" {
 			return invalid(simPrivate, "config.json")
 		}
 	}
@@ -123,8 +172,20 @@ func simulatorInputs(old, result materials) error {
 		}
 	}
 	if !hasSim {
-		simFile = jsonFile(simConfig{"test", "0.0.0.0:9080", "http://127.0.0.1:9080", randomURL(),
-			[]simAccount{{"md5-demo", "form-md5", shared, readOnly}}})
+		cfg = simConfig{Environment: "test", Listen: "0.0.0.0:9080", BaseURL: "http://127.0.0.1:9080", Control: randomURL(),
+			Accounts: []simAccount{{ID: "md5-demo", Style: "form-md5", Shared: shared, Query: readOnly}}}
+	}
+	merchantKey, err := epayMerchantKey(epay.Shared, old[handoff])
+	if err != nil {
+		return err
+	}
+	if epay.ID == "" {
+		cfg.Accounts = append(cfg.Accounts, simAccount{ID: "epay-demo", Style: "epay-v1", PID: 1001, Shared: merchantKey})
+		data, err := jsonv2.Marshal(cfg)
+		if err != nil {
+			return invalid(simPrivate, "config.json")
+		}
+		simFile = string(data) + "\n"
 	}
 	if !hasQuery {
 		queryFile = jsonFile(fields{"query_key": readOnly})
@@ -132,6 +193,11 @@ func simulatorInputs(old, result materials) error {
 	result[simPrivate]["config.json"] = simFile
 	result[paymentPrivate]["plugins.json"] = pluginFile
 	result[handoff]["query.json"] = queryFile
+	epayFile, ok := old[handoff]["epay.json"]
+	if !ok {
+		epayFile = jsonFile(fields{"merchant_key": merchantKey})
+	}
+	result[handoff]["epay.json"] = epayFile
 	return nil
 }
 
