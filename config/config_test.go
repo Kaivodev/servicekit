@@ -16,7 +16,8 @@ func TestLoad(t *testing.T) {
 		{"AIPAY_RPC_CALL_TIMEOUT", "0"}, {"AIPAY_RPC_MAX_MESSAGE_BYTES", "-1"},
 		{"AIPAY_DATABASE_MIN_CONNS", "100"}, {"AIPAY_REDIS_URL", "http://localhost"},
 		{"AIPAY_LOG_LEVEL", "unknown"}, {"AIPAY_HEALTH_TIMEOUT", "20s"},
-		{"AIPAY_ENVIRONMENT", "dev"}, {"AIPAY_TLS_RELOAD_INTERVAL", "0s"},
+		{EnvironmentVariable, "dev"}, {EnvironmentVariable, "staging"}, {EnvironmentVariable, "Development"},
+		{"AIPAY_TLS_RELOAD_INTERVAL", "0s"},
 		{"AIPAY_RPC_MAX_CONNECTION_AGE", "2h"}, {"AIPAY_RPC_MAX_CONNECTION_AGE", "0s"}, {"AIPAY_RPC_MAX_CONNECTION_AGE", "10s"},
 		{"AIPAY_RPC_MAX_CONNECTION_AGE_GRACE", "-1s"},
 	} {
@@ -41,5 +42,10 @@ func TestLoad(t *testing.T) {
 	}
 	if c.Redis.URL != "" || c.Service != "iam" || c.Logging.Service != "iam" || c.RPC.Address != "127.0.0.1:9001" || len(c.RPC.AllowedPeers) != 2 || c.Environment != Production || c.TLS.ReloadInterval != 30*time.Second || c.RPC.MaxConnectionAge != 54*time.Minute || c.RPC.MaxConnectionAgeGrace != 30*time.Second {
 		t.Fatalf("unexpected defaults: %+v", c.RPC)
+	}
+	base[EnvironmentVariable] = "test"
+	c, err = Load("iam", "127.0.0.1:9001", func(key string) string { return base[key] })
+	if err != nil || c.Environment != Test {
+		t.Fatalf("test environment: got %q, err=%v", c.Environment, err)
 	}
 }

@@ -22,7 +22,7 @@ func env(values map[string]string) func(string) string {
 }
 
 func TestMemorySignerRefusedOutsideDevelopment(t *testing.T) {
-	for _, environment := range []string{"", "production", "staging"} {
+	for _, environment := range []string{"", "production", "staging", "test"} {
 		cfg, err := Load(env(map[string]string{"AIPAY_ENVIRONMENT": environment, "AIPAY_SIGNING_BACKEND": "memory", "AIPAY_SIGNING_KEY_ID": "payment-dev"}))
 		if err == nil {
 			t.Fatalf("memory signer configuration accepted for %q", environment)
@@ -74,6 +74,34 @@ func TestDefaultBackendIsKMS(t *testing.T) {
 		if _, err = Load(env(bad)); err == nil {
 			t.Fatalf("accepted %v", bad)
 		}
+	}
+}
+
+func TestLoadKMSInTestEnvironment(t *testing.T) {
+	cfg, err := Load(env(map[string]string{
+		config.EnvironmentVariable: "test",
+		"AIPAY_SIGNING_BACKEND":    "kms",
+		"AIPAY_SIGNING_KEY_ID":     "payment-events-1",
+		"AIPAY_SIGNING_KMS_KEY":    "resource",
+	}))
+	if err != nil || cfg.Environment != config.Test || cfg.Backend != BackendKMS {
+		t.Fatalf("test KMS configuration: environment=%q backend=%q err=%v", cfg.Environment, cfg.Backend, err)
+	}
+}
+
+func TestFileSignerRefusedInTestEnvironment(t *testing.T) {
+	cfg, err := Load(env(map[string]string{
+		config.EnvironmentVariable: "test",
+		"AIPAY_SIGNING_BACKEND":    "file",
+		"AIPAY_SIGNING_KEY_ID":     "collection-dev-1",
+		"AIPAY_SIGNING_KEY_FILE":   "key.pem",
+	}))
+	const want = "the file signer requires AIPAY_ENVIRONMENT=development and a key file"
+	if err == nil || err.Error() != want {
+		t.Fatalf("Load error = %v, want %q", err, want)
+	}
+	if _, err := Open(t.Context(), cfg, nil); err == nil || err.Error() != want {
+		t.Fatalf("Open error = %v, want %q", err, want)
 	}
 }
 

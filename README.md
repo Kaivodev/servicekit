@@ -2,7 +2,7 @@
 
 `github.com/Kaivodev/servicekit` 提供各私有服务共用的运行基础，采用官方 grpc-go。业务处理、用户认证、RBAC、资金模型、业务表结构与迁移仍由服务仓库维护；签名事件与已用认证证明的辅助只操作服务传入的表。
 
-- `config`：集中校验 `AIPAY_*` 配置；服务端必须提供 PostgreSQL、传输身份配置和明确的调用方名单。Redis 可选。`AIPAY_ENVIRONMENT` 取 `production`、`staging` 或 `development`，未设置按 `production` 处理，只有 `development` 能启用开发专用组件。
+- `config`：集中校验 `AIPAY_*` 配置；服务端必须提供 PostgreSQL、传输身份配置和明确的调用方名单。Redis 可选。`AIPAY_ENVIRONMENT` 由 `config.ParseEnvironment` 统一解析，只取 `development`、`test` 或 `production`，未设置按 `production` 处理，其他值（含已移除的 `staging`）启动失败。放宽开关分两档：`IsDevelopment()` 只在 `development` 下成立，`IsDevelopmentOrTest()` 在 `development` 和 `test` 下成立。
 - `mtls` / `rpc`：TLS 1.3、双向证书链校验、DNS 校验与 `spiffe://<trust-domain>/service/<name>` 身份绑定；连接复用、unary 超时、调用取消、报文大小限制、关联 ID 和访问日志。
 - `postgres` / `redis`：连接池和有界关闭；schema 版本、dirty 标记和服务属主校验。
 - `migration`：显式执行服务自身内嵌迁移；数据库级锁串行验证属主与执行迁移，拒绝跨服务和无属主的既有迁移历史。

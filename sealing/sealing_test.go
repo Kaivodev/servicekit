@@ -245,9 +245,9 @@ func TestCloseConcurrent(t *testing.T) {
 }
 
 func TestDevelopmentEnvironment(t *testing.T) {
-	for _, env := range []config.Environment{"", "production", "staging"} {
+	for _, env := range []config.Environment{"", "production", "staging", config.Test} {
 		if _, err := Development(env, make([]byte, 32)); err == nil {
-			t.Fatal("development key accepted outside development")
+			t.Fatalf("development key accepted for %q", env)
 		}
 	}
 }

@@ -93,12 +93,12 @@ func (c Config) Validate() error {
 		}
 		return nil
 	case BackendMemory:
-		if c.Environment != config.Development {
+		if !c.Environment.IsDevelopment() {
 			return errors.New("the in-memory signer is only allowed when AIPAY_ENVIRONMENT=development")
 		}
 		return nil
 	case BackendFile:
-		if c.Environment != config.Development || c.KeyFile == "" {
+		if !c.Environment.IsDevelopment() || c.KeyFile == "" {
 			return errors.New("the file signer requires AIPAY_ENVIRONMENT=development and a key file")
 		}
 		return nil

@@ -41,7 +41,7 @@ type Keyring struct {
 // pass their loaded environment; it is refused outside development, as are
 // file signers.
 func Development(env config.Environment, key []byte) (*Keyring, error) {
-	if env != config.Development {
+	if !env.IsDevelopment() {
 		return nil, errors.New("development keyring requires AIPAY_ENVIRONMENT=development")
 	}
 	if len(key) != keySize {
