@@ -91,7 +91,7 @@ func New(ctx context.Context, opts ...Option) (*Client, error) {
 		// than one KMS attempt; attempts keep waiting on the shared refresh.
 		base, _ := ctx.Value(oauth2.HTTPClient).(*http.Client)
 		if base == nil {
-			base = http.DefaultClient
+			base = &http.Client{Transport: newTransport()}
 		}
 		authHTTP := &http.Client{Transport: base.Transport, Timeout: max(s.timeout, authTimeout), CheckRedirect: rejectRedirect}
 		authCtx := context.WithValue(context.WithoutCancel(ctx), oauth2.HTTPClient, authHTTP)
@@ -113,6 +113,23 @@ func New(ctx context.Context, opts ...Option) (*Client, error) {
 }
 
 func rejectRedirect(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+
+// newTransport keeps KMS connections in their own pool. A proxy or NAT can
+// drop an idle connection without a reset, and a call on it then waits for its
+// whole attempt deadline. HTTP/2 pings every 15 s keep middleboxes from
+// expiring a warm connection and close one that stopped answering. A warm
+// connection matters on request paths with small budgets (IAM signs each
+// assertion), so idle connections stay pooled for five minutes.
+func newTransport() http.RoundTripper {
+	t, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		return http.DefaultTransport // A process that replaced the default keeps it.
+	}
+	t = t.Clone()
+	t.IdleConnTimeout = 5 * time.Minute
+	t.HTTP2 = &http.HTTP2Config{SendPingTimeout: 15 * time.Second, PingTimeout: 5 * time.Second}
+	return t
+}
 
 // TokenSource has no per-call context. Share a single refresh while allowing
 // individual KMS attempts to stop waiting at their deadline.
@@ -198,6 +215,9 @@ func (c *Client) call(ctx context.Context, op, path string, input, output any) e
 		if !retry || attempt >= c.attempts {
 			return err
 		}
+		// A timed-out or broken request can leave its connection pooled. The
+		// retry must not wait on the same connection, so dial a fresh one.
+		c.http.CloseIdleConnections()
 		// Equal jitter keeps retries apart while capping the delay at 1 s.
 		wait := time.NewTimer(delay/2 + rand.N(delay/2))
 		select {

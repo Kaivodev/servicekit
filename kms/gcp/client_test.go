@@ -208,3 +208,48 @@ func TestExternalAccountImpersonation(t *testing.T) {
 		t.Fatal("unexpected token exchange or KMS call count")
 	}
 }
+
+type closeCounter struct {
+	http.RoundTripper
+	closes atomic.Int32
+}
+
+func (c *closeCounter) CloseIdleConnections() {
+	c.closes.Add(1)
+	if idle, ok := c.RoundTripper.(interface{ CloseIdleConnections() }); ok {
+		idle.CloseIdleConnections()
+	}
+}
+
+// A silently dropped connection stalls until the attempt deadline. The retry
+// must leave the pool so it dials a fresh connection.
+func TestRetryDropsStalledConnection(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		if calls.Add(1) == 1 {
+			<-r.Context().Done()
+			return
+		}
+		decryptResponse(t, w)
+	}))
+	t.Cleanup(server.Close)
+	transport := &closeCounter{RoundTripper: server.Client().Transport}
+	c, err := New(t.Context(), WithHTTPClient(&http.Client{Transport: transport}), WithEndpoint(server.URL),
+		WithTimeout(150*time.Millisecond), WithMaxAttempts(2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, _ := c.SymmetricKey(resource)
+	if _, err := key.Decrypt(t.Context(), []byte("input"), nil); err != nil || calls.Load() != 2 || transport.closes.Load() != 1 {
+		t.Fatalf("calls=%d closes=%d err=%v", calls.Load(), transport.closes.Load(), err)
+	}
+}
+
+func TestDedicatedTransport(t *testing.T) {
+	transport, ok := newTransport().(*http.Transport)
+	if !ok || transport == http.DefaultTransport || transport.IdleConnTimeout != 5*time.Minute || transport.HTTP2 == nil ||
+		transport.HTTP2.SendPingTimeout != 15*time.Second || transport.HTTP2.PingTimeout != 5*time.Second || !transport.ForceAttemptHTTP2 {
+		t.Fatal("KMS transport must keep warm connections and ping HTTP/2 connections")
+	}
+}
