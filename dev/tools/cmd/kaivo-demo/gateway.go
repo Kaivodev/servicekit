@@ -133,7 +133,10 @@ func pluginCommand(dir string, env []string, bin string, args ...string) []byte 
 }
 
 func (d *driver) gatewayPackages() {
-	prebuilt := os.Getenv("KAIVO_DEMO_PLUGIN_PACKAGES")
+	d.buildGatewayPackages(os.Getenv("KAIVO_DEMO_PLUGIN_PACKAGES"), md5Channel, md5Channel+"_verify", epayChannel, epayChannel+"_verify")
+}
+
+func (d *driver) buildGatewayPackages(prebuilt string, codes ...string) {
 	head := d.gatewayHead(prebuilt == "")
 	source := filepath.Join(d.dir, "upstream-gateway-"+head)
 	packages := prebuilt
@@ -162,7 +165,7 @@ func (d *driver) gatewayPackages() {
 		packages, err = filepath.Abs(prebuilt)
 		check(err)
 	}
-	for _, code := range []string{md5Channel, md5Channel + "_verify", epayChannel, epayChannel + "_verify"} {
+	for _, code := range codes {
 		d.liveStep("Rust 插件 "+code, func() {
 			pkg := filepath.Join(packages, code)
 			var receipt []byte

@@ -115,6 +115,9 @@ func executeContext(ctx context.Context, args []string) (err error) {
 		}
 		d.report()
 		d.stepGroup(target, func() {
+			if target == a144NotSent || target == a144NotFound {
+				d.checkA144Environment(target)
+			}
 			if localCapability(target) {
 				d.requireNative(target + "（重复回执或 ledger 本机控制）")
 			}

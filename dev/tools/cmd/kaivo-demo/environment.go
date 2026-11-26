@@ -99,6 +99,11 @@ func (d nativeEnvironment) owner(service, dbvar string, args ...string) []byte {
 	}
 	require(dsn != "", "missing "+service+" ceremony connection")
 	list := []string{"PATH=" + os.Getenv("PATH"), dbvar + "=" + dsn}
+	if isBackdateCreate(service, args) {
+		mode := d.env("payment")["AIPAY_ENVIRONMENT"]
+		require(mode == "development", "dev backdate-create 仅允许在 payment 开发环境运行")
+		list = append(list, "AIPAY_ENVIRONMENT="+mode)
+	}
 	if dbvar == "AIPAY_IAM_BOOTSTRAP_DATABASE_URL" {
 		for k, v := range d.env("iam") {
 			if k == "AIPAY_ENVIRONMENT" || strings.HasPrefix(k, "AIPAY_IAM_DATA_") || k == "AIPAY_IAM_EMAIL_TTL" {

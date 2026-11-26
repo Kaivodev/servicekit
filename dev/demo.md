@@ -91,6 +91,8 @@ V1 返回 HTTP 200 且 `code == 1` 时，驱动优先取 `payurl`，缺省时取
 | epay-live | 浏览器支付 1.11 元，核对网关建单和查单记录、独立 paid 观测、放币授权及余额，最后停用测试通道。 | 待验证机 |
 | main | V1 /mapi.php 下单。卖方门户冻结 Q 后显示模拟收银页，HTTPS POST 付款，模拟器向 backend 回调。payment 主动查单产生 OrderPaid，商户验签并回 success。风险到期后 reconciliation 独立查单、签授权，ledger 放币。卖方减少 Q，商户增加 N，三项费用合计增加 F，Q=N+F | 2026-11-26 本机 mTLS 栈在 EPay 通过 |
 | cancel | V2 /api/pay/create、/api/pay/close。两笔独立订单，首次需两条间隔至少五秒的 closed/unpaid 才归还 Q。EPay 查 payment 跳过关单审计、超时推定完成码和取消核验请求。嵌入模式迟付单使用 late_payment。在首条核验后收银付款，要求其后观察到 paid 且没有取消授权。payment 可能先于独立复查查到付款并转入放币核验，所以这条 paid 记在取消或放币核验下都算，再等待放币，按该单基线核对卖方 −Q、商户 +N、三项费用 +F | 2026-11-26 本机 mTLS 栈在 EPay 通过（迟付步骤在断言修正后续跑，沿用原样本证据） |
+| a144-not-sent | 本机 EPay 监听暂停 3 秒。用派单许可审计 ID 核对首次建单的 transport_connect、零请求和重试成功记录，从平台原单取付款指令，验签商户通知并核对放币余额 | 待本机运行 |
+| a144-not-found | 本机模拟器丢失一次已发送的建单。查单缺单期间原担保仍为 RESERVED。开发属主回拨后核对系统关单原因、取消请求的 protobuf basis、间隔至少 5 秒的两次 not_found_unpaid 及取消授权，最后核对原单、冻结与余额 | 待本机运行 |
 | refund-insufficient | 已放币原单需由商户独立支用到可用余额低于 N。验签 V2 拒绝，核对 payment 的预留拒绝审计与 stopped/RESERVING、零退款预留、零卖方凭证、零上游退款调用。账本仍为 RELEASED，分录序号不变 | 待验证机 |
 | settle-refunds | 按演示卖方扫描已有人工退款，续办凭证与双人审批，核对 reconciliation 授权、ledger 核销和卖方余额。可处理旧场景留下的订单，无需原模拟器记录 | 待验证机 |
 | refund-before-release | 商户 V2 全额退款返回已签名的受理回执及退款号。卖方提交凭证、平台双签，等待异议期结束和独立授权。核对 PRE_RELEASE 占用 Q、REFUNDED、原余额及 V2 退款终态查询 | 待验证机 |

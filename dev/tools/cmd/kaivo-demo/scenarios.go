@@ -125,7 +125,7 @@ func scenarioOrder(scenario string, gateway bool) (amount, channel string) {
 	switch scenario {
 	case livePhase:
 		return "1.11", epayChannel
-	case "main", "duplicates", "dispute", "seller-offline", "bot-notices", "statement", "archived-work", "cancel":
+	case "main", "duplicates", "dispute", "seller-offline", "bot-notices", "statement", "archived-work", "cancel", a144NotSent, a144NotFound:
 		if gateway {
 			return "2.00", epayChannel
 		}
@@ -557,6 +557,8 @@ func (d *driver) dispute() {
 }
 
 var scenarios = map[string]func(*driver){
+	a144NotSent:      (*driver).runA144NotSent,
+	a144NotFound:     (*driver).runA144NotFound,
 	livePhase:        (*driver).runLiveEPay,
 	"coverage":       (*driver).coverage,
 	"seller-offline": (*driver).sellerOffline,
