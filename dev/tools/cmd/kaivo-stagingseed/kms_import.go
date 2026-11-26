@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/rsa"
+	"crypto/x509"
 	"encoding/json/v2"
 	"fmt"
 	"path/filepath"
@@ -11,9 +13,11 @@ import (
 
 // Only verified public keys and the original wrapped file bytes reach the seed.
 type kmsMaterials struct {
-	registries map[string]publicKeys
-	reportKID  string
-	wrapped    map[string]fields // service to filename and original content
+	registries      map[string]publicKeys
+	reportKID       string
+	platformKey     *rsa.PublicKey
+	platformVersion string
+	wrapped         map[string]fields // service to filename and original content
 }
 
 func loadKMSDir(dir string) (*kmsMaterials, error) {
@@ -28,8 +32,17 @@ func loadKMSDir(dir string) (*kmsMaterials, error) {
 			return nil, fmt.Errorf("KMS %s export: %w", service, err)
 		}
 		if export.Format != exportFormat || export.Service != service || export.Public == nil || export.Sealing == nil ||
-			len(export.Public) != len(entries.Signing) || len(export.Sealing) != len(entries.Sealing) {
+			len(export.Public) != len(entries.Signing) || len(export.Sealing) != len(entries.Sealing) ||
+			(export.Platform != nil) != (entries.Platform.Key != "") {
 			return nil, fmt.Errorf("KMS %s export does not match spec", service)
+		}
+		if platform := export.Platform; platform != nil {
+			pub, err := x509.ParsePKIXPublicKey(pemDER(platform.Content, "PUBLIC KEY"))
+			key, ok := pub.(*rsa.PublicKey)
+			if platform.Key != entries.Platform.Key || err != nil || !ok || key.N.BitLen() < 2048 {
+				return nil, fmt.Errorf("invalid KMS %s platform export", service)
+			}
+			m.platformKey, m.platformVersion = key, platform.Key
 		}
 		for i, entry := range export.Public {
 			if entry.signingSpec != entries.Signing[i] {

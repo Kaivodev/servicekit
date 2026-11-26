@@ -24,6 +24,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Kaivodev/servicekit/kms/gcp"
+	"github.com/Kaivodev/servicekit/sealing"
 	"github.com/Kaivodev/servicekit/signing"
 )
 
@@ -61,6 +63,22 @@ func testSpec() kmsSpec {
 	return spec
 }
 
+func businessTestSpec() kmsSpec {
+	const prefix = "projects/kaivokms/locations/asia-southeast1/keyRings/test-business/cryptoKeys/"
+	const v1 = "/cryptoKeyVersions/1"
+	spec := testSpec()
+	iam := spec.Services["iam"]
+	iam.Platform = platformSpec{prefix + "epay-v2-platform" + v1, "platform-public.pem"}
+	spec.Services["iam"] = iam
+	spec.Services["payment"] = serviceSpec{
+		Signing: []signingSpec{{"payment-events-test-v1", prefix + "payment-events" + v1, "payment.jwks", ""}},
+	}
+	spec.Services["backend"] = serviceSpec{
+		Sealing: []sealingSpec{{"cookie", prefix + "backend-cookie-kek", "cookie-keys.json"}},
+	}
+	return spec
+}
+
 func writeTestFile(t *testing.T, path, data string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
@@ -70,11 +88,26 @@ func writeTestFile(t *testing.T, path, data string) {
 
 func TestKMSSpec(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "keys.json")
-	original := jsonFile(testSpec())
+	spec := businessTestSpec()
+	original := jsonFile(spec)
 	writeTestFile(t, path, original)
 	if _, err := readKMSSpec(path); err != nil {
 		t.Fatal(err)
 	}
+	t.Run("platform is independent of key lists", func(t *testing.T) {
+		entry := serviceSpec{Platform: spec.Services["iam"].Platform}
+		only := kmsSpec{specFormat, map[string]serviceSpec{"iam": entry}}
+		writeTestFile(t, path, jsonFile(only))
+		if _, err := readKMSSpec(path); err != nil {
+			t.Fatal(err)
+		}
+		delete(only.Services, "iam")
+		only.Services["payment"] = entry
+		writeTestFile(t, path, jsonFile(only))
+		if _, err := readKMSSpec(path); err == nil {
+			t.Fatal("payment claimed the platform key")
+		}
+	})
 	for _, tc := range []struct{ name, from, to string }{
 		{"format", specFormat, "v0"},
 		{"service", `"iam":`, `"other":`},
@@ -99,6 +132,18 @@ func TestKMSSpec(t *testing.T) {
 		{"ledger using iam registry", "ledger.jwks", "iam-assertion.jwks"},
 		{"reconciliation using ledger registry", "reconciliation.jwks", "ledger-report.jwks"},
 		{"empty reconciliation registry", "reconciliation.jwks", ""},
+		{"payment registry", `"registry":"payment.jwks"`, `"registry":"iam.jwks"`},
+		{"backend signing", `"backend":{"signing":null`, `"backend":{"signing":[{"kid":"backend-v1","key":"` + spec.Services["payment"].Signing[0].Key + `","registry":"payment.jwks"}]`},
+		{"payment sealing", `"payment":{"signing":`, `"payment":{"sealing":` + strings.TrimSpace(jsonFile(spec.Services["backend"].Sealing)) + `,"signing":`},
+		{"backend sealing file", "cookie-keys.json", "data-keys.json"},
+		{"backend sealing purpose", `"purpose":"cookie"`, `"purpose":"sealing"`},
+		{"platform outside iam", `"payment":{`, `"payment":{"platform":` + strings.TrimSpace(jsonFile(spec.Services["iam"].Platform)) + ","},
+		{"duplicate iam platform", `"platform":`, `"platform":` + strings.TrimSpace(jsonFile(spec.Services["iam"].Platform)) + `,"platform":`},
+		{"unversioned platform", `epay-v2-platform/cryptoKeyVersions/1"`, `epay-v2-platform"`},
+		{"platform PEM name", "platform-public.pem", "ledger-report-public.pem"},
+		{"missing platform PEM", `,"pem":"platform-public.pem"`, ""},
+		{"unknown platform member", `"platform":{`, `"platform":{"extra":"secret-in-field",`},
+		{"null platform", strings.TrimSpace(jsonFile(spec.Services["iam"].Platform)), "null"},
 		{"pem name", "ledger-report-public.pem", "other.pem"},
 		{"empty pem", "ledger-report-public.pem", ""},
 		{"null pem", `"ledger-report-public.pem"`, "null"},
@@ -158,6 +203,13 @@ func setupKMSJob(t *testing.T, dir string, spec kmsSpec) *fakeKMS {
 	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", adc)
 	f := &fakeKMS{public: map[string]any{}, aadByKEK: map[string]string{}, plainByKEK: map[string][]byte{}}
 	for svc, entries := range spec.Services {
+		if entries.Platform.Key != "" {
+			key, err := rsa.GenerateKey(rand.Reader, 2048)
+			if err != nil {
+				t.Fatal(err)
+			}
+			f.public[entries.Platform.Key] = &key.PublicKey
+		}
 		for _, signing := range entries.Signing {
 			key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 			if err != nil {
@@ -211,8 +263,8 @@ func (f *fakeKMS) serve(t *testing.T, w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		algorithm := "EC_SIGN_P256_SHA256"
-		if _, rsaKey := f.public[key].(*rsa.PublicKey); rsaKey {
-			algorithm = "RSA_SIGN_PKCS1_2048_SHA256"
+		if rsaKey, ok := f.public[key].(*rsa.PublicKey); ok {
+			algorithm = fmt.Sprintf("RSA_SIGN_PKCS1_%d_SHA256", rsaKey.N.BitLen())
 		}
 		data := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der})
 		fmt.Fprint(w, jsonFile(fields{"name": key, "algorithm": algorithm, "pem": string(data), "pemCrc32c": testCRC(data)}))
@@ -262,12 +314,18 @@ func jobOutput(t *testing.T, svc string) string {
 }
 
 func TestKMSExport(t *testing.T) {
+	t.Run("original three services", func(t *testing.T) { checkKMSExports(t, testSpec()) })
+	t.Run("with business keys", func(t *testing.T) { checkKMSExports(t, businessTestSpec()) })
+}
+
+func checkKMSExports(t *testing.T, spec kmsSpec) {
+	t.Helper()
 	dir := t.TempDir()
-	spec := testSpec()
 	job := setupKMSJob(t, dir, spec)
 	tmp := t.TempDir()
 	t.Setenv("TMPDIR", tmp)
-	for _, svc := range []string{"iam", "ledger", "reconciliation"} {
+	var decrypts []string
+	for _, svc := range slices.Sorted(maps.Keys(spec.Services)) {
 		data := jobOutput(t, svc)
 		var want bytes.Buffer
 		fmt.Fprintf(&want, `{"format":"kaivo.kms-export.v1","service":%q,"public":[`, svc)
@@ -291,6 +349,7 @@ func TestKMSExport(t *testing.T) {
 		}
 		want.WriteString(`],"sealing":[`)
 		for i, s := range spec.Services[svc].Sealing {
+			decrypts = append(decrypts, s.KEK)
 			if i != 0 {
 				want.WriteByte(',')
 			}
@@ -302,21 +361,43 @@ func TestKMSExport(t *testing.T) {
 				t.Fatal("plaintext in export")
 			}
 		}
-		want.WriteString("]}\n")
+		want.WriteByte(']')
+		if platform := spec.Services[svc].Platform; platform.Key != "" {
+			der, err := x509.MarshalPKIXPublicKey(job.public[platform.Key])
+			if err != nil {
+				t.Fatal(err)
+			}
+			content := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der})
+			fmt.Fprintf(&want, `,"platform":{"key":%q,"content":%q}`, platform.Key, content)
+		}
+		want.WriteString("}\n")
 		if data != want.String() {
 			t.Fatal("unexpected export fields, order or content")
 		}
 	}
-	entries := spec.Services["iam"].Sealing
-	if job.impersonations != 3 || !slices.Equal(job.decrypts, []string{entries[0].KEK, entries[1].KEK, spec.Services["reconciliation"].Sealing[0].KEK}) {
+	if job.impersonations != len(spec.Services) || !slices.Equal(job.decrypts, decrypts) {
 		t.Fatal("expected one credential exchange per Job and one unwrap per file")
 	}
 	job.failDecrypt = true
 	expectFailure(t, "kms-export", "iam")
 	expectFailure(t, "kms-export", "reconciliation")
+	if _, ok := spec.Services["backend"]; ok {
+		expectFailure(t, "kms-export", "backend")
+	}
 	left, err := os.ReadDir(tmp)
 	if err != nil || len(left) != 0 {
 		t.Fatal("temporary wrapped file left behind")
+	}
+	if platform := spec.Services["iam"].Platform; platform.Key != "" {
+		job.failDecrypt = false
+		job.public[platform.Key] = job.public[spec.Services["payment"].Signing[0].Key]
+		expectFailure(t, "kms-export", "iam")
+		weak, err := rsa.GenerateKey(rand.Reader, 1024)
+		if err != nil {
+			t.Fatal(err)
+		}
+		job.public[platform.Key] = &weak.PublicKey
+		expectFailure(t, "kms-export", "iam")
 	}
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
@@ -547,10 +628,158 @@ func TestKMSReconciliationBootstrapAndReplay(t *testing.T) {
 	expectFailure(t)
 }
 
+func TestKMSBusinessBootstrapAndReplay(t *testing.T) {
+	setupKubectl(t)
+	spec := businessTestSpec()
+	dir, job := exportedDir(t, spec)
+	specPath := filepath.Join(dir, "keys.json")
+	iamPath := filepath.Join(dir, "exports", "iam.json")
+	var iam, backend kmsExport
+	if err := readKMSJSON(iamPath, &iam); err != nil {
+		t.Fatal(err)
+	}
+	if err := readKMSJSON(filepath.Join(dir, "exports", "backend.json"), &backend); err != nil || len(backend.Sealing) != 1 {
+		t.Fatal("missing backend cookie key export")
+	}
+
+	// Start from the existing three-service installation and its original exports.
+	oldIAM := iam
+	oldIAM.Platform = nil
+	writeTestFile(t, iamPath, jsonFile(oldIAM))
+	writeTestFile(t, specPath, jsonFile(testSpec()))
+	old := generate(t, nil, testTime)
+	writeTestFile(t, specPath, jsonFile(spec))
+	writeTestFile(t, iamPath, jsonFile(iam))
+	got := generate(t, old, testTime)
+
+	want := cloneCluster(old)
+	signer := spec.Services["payment"].Signing[0]
+	dev, err := signing.ParseJWKS([]byte(old[registries[0]].Data["payment.jwks"]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	devKey, ok := dev.Lookup("payment-dev")
+	if !ok {
+		t.Fatal("missing historical payment key")
+	}
+	keys, err := signing.MarshalJWKS(publicKeys{"payment-dev": devKey, signer.KID: job.public[signer.Key].(*ecdsa.PublicKey)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	platform := spec.Services["iam"].Platform
+	der, err := x509.MarshalPKIXPublicKey(job.public[platform.Key])
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range registries {
+		want[id].Data["payment.jwks"] = string(keys)
+		want[id].Data["platform-public.pem"] = string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der}))
+		want[id].Data[platformVersionFile] = platform.Key
+	}
+	want[backendInputs].Data["cookie-keys.json"] = backend.Sealing[0].Content
+	if !reflect.DeepEqual(got, want) {
+		t.Fatal("unexpected manifests after migrating payment, backend and the platform key")
+	}
+	t.Run("load backend cookie key", func(t *testing.T) {
+		t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", filepath.Join(dir, "adc.json"))
+		client, err := gcp.New(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		kek, err := client.SymmetricKey(spec.Services["backend"].Sealing[0].KEK)
+		if err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(t.TempDir(), "cookie-keys.json")
+		writeTestFile(t, path, got[backendInputs].Data["cookie-keys.json"])
+		ring, err := sealing.Load(t.Context(), path, "backend", "cookie", kek)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ring.Close()
+		for _, identity := range [][2]string{{"iam", "cookie"}, {"backend", "sealing"}} {
+			if ring, err := sealing.Load(t.Context(), path, identity[0], identity[1], kek); err == nil {
+				ring.Close()
+				t.Fatal("cookie key accepted a different service or purpose")
+			}
+		}
+	})
+	if !reflect.DeepEqual(got, generate(t, got, testTime.Add(time.Hour))) {
+		t.Fatal("business KMS replay changed materials")
+	}
+	partial := cloneCluster(got)
+	partial[registries[1]] = old[registries[1]]
+	if !reflect.DeepEqual(got, generate(t, partial, testTime)) {
+		t.Fatal("partial platform migration did not converge")
+	}
+	fresh := generate(t, nil, testTime)
+	freshDER := raw(t, fresh, backendPrivate, "epay.der")
+	for _, id := range []objectID{backendPrivate, iamPrivate, paymentPrivate} {
+		if raw(t, fresh, id, "epay.der") != freshDER {
+			t.Fatal("development EPay private keys differ on fresh KMS seed")
+		}
+	}
+	otherKey := privateKey(t, []byte(freshDER)).(*rsa.PrivateKey)
+	otherDER, err := x509.MarshalPKIXPublicKey(&otherKey.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(fresh, generate(t, fresh, testTime)) {
+		t.Fatal("fresh business KMS seed changed on replay")
+	}
+
+	for _, tc := range []struct {
+		name   string
+		change func(cluster)
+	}{
+		{"reverted platform PEM", func(c cluster) { c[registries[2]].Data[platformPEM] = old[registries[2]].Data[platformPEM] }},
+		{"unrelated RSA PEM", func(c cluster) { c[registries[0]].Data[platformPEM] = publicKeyPEM(otherDER) }},
+		{"missing migrated PEM", func(c cluster) { delete(c[registries[1]].Data, platformPEM) }},
+		{"changed platform version", func(c cluster) { c[registries[1]].Data[platformVersionFile] += "0" }},
+		{"replaced cookie file", func(c cluster) { c[backendInputs].Data["cookie-keys.json"] = c[iamInputs].Data["data-keys.json"] }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := cloneCluster(got)
+			tc.change(c)
+			serve(t, c, false)
+			expectFailure(t)
+		})
+	}
+	t.Run("unrelated PEM before migration", func(t *testing.T) {
+		c := cloneCluster(old)
+		c[registries[0]].Data[platformPEM] = publicKeyPEM(otherDER)
+		serve(t, c, false)
+		expectFailure(t)
+	})
+	t.Run("removed backend", func(t *testing.T) {
+		without := businessTestSpec()
+		delete(without.Services, "backend")
+		writeTestFile(t, specPath, jsonFile(without))
+		serve(t, got, false)
+		expectFailure(t)
+	})
+	t.Run("removed platform", func(t *testing.T) {
+		without := businessTestSpec()
+		without.Services["iam"] = testSpec().Services["iam"]
+		writeTestFile(t, specPath, jsonFile(without))
+		writeTestFile(t, iamPath, jsonFile(oldIAM))
+		serve(t, got, false)
+		expectFailure(t)
+
+		// Enabling payment or backend first must not consume the platform transition.
+		beforePlatform := generate(t, old, testTime)
+		writeTestFile(t, specPath, jsonFile(spec))
+		writeTestFile(t, iamPath, jsonFile(iam))
+		if !reflect.DeepEqual(got, generate(t, beforePlatform, testTime)) {
+			t.Fatal("could not migrate the platform independently")
+		}
+	})
+}
+
 func TestKMSImportRejectsInvalidExports(t *testing.T) {
 	setupKubectl(t)
 	serve(t, nil, false)
-	spec := testSpec()
+	spec := businessTestSpec()
 	dir, _ := exportedDir(t, spec)
 	path := filepath.Join(dir, "exports", "iam.json")
 	data, err := os.ReadFile(path)
@@ -558,12 +787,27 @@ func TestKMSImportRejectsInvalidExports(t *testing.T) {
 		t.Fatal(err)
 	}
 	original := decoded[kmsExport](t, string(data))
+	weak, err := rsa.GenerateKey(rand.Reader, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	weakDER, err := x509.MarshalPKIXPublicKey(&weak.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, tc := range []struct {
 		name   string
 		change func(*kmsExport)
 	}{
 		{"format", func(e *kmsExport) { e.Format = specFormat }},
 		{"service", func(e *kmsExport) { e.Service = "ledger" }},
+		{"missing platform", func(e *kmsExport) { e.Platform = nil }},
+		{"platform key version", func(e *kmsExport) { e.Platform.Key += "0" }},
+		{"platform PEM type", func(e *kmsExport) {
+			e.Platform.Content = strings.ReplaceAll(e.Platform.Content, "PUBLIC KEY", "PRIVATE KEY")
+		}},
+		{"platform trailing data", func(e *kmsExport) { e.Platform.Content += "secret-in-input" }},
+		{"weak platform RSA", func(e *kmsExport) { e.Platform.Content = publicKeyPEM(weakDER) }},
 		{"missing signer", func(e *kmsExport) { e.Public = e.Public[:1] }},
 		{"extra sealing", func(e *kmsExport) { e.Sealing = append(e.Sealing, e.Sealing[0]) }},
 		{"signing order", func(e *kmsExport) { slices.Reverse(e.Public) }},
@@ -613,6 +857,18 @@ func TestKMSImportRejectsInvalidExports(t *testing.T) {
 	if _, err := loadKMSDir(dir); err != nil {
 		t.Fatal(err)
 	}
+	t.Run("unsolicited platform", func(t *testing.T) {
+		paymentPath := filepath.Join(dir, "exports", "payment.json")
+		var payment kmsExport
+		if err := readKMSJSON(paymentPath, &payment); err != nil {
+			t.Fatal(err)
+		}
+		payment.Platform = original.Platform
+		writeTestFile(t, paymentPath, jsonFile(payment))
+		expectFailure(t)
+		payment.Platform = nil
+		writeTestFile(t, paymentPath, jsonFile(payment))
+	})
 	if err := os.Remove(filepath.Join(dir, "exports", "ledger.json")); err != nil {
 		t.Fatal(err)
 	}

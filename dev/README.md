@@ -46,7 +46,7 @@ export KAIVO_STAGING_SEED="$PWD/.bin/kaivo-stagingseed"
 
 首次引导逐个应用 9 个 Secret 和 10 个 ConfigMap。sim 域的 `deposit-dataset/chain.json` 起初只有创世块，使 devchain 可在卖方登记前启动。重复引导会复用原私钥、凭据、签名生效时间、卖方审核资料和已初始化的行情。中断后可重跑，生成器从幸存副本补齐共享材料。三域公钥登记表、EPay、交易或查询密钥出现冲突时，生成器向 stderr 写入脱敏诊断，stdout 为空。已有公钥但对应私钥全部丢失时，需要恢复原私钥。请串行执行引导、行情更新和卖方 setup。
 
-启用 KMS 时，iam、ledger、reconciliation 分别用自己的 ServiceAccount 在集群内的一次性 Job 中运行 `kaivo-stagingseed kms-export <service>`。`KAIVO_KMS_SPEC_FILE` 指向 deploy 提供的规格，`GOOGLE_APPLICATION_CREDENTIALS` 指向该服务的工作负载身份配置。Job 将签名公钥和经解包验证的包裹密钥写到标准输出。每个服务只生成一次，将结果保存为 `exports/<service>.json`，与规格 `keys.json` 一起保存在 deploy 仓库。本机引导时将 `KAIVO_STAGING_KMS_DIR` 指向这个目录即可离线合并。重复引导复用同一份导出。密钥轮换另行处理。
+启用 KMS 时，iam、ledger、reconciliation、payment 和 backend 各自用本服务的 ServiceAccount 在集群内的一次性 Job 中运行 `kaivo-stagingseed kms-export <service>`，其中 payment 导出事件签名公钥，backend 导出门户 Cookie 包裹密钥，iam 可按规格导出 EPay V2 平台公钥，供三个命名空间发布。`KAIVO_KMS_SPEC_FILE` 指向 deploy 提供的规格，`GOOGLE_APPLICATION_CREDENTIALS` 指向该服务的工作负载身份配置。Job 将签名公钥和经解包验证的包裹密钥写到标准输出。每个服务只生成一次，将结果保存为 `exports/<service>.json`，与规格 `keys.json` 一起保存在 deploy 仓库。本机引导时将 `KAIVO_STAGING_KMS_DIR` 指向这个目录即可离线合并。重复引导复用同一份导出。密钥轮换另行处理。
 
 行情使用刚结束的 UTC 分钟，同一分钟按来源去重。以下 Bash 命令只更新三个 ConfigMap 的四个行情键。单独的 field manager 接管这些键，保留同属 `payment-inputs` 的 `seller-reviews.json`。账本历史达到 64 KiB 或行情达到 1 MiB 限制时，先归档已完成分钟再刷新。
 

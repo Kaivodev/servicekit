@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
+	"crypto/rsa"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,10 +18,16 @@ import (
 )
 
 type kmsExport struct {
-	Format  string          `json:"format"`
-	Service string          `json:"service"`
-	Public  []publicExport  `json:"public"`
-	Sealing []sealingExport `json:"sealing"`
+	Format   string          `json:"format"`
+	Service  string          `json:"service"`
+	Public   []publicExport  `json:"public"`
+	Sealing  []sealingExport `json:"sealing"`
+	Platform *platformExport `json:"platform,omitempty"`
+}
+
+type platformExport struct {
+	Key     string `json:"key"`
+	Content string `json:"content"`
 }
 
 type publicExport struct {
@@ -73,6 +81,25 @@ func exportKMS(ctx context.Context, service string, out io.Writer) error {
 			return err
 		}
 		export.Public = append(export.Public, publicExport{entry, jwks})
+	}
+	if entry := entries.Platform; entry.Key != "" {
+		key, err := client.SigningKey(entry.Key)
+		if err != nil {
+			return err
+		}
+		pub, err := key.PublicKey(ctx)
+		if err != nil {
+			return fmt.Errorf("KMS iam platform: %w", err)
+		}
+		rsaKey, ok := pub.(*rsa.PublicKey)
+		if !ok || rsaKey.N.BitLen() < 2048 {
+			return errors.New("KMS iam platform requires RSA of at least 2048 bits")
+		}
+		der, err := x509.MarshalPKIXPublicKey(rsaKey)
+		if err != nil {
+			return errors.New("encode platform public key failed")
+		}
+		export.Platform = &platformExport{Key: entry.Key, Content: publicKeyPEM(der)}
 	}
 	for i, entry := range entries.Sealing {
 		kek, err := client.SymmetricKey(entry.KEK)

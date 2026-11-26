@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
 	"fmt"
@@ -17,6 +18,7 @@ const (
 	exportFormat   = "kaivo.kms-export.v1"
 	reportRegistry = "ledger-report.jwks"
 	reportPEM      = "ledger-report-public.pem"
+	platformPEM    = "platform-public.pem"
 )
 
 type kmsSpec struct {
@@ -25,8 +27,27 @@ type kmsSpec struct {
 }
 
 type serviceSpec struct {
-	Signing []signingSpec `json:"signing"`
-	Sealing []sealingSpec `json:"sealing,omitempty"`
+	Signing  []signingSpec `json:"signing"`
+	Sealing  []sealingSpec `json:"sealing,omitempty"`
+	Platform platformSpec  `json:"platform,omitzero"`
+}
+
+type platformSpec struct {
+	Key string `json:"key"`
+	PEM string `json:"pem"`
+}
+
+// Only an omitted field may have the zero value. Reject null and empty objects.
+func (p *platformSpec) UnmarshalJSONFrom(d *jsontext.Decoder) error {
+	type plain platformSpec
+	if err := json.UnmarshalDecode(d, (*plain)(p)); err != nil {
+		return err
+	}
+	var names gcp.Client
+	if _, err := names.SigningKey(p.Key); err != nil || p.PEM != platformPEM {
+		return errors.New("invalid KMS platform key or PEM filename")
+	}
+	return nil
 }
 
 type signingSpec struct {
@@ -77,7 +98,12 @@ var kmsServices = map[string]struct {
 		inputs:       iamInputs,
 		sealingFiles: map[string]string{"data-keys.json": "", "epay-keys.json": ""},
 	},
-	"ledger": {registries: []string{"ledger.jwks", reportRegistry}},
+	"ledger":  {registries: []string{"ledger.jwks", reportRegistry}},
+	"payment": {registries: []string{"payment.jwks"}},
+	"backend": {
+		inputs:       backendInputs,
+		sealingFiles: map[string]string{"cookie-keys.json": "cookie"},
+	},
 	"reconciliation": {
 		registries:   []string{"reconciliation.jwks"},
 		inputs:       reconInputs,
@@ -104,7 +130,10 @@ func readKMSSpec(path string) (*kmsSpec, error) {
 		if !ok {
 			return nil, errors.New("unsupported KMS service")
 		}
-		if entries.Signing == nil && entries.Sealing == nil {
+		if entries.Platform.Key != "" && service != "iam" {
+			return nil, errors.New("only iam can export the KMS platform key")
+		}
+		if entries.Signing == nil && entries.Sealing == nil && entries.Platform.Key == "" {
 			return nil, fmt.Errorf("missing KMS %s key lists", service)
 		}
 		pemAssigned := false

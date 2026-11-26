@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -72,17 +73,26 @@ func signingKey(old materials, id objectID, file, publicFile string) (*ecdsa.Pri
 	return key, string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})), nil
 }
 
-func publishPEM(old, result materials, name string, key any, legacyReport *ecdsa.PublicKey) error {
+func publicKeyPEM(der []byte) string {
+	return string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der}))
+}
+
+type legacyPEMCheck func(fields, crypto.PublicKey) bool
+
+func publishPEM(old, result materials, name string, key crypto.PublicKey, allowLegacy legacyPEMCheck) error {
 	der, err := x509.MarshalPKIXPublicKey(key)
 	if err != nil {
 		return errors.New("encode public key failed")
 	}
-	value := string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der}))
+	value := publicKeyPEM(der)
 	for _, id := range registries {
 		if saved, ok := old[id][name]; ok {
 			savedDER := pemDER(saved, "PUBLIC KEY")
-			if !bytes.Equal(savedDER, der) && !unmigratedReport(old[id], savedDER, legacyReport) {
-				return invalid(id, name)
+			if !bytes.Equal(savedDER, der) {
+				pub, err := x509.ParsePKIXPublicKey(savedDER)
+				if err != nil || allowLegacy == nil || !allowLegacy(old[id], pub) {
+					return invalid(id, name)
+				}
 			}
 		}
 		result[id][name] = value
@@ -92,22 +102,14 @@ func publishPEM(old, result materials, name string, key any, legacyReport *ecdsa
 
 // Each namespace transitions independently during server-side apply. A report
 // registry already containing a KMS kid rules out the legacy PEM exception.
-func unmigratedReport(data fields, der []byte, legacy *ecdsa.PublicKey) bool {
-	if legacy == nil {
-		return false
+func unmigratedReport(legacy *ecdsa.PublicKey) legacyPEMCheck {
+	return func(data fields, pub crypto.PublicKey) bool {
+		saved, exists := data[reportRegistry]
+		return legacy.Equal(pub) && (!exists || registrySubset(saved, publicKeys{"ledger-report-dev": legacy}, true))
 	}
-	pub, err := x509.ParsePKIXPublicKey(der)
-	if err != nil || !legacy.Equal(pub) {
-		return false
-	}
-	saved, exists := data[reportRegistry]
-	if !exists {
-		return true
-	}
-	return registrySubset(saved, publicKeys{"ledger-report-dev": legacy}, true)
 }
 
-func epayKey(old, result materials) error {
+func epayKey(old, result materials, kms *kmsMaterials) error {
 	holders := []objectID{backendPrivate, iamPrivate, paymentPrivate}
 	const file = "epay.der"
 	var key *rsa.PrivateKey
@@ -128,7 +130,7 @@ func epayKey(old, result materials) error {
 		key, der = rsaKey, value
 	}
 	if key == nil {
-		if old.published("platform-public.pem") {
+		if old.published(platformPEM) {
 			return errors.New("EPay private key missing for registered public key")
 		}
 		var err error
@@ -145,7 +147,35 @@ func epayKey(old, result materials) error {
 	for _, id := range holders {
 		result[id][file] = der
 	}
-	return publishPEM(old, result, "platform-public.pem", &key.PublicKey, nil)
+	return publishPlatformPEM(old, result, &key.PublicKey, kms)
+}
+
+// The platform key has no JWKS kid. Record its version in the same ConfigMap
+// as its PEM so one namespace can migrate even if another is still on epay.der.
+const platformVersionFile = "platform-kms-version"
+
+func publishPlatformPEM(old, result materials, dev *rsa.PublicKey, kms *kmsMaterials) error {
+	if kms == nil || kms.platformKey == nil {
+		if old.published(platformVersionFile) {
+			return errors.New("registered KMS platform key missing from spec")
+		}
+		return publishPEM(old, result, platformPEM, dev, nil)
+	}
+	for _, id := range registries {
+		if version, migrated := old[id][platformVersionFile]; migrated {
+			if version != kms.platformVersion {
+				return invalid(id, platformVersionFile)
+			}
+			if _, present := old[id][platformPEM]; !present {
+				return invalid(id, platformPEM)
+			}
+		}
+		result[id][platformVersionFile] = kms.platformVersion
+	}
+	return publishPEM(old, result, platformPEM, kms.platformKey, func(data fields, pub crypto.PublicKey) bool {
+		_, migrated := data[platformVersionFile]
+		return !migrated && dev.Equal(pub)
+	})
 }
 
 var devSigningKeys = []struct {
@@ -161,7 +191,7 @@ var devSigningKeys = []struct {
 }
 
 func seedKeys(old, result materials, kms *kmsMaterials) error {
-	if err := epayKey(old, result); err != nil {
+	if err := epayKey(old, result, kms); err != nil {
 		return err
 	}
 	expected := map[string]publicKeys{}
@@ -186,10 +216,10 @@ func seedKeys(old, result materials, kms *kmsMaterials) error {
 		name := service.publicFile
 		if name == reportPEM {
 			current := &key.PublicKey
-			var legacy *ecdsa.PublicKey
+			var legacy legacyPEMCheck
 			if kms != nil && kms.reportKID != "" {
 				current = expected[reportRegistry][kms.reportKID]
-				legacy = &key.PublicKey
+				legacy = unmigratedReport(&key.PublicKey)
 			}
 			if err := publishPEM(old, result, name, current, legacy); err != nil {
 				return err
