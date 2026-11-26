@@ -51,7 +51,13 @@ func materialBytes(b []byte, desc pr.MessageDescriptor, m object) []byte {
 			if (k == "expected_plugin_control_version" || k == "credentials_sha256") && v == nil {
 				continue
 			}
-			require(v != nil, "missing approval field "+k)
+			if v == nil {
+				// Reconciliation encodes absent optional scalars with a zero
+				// presence byte, except for the two legacy extensions above.
+				require(desc.ParentFile().Package() == "aipay.reconciliation.v1", "missing approval field "+k)
+				b = append(b, 0)
+				continue
+			}
 			b = append(b, 1)
 		}
 		if f.IsList() {

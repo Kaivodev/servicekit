@@ -412,6 +412,7 @@ func (d *driver) dispute() {
 }
 
 var scenarios = map[string]func(*driver){
+	"coverage":       (*driver).coverage,
 	"seller-offline": (*driver).sellerOffline,
 	"bot-notices":    (*driver).botNotices,
 	"statement":      (*driver).statement,

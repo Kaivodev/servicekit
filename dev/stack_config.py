@@ -1,10 +1,12 @@
 """Shared inputs for the native and Compose development stacks."""
 import base64
 from datetime import datetime, timedelta, timezone
+from fractions import Fraction
 import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import secrets
 import shutil
 import subprocess
@@ -32,13 +34,15 @@ ORIGIN = "https://" + RP
 LEDGER_RATE_FILE_LIMIT = 64 << 10  # ledger/internal/fx/devfile.go
 
 
-def write(path, data):
+def write(path, data, *, mode=None):
     """Atomic replacement, including first creation. Never follow the destination."""
     data = data.encode() if isinstance(data, str) else data
     with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as f:
         try:
             f.write(data)
             f.flush()
+            if mode is not None:
+                os.fchmod(f.fileno(), mode)
             os.replace(f.name, path)
         finally:
             Path(f.name).unlink(missing_ok=True)
@@ -48,14 +52,45 @@ def dump(path, value):
     write(path, json.dumps(value, separators=(",", ":")) + "\n")
 
 
-def save_env(path, values):
+def save_env(path, values, **write_options):
     if any(any(c in str(v) for c in "\x00\r\n") for v in values.values()):
         raise ValueError("invalid multiline environment value")
-    write(path, "".join(f"{k}={v}\n" for k, v in values.items()))
+    write(path, "".join(f"{k}={v}\n" for k, v in values.items()), **write_options)
 
 
 def read_env(path):
     return dict(line.split("=", 1) for line in path.read_text().splitlines() if line)
+
+
+def coverage_mode(root, mode, validity=None):
+    path = root / "env/reconciliation.env"
+    values = read_env(path)
+    updated = values.copy()
+    source = "AIPAY_RECONCILIATION_COVERAGE_DEVELOPMENT_FILE"
+    period = "AIPAY_RECONCILIATION_COVERAGE_VALIDITY"
+    if validity is not None and mode != "attestation":
+        raise ValueError("--validity requires coverage attestation")
+    if mode == "attestation":
+        validity = "4m" if validity is None else validity
+        # Match time.ParseDuration units and reconciliation's whole-microsecond policy.
+        units = {"h": 3600000000000, "m": 60000000000, "s": 1000000000, "ms": 1000000,
+                 "us": 1000, "µs": 1000, "μs": 1000, "ns": 1}
+        parts = re.findall(r"([0-9]+(?:\.[0-9]*)?|\.[0-9]+)(ns|[uµμm]s|[smh])", validity.removeprefix("+"))
+        if not parts or "".join(n + u for n, u in parts) != validity.removeprefix("+"):
+            raise ValueError("expected a duration between 1m and 26h")
+        nanos = sum(int(Fraction(n) * units[u]) for n, u in parts)
+        if not units["m"] <= nanos <= 26 * units["h"] or nanos % 1000:
+            raise ValueError("coverage validity must be 1m to 26h at whole-microsecond precision")
+        updated.pop(source, None)
+        updated[period] = validity
+    elif mode == "file":
+        updated[source] = str(root / "inputs/reconciliation/coverage.json")
+        updated.pop(period, None)
+    elif mode != "status":
+        raise ValueError("unknown coverage mode")
+    if updated != values:
+        save_env(path, updated, mode=path.stat().st_mode & 0o777)
+    return ("file", "from coverage.json") if updated.get(source) else ("attestation", updated.get(period, "26h"))
 
 
 def seller_ceremony_env(root, iam_owner_dsn):

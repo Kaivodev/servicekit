@@ -14,7 +14,7 @@ import tempfile
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from stack_config import (DEPOSIT_SERVICES, GATEWAYS, LIBRARY, OWNERS, SERVICES, STATE, WORKSPACE,
-                          gateway_client_settings, native_deposit_inputs, prepare, read_env, refresh, save_env, switch_gateway_clients, upgrade_demo, write)
+                          coverage_mode, gateway_client_settings, native_deposit_inputs, prepare, read_env, refresh, save_env, switch_gateway_clients, upgrade_demo, write)
 from deposit_scenario import SPEC, generate
 from verify import verify
 import telemetry
@@ -191,6 +191,9 @@ def main():
     build_parser.add_argument("--workspace", action="store_true",
                               help="build owners and development tools with local workspace modules (pre-release checks)")
     sub.add_parser("transport").add_argument("mode", choices=("mtls", "plaintext", "status"))
+    coverage = sub.add_parser("coverage")
+    coverage.add_argument("mode", choices=("file", "attestation", "status"))
+    coverage.add_argument("--validity", metavar="DURATION", help="attestation lifetime (default 4m, range 1m to 26h)")
     modes = sub.add_parser("telemetry").add_subparsers(dest="mode", required=True)
     modes.add_parser("on").add_argument("--endpoint")
     modes.add_parser("off")
@@ -249,6 +252,11 @@ def main():
             print(config["mode"], config.get("endpoint", ""))
         elif args.action == "transport" and args.mode == "status":
             print(transport(ROOT))
+        elif args.action == "coverage":
+            if args.mode != "status" and request("reconciliation", "pid"):
+                raise ValueError("run down before changing coverage mode")
+            mode, validity = coverage_mode(ROOT, args.mode, args.validity)
+            print(f"coverage mode={mode}, validity={validity}. Changes take effect on the next up or reconciliation restart.")
         elif args.action in ("telemetry", "logs", "transport"):
             change_mode(ROOT, args.action, args.mode, getattr(args, "endpoint", None))
         elif args.action == "ledger-reader":

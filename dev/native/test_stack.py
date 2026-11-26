@@ -37,6 +37,18 @@ class Configuration(unittest.TestCase):
         contract = cfg.WORKSPACE / "backend/docs/examples/telegram-routes.json"
         if contract.exists():
             self.assertEqual(bot, json.loads(contract.read_text()))
+        coverage = [r for r in routes if r["path"].startswith("/api/v1/platform/coverage/")]
+        expected = [
+            ("GET", "status", "read"), ("GET", "addresses", "read"), ("GET", "attestations", "read"),
+            ("GET", "attestations/:id", "read"), ("POST", "attestations", "submit"),
+            ("POST", "attestations/approvals/:id/assertions", "approve"),
+            ("POST", "attestations/:id/revocation", "revoke"),
+        ]
+        self.assertEqual(coverage, [dict(method=m, path="/api/v1/platform/coverage/" + p,
+                                         permission="reconciliation.coverage." + perm, audiences=["reconciliation"])
+                                    for m, p, perm in expected])
+        staging = cfg.LIBRARY / "dev/tools/cmd/kaivo-stagingseed/routes.json"
+        self.assertEqual(json.loads(staging.read_text()), routes)
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             (root / "env").mkdir()
@@ -48,6 +60,57 @@ class Configuration(unittest.TestCase):
             self.assertEqual(reader["AIPAY_GRPC_ADDR"], "127.0.0.1:9122")
             self.assertEqual(reader["AIPAY_LEDGER_JOBS"], "off")
             self.assertEqual(processes.command(root,"ledger-reader"), [str(root / "bin/ledger"), "serve"])
+
+    def test_coverage_mode(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            path = root / "env/reconciliation.env"
+            path.parent.mkdir()
+            other = {"AIPAY_RECONCILIATION_ADMIN": "on", "OTHER": "with=equals"}
+            period = "AIPAY_RECONCILIATION_COVERAGE_VALIDITY"
+            initial = other | {"AIPAY_RECONCILIATION_COVERAGE_DEVELOPMENT_FILE":
+                               str(root / "inputs/reconciliation/coverage.json")}
+            cfg.save_env(path, initial)
+            path.chmod(0o640)
+            self.assertEqual(cfg.coverage_mode(root, "status"), ("file", "from coverage.json"))
+            self.assertEqual(cfg.coverage_mode(root, "attestation"), ("attestation", "4m"))
+            self.assertEqual(cfg.read_env(path), other | {period: "4m"})
+            with patch.object(cfg, "save_env", side_effect=AssertionError("unexpected rewrite")):
+                self.assertEqual(cfg.coverage_mode(root, "attestation"), cfg.coverage_mode(root, "status"))
+                for mode, value in [("file", "4m"), ("status", "4m")] + [
+                        ("attestation", v) for v in ("", "59.9s", "26h1us", "60s1ns", "4", "-1h", "1m!")]:
+                    with self.subTest(mode=mode, value=value), self.assertRaises(ValueError):
+                        cfg.coverage_mode(root, mode, value)
+            for duration in ("1m", "1m30.5s", "26h"):
+                self.assertEqual(cfg.coverage_mode(root, "attestation", duration), ("attestation", duration))
+                self.assertEqual(cfg.read_env(path), other | {period: duration})
+            self.assertEqual(cfg.coverage_mode(root, "file"), ("file", "from coverage.json"))
+            self.assertEqual(cfg.read_env(path), initial)
+            self.assertEqual(path.stat().st_mode & 0o777, 0o640)
+            with patch.object(cfg, "save_env", side_effect=AssertionError("unexpected rewrite")):
+                cfg.coverage_mode(root, "file")
+
+    def test_coverage_controller_while_running(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "prepared").touch()
+            (root / "env").mkdir()
+            path = root / "env/reconciliation.env"
+            cfg.save_env(path, {"AIPAY_RECONCILIATION_COVERAGE_VALIDITY": "4m"})
+            cwd = Path.cwd()
+            try:
+                with patch.object(stack, "ROOT", root), patch.object(stack, "request", return_value="123") as pid, \
+                     patch("os.umask"), patch("builtins.print") as output:
+                    for mode in ("file", "attestation"):
+                        with patch.object(sys, "argv", ["stack.py", "coverage", mode]), self.assertRaisesRegex(ValueError, "run down"):
+                            stack.main()
+                        pid.assert_called_with("reconciliation", "pid")
+                    with patch.object(sys, "argv", ["stack.py", "coverage", "status"]):
+                        stack.main()
+                    self.assertIn("mode=attestation, validity=4m", output.call_args.args[0])
+                    self.assertEqual(cfg.read_env(path), {"AIPAY_RECONCILIATION_COVERAGE_VALIDITY": "4m"})
+            finally:
+                os.chdir(cwd)
 
     def test_profiles(self):
         for compose in (False, True):
