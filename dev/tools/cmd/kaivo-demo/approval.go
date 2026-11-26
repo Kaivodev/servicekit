@@ -182,7 +182,12 @@ func (proposer *browser) approve(label, owner, path, assertPath string, body obj
 	material := obj(r["material"])
 	operation := obj(material[str(material, "kind")])
 	var sent object
-	if d.read("write/"+d.scope+"/"+label+"/body", &sent) {
+	if d.privateChannelApproval(path) {
+		sent = normalized(body)
+	} else {
+		d.read("write/"+d.scope+"/"+label+"/body", &sent)
+	}
+	if sent != nil {
 		switch {
 		case sent["change"] != nil:
 			require(matchesProposal(operation, obj(sent["change"])), "owner proposal differs from submitted change")

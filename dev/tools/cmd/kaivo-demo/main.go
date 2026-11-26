@@ -54,6 +54,8 @@ func executeContext(ctx context.Context, args []string) (err error) {
 	if action == "run" {
 		require(scenarios[target] != nil || funding || mode == "k8s" && localCapability(target), "unknown scenario")
 		scope = target
+	} else if action == "setup" && target == liveOffPhase {
+		scope = liveOffPhase
 	}
 	dir := filepath.Join(root, "demo")
 	if mode == "k8s" {
@@ -80,6 +82,18 @@ func executeContext(ctx context.Context, args []string) (err error) {
 	d := driverAt(root, repo, scope, dir)
 	d.ctx = ctx
 	d.output = output
+	d.liveEPay = target == livePhase && (action == "run" || action == "setup") || scope == liveOffPhase
+	if d.liveEPay {
+		d.trimSavedLiveLinks()
+		d.liveStep("测试上游运行条件", func() {
+			require(mode == "native", "epay-live requires gateway mode")
+			if scope == liveOffPhase {
+				require(d.gatewayMode(), "epay-live requires gateway mode")
+			} else {
+				d.checkLivePrerequisites(action)
+			}
+		})
+	}
 	var kube *kubeEnvironment
 	if mode == "k8s" {
 		kube = newKubeEnvironment(ctx, dir)
@@ -123,6 +137,11 @@ func executeContext(ctx context.Context, args []string) (err error) {
 			run  func()
 		}
 		phases := []phase{{"iam", d.identities}, {"registry", d.registration}, {"packages", d.packages}, {"seller", d.seller}, {"channels", d.channels}, {"merchant", d.merchant}}
+		if target == livePhase {
+			phases = append(phases, phase{livePhase, d.setupLiveEPay})
+		} else if target == liveOffPhase {
+			phases = append(phases, phase{liveOffPhase, d.disableLiveEPay})
+		}
 		if funding {
 			phases = append(phases, phase{target, d.deposits})
 		}

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -15,7 +16,13 @@ import (
 // All owner evidence is read inside a PostgreSQL-enforced read-only transaction.
 // Callers select named public facts. Never return row payloads, credentials or DSNs.
 func (d *driver) rows(owner, source, query string, args ...any) []object {
-	ctx, cancel := context.WithTimeout(d.ctx, 20*time.Second)
+	rows, err := d.queryRows(d.ctx, owner, source, query, args...)
+	check(err)
+	return rows
+}
+
+func (d *driver) queryRows(parent context.Context, owner, source, query string, args ...any) ([]object, error) {
+	ctx, cancel := context.WithTimeout(parent, 20*time.Second)
 	defer cancel()
 	var c *pgx.Conn
 	var e error
@@ -28,15 +35,25 @@ func (d *driver) rows(owner, source, query string, args ...any) []object {
 		if e == nil || ctx.Err() != nil {
 			break
 		}
-		time.Sleep(500 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(500 * time.Millisecond):
+		}
 	}
-	require(e == nil, owner+" evidence connection failed")
+	if e != nil {
+		return nil, errors.New(owner + " evidence connection failed")
+	}
 	defer c.Close(ctx)
 	tx, e := c.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
-	require(e == nil, "cannot begin read-only evidence transaction")
+	if e != nil {
+		return nil, errors.New("cannot begin read-only evidence transaction")
+	}
 	defer tx.Rollback(ctx)
 	rows, e := tx.Query(ctx, "SELECT to_jsonb(facts) FROM ("+query+") AS facts", args...)
-	require(e == nil, "read-only evidence query failed: "+source)
+	if e != nil {
+		return nil, errors.New("read-only evidence query failed: " + source)
+	}
 	defer rows.Close()
 	out := []object{}
 	for rows.Next() {
@@ -46,8 +63,10 @@ func (d *driver) rows(owner, source, query string, args ...any) []object {
 		decode(b, &v)
 		out = append(out, v)
 	}
-	require(rows.Err() == nil, "evidence read failed: "+source)
-	return out
+	if rows.Err() != nil {
+		return nil, errors.New("evidence read failed: " + source)
+	}
+	return out, nil
 }
 func (d *driver) bootstrapSealed(manifest string) bool {
 	rows := d.rows("iam", "iam_bootstrap_seal", "SELECT ceremony_id,encode(manifest_sha256,'hex') AS digest FROM iam_bootstrap_seal")

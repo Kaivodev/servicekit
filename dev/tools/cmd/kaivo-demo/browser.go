@@ -134,7 +134,12 @@ func (b *browser) apiGrant(method, path, key string, body object, grant string) 
 	if postReleaseEntry && (code == 404 || code == 405 || code == 501) {
 		stop("已放币争议登记缺入口：POST %s 返回 HTTP %d", label, code)
 	}
-	decode(out, &env)
+	if b.d.liveEPay {
+		// A malformed envelope or backend diagnostic may echo a submitted value.
+		require(decodeJSON(out, &env) == nil, "invalid portal response")
+	} else {
+		decode(out, &env)
+	}
 	if code != 200 || env.Code != 200 {
 		if postReleaseEntry {
 			switch env.Code {
@@ -148,23 +153,38 @@ func (b *browser) apiGrant(method, path, key string, body object, grant string) 
 			delete(b.d.data, "session-until/"+b.name)
 			b.d.save()
 		}
+		if b.d.liveEPay {
+			stop("%s %s → HTTP %d, backend code %d", method, label, code, env.Code)
+		}
 		stop("%s %s → HTTP %d, backend code %d (%s)", method, label, code, env.Code, env.Message)
 	}
 	return env.Data
 }
 func (b *browser) post(path string, body object) object { return b.api("POST", path, "", body) }
 
-// Keep the original body (including assertion bytes) and key across ambiguous writes.
+// Config proposals and both assertion responses carry the PID in signed material.
+func (d *driver) privateChannelApproval(path string) bool {
+	return d.liveEPay && ((strings.HasPrefix(path, "/channel-accounts/") && path != "/channel-accounts/credentials") ||
+		strings.HasPrefix(path, "/verification/accounts/"))
+}
+
+// Rebuild private bodies in memory. Recover their results from the owner
+// with the same key and the original assertion after an ambiguous write.
 func (b *browser) write(label, path string, makeBody func() object) object {
 	d := b.d
+	privateApproval := d.privateChannelApproval(path)
+	seal := path == "/channel-accounts/credentials" || path == "/verification/credentials"
+	privateResult := privateApproval || d.liveEPay && seal
 	k := "write/" + d.scope + "/" + label
 	var response object
-	if d.read(k+"/result", &response) {
+	if !privateResult && d.read(k+"/result", &response) {
 		return response
 	}
 	var body object
-	if path == "/plugins" || path == "/verification/plugins" || path == "/channel-accounts/credentials" ||
-		path == "/verification/credentials" && (!d.native() || d.gatewayMode()) {
+	privateBody := privateApproval && !strings.HasSuffix(path, "/assertions")
+	upload := path == "/plugins" || path == "/verification/plugins" || path == "/channel-accounts/credentials" ||
+		path == "/verification/credentials" && (d.liveEPay || !d.native() || d.gatewayMode())
+	if privateBody || upload {
 		body = makeBody()
 		digest := fmt.Sprintf("%x", sha256.Sum256(encoded(body)))
 		require(d.value(k+"/body-sha", func() string { return digest }) == digest, "changed upload on retry")
@@ -173,7 +193,9 @@ func (b *browser) write(label, path string, makeBody func() object) object {
 		d.put(k+"/body", body)
 	}
 	response = b.api("POST", path, d.key(k), body)
-	d.put(k+"/result", response)
+	if !privateResult {
+		d.put(k+"/result", response)
+	}
 	return response
 }
 func (d *driver) password(name string) string {

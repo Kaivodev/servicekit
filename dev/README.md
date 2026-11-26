@@ -56,6 +56,26 @@ stack demo run cancel
 
 `packages` 制作四个包，`channels` 复用已完成的 md5 步骤，先将旧通道上限双批收窄到 100 分，再开通 EPay。若 EPay 已绑定旧凭据，驱动会重新密封，在支付插件绑定前核对交易凭据的引用和摘要。任一不符时，按通道当前版本双批更新，并保留启用状态。seller-offline 要求 EPay 下线期间拒绝 2.00 元新单，只调优先级仍会让该单落到 form-md5。
 
+### EPay 测试上游联调
+
+用于在网关模式验证一笔 1.11 元真实收款、主动查单和独立放币。先完成常规 `demo setup`，由运营者提供权限为 `0600` 的凭据文件，内含 `EPAY_TEST_BASE_URL`、`EPAY_TEST_PID` 和 `EPAY_TEST_KEY`。两个已发布 EPay 包的 manifest 都须允许该主机。测试上游须显式开通。
+
+```sh
+export KAIVO_DEMO_EPAY_LIVE_FILE=/path/to/private/epay-test.env
+python3 -B dev/native/stack.py demo setup epay-live
+python3 -B dev/native/stack.py demo run epay-live
+```
+
+| 场景 | 选路与付款 | 状态 |
+|---|---|---|
+| `epay-live` | 同一卖方的测试上游只接 111 分，优先级 0 排在两条优先级 1 的模拟器通道前。驱动核对实际通道账户后，将完整付款链接打印到 stdout，付款人可直接打开含 PID 的链接。报告和检查点仅记录 `scheme://host/path`。 | 待验证机 |
+
+联调使用已有商户 V1 应用向 `/mapi.php` 下单。V1 应答无需 RSA 签名，可以交付带 `?pid=…&sign=…` 的完整付款链接。backend 的 V2 应答签名不接受字段值中的原始 `&`，已作为 backend 问题另报。
+
+真实上游的回调到不了本机。payment 对未付订单的主动查单间隔最长 10 分钟，付款后可能还要等约 10 分钟才能确认。驱动每 15 秒检查一次本机账本，`AIPAY_DEMO_EPAY_LIVE_WAIT` 默认 `30m`。超时后可重跑原命令继续等待同一笔订单。
+
+放币并记录网关证据后，驱动自动停用测试通道。付款失败或中途放弃时，可单独执行 `python3 -B dev/native/stack.py demo setup epay-live-off` 停止新派单。可以重复执行，已停用时会跳过。停用不关单、不退款。凭据仍留在本机交易网关和核验网关的数据库中，随本机栈删除。
+
 ## 预发开发材料
 
 从 servicekit 根目录构建 `kaivo-stagingseed`，再运行 deploy 的引导脚本。生成器从当前 kubectl context 读取四个预发命名空间中的受管对象，只通过 stdout 管道交付材料。对象、键名和挂载方式见 [deploy 的 servicekit 开发材料接口](../../deploy/README.md#servicekit-开发材料接口)。
@@ -233,7 +253,7 @@ stack demo run statement -o ../.local/dev/native/demo/reports/statement.md
 ```
 
 - `demo setup [iam|registry|packages|seller|channels|merchant]` 可单独运行某个阶段。无参数时依次开通，首个真实失败会停止。本机 mTLS 和 Compose 由 payment.env 中的网关地址选择 Rust ABI v3；本机 plaintext 和 UG-4b 之前的 K8s 演示使用 Go 1.27.3 与 upstream-plugins v0.2.2。Rust 工具链与预制包布局见[演示制包](demo.md#网关制包与凭据)。
-- 网关制包或预制包目录需要四包，分别是 `epay_v1`、`epay_v1_verify`、`sim_form_md5`、`sim_form_md5_verify`。同一卖方按金额分流，101–10000000 分走 EPay（`epay-demo`，PID 1001），1–100 分走 form-md5（`md5-demo`）。本机 plaintext、K8s 的 form-md5 继续覆盖 1–10000000 分。
+- 网关制包或预制包目录需要四包，分别是 `epay_v1`、`epay_v1_verify`、`sim_form_md5`、`sim_form_md5_verify`。默认两条模拟器通道按金额分流，101–10000000 分走 EPay（`epay-demo`，PID 1001），1–100 分走 form-md5（`md5-demo`）。本机 plaintext、K8s 的 form-md5 继续覆盖 1–10000000 分。
 - main、duplicates、dispute、seller-offline、bot-notices、statement、archived-work、cancel 下单 2.00 元。refund-insufficient、refund-before-release、refund-after-release、dispute-refund-before-release、dispute-refund-after-release 下单 1.00 元。EPay 插件不支持退款，退款场景保留在 form-md5，待 UG-8 人工退款演示接入。每笔原单的实际通道记录在报告中。
 - EPay 两实例的 `unpaid_timeout_seconds` 等于 payment 的付款指令有效期加 1 小时，向上取整秒。默认 10 分钟对应 T=4200 秒。cancel 在关单前只回拨原单查单应答的建单时间 T+120 秒，未付单须经两次间隔至少 5 秒的独立观测才归还担保。迟付单在首次观测后仍可收银付款。
 - 第 11 轮四个场景已于 2026-11-24 在本机进程栈通过，结果见[验证机记录](#2026-11-24-第-11-轮演示验收)。卖方场景会切换该金额对应的通道，通知场景会绑定演示商户群。归档场景按 payment 的真实退避等待，可用 `AIPAY_DEMO_ARCHIVE_WAIT=0s` 立即检查并留待续跑。对账场景优先使用已有文件，新栈可能要等到下一次 UTC+8 零点。详见[步骤与证据](demo.md#第-11-轮运行条件)。

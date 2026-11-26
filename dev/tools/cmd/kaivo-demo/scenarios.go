@@ -126,6 +126,8 @@ type tradeRun struct {
 
 func scenarioOrder(scenario string, gateway bool) (amount, channel string) {
 	switch scenario {
+	case livePhase:
+		return "1.11", epayChannel
 	case "main", "duplicates", "dispute", "seller-offline", "bot-notices", "statement", "archived-work", "cancel":
 		if gateway {
 			return "2.00", epayChannel
@@ -152,16 +154,27 @@ func (d *driver) createParams(number, amount string) url.Values {
 // endpoint. On resume this also recovers pre-UG-7 embedded order amounts.
 func (t tradeRun) readOrderRoute() (order, code, money string) {
 	d := t.d
-	rows := d.rows("payment", "payment_orders", `SELECT id::text AS order_id,channel_code,
+	rows := d.rows("payment", "payment_orders", `SELECT id::text AS order_id,channel_code,channel_account_id,
 		(data#>>'{snapshot,trade,quote,fiat_amount}')::bigint AS amount_minor FROM payment_orders
 		WHERE account_id=$1 AND application_id=$2 AND out_trade_no=$3`, d.required("merchant-account"), d.required("app/"+t.proto), t.number)
 	require(len(rows) == 1, "order for merchant number not found")
-	order, code = str(rows[0], "order_id"), str(rows[0], "channel_code")
-	cents := num(rows[0], "amount_minor")
+	return t.checkOrderRoute(rows[0])
+}
+
+func (t tradeRun) checkOrderRoute(row object) (order, code, money string) {
+	d := t.d
+	order, code = str(row, "order_id"), str(row, "channel_code")
+	cents := num(row, "amount_minor")
 	money = fmt.Sprintf("%d.%02d", cents/100, cents%100)
 	d.evidence("订单 ID", order)
 	d.evidence("订单通道", code)
 	d.evidence("订单金额（元）", money)
+	if d.scope == livePhase {
+		account := str(row, "channel_account_id")
+		d.evidence("channel_account_id", account)
+		require(account == d.required("uuid/"+channelKey(liveVariant, "channel")),
+			fmt.Sprintf("order routed to %s channel account %s instead of the EPay test upstream", code, account))
+	}
 	gateway := d.gatewayMode()
 	amount, expected := scenarioOrder(d.scope, gateway)
 	require(code == expected, fmt.Sprintf("order %s routed to %s, expected %s", order, code, expected))
@@ -171,10 +184,9 @@ func (t tradeRun) readOrderRoute() (order, code, money string) {
 	return order, code, money
 }
 
-func (d *driver) trade(name, proto string) tradeRun {
-	amount, _ := scenarioOrder(d.scope, d.gatewayMode())
-	t := tradeRun{d: d, name: name, proto: proto, number: d.key(d.scope + "/" + name)}
-	k := d.scope + "/" + name
+func (t tradeRun) baseline() {
+	d := t.d
+	k := d.scope + "/" + t.name
 	t.step("余额基线", func() {
 		snap := d.balanceSnapshotFrom(k+"/before", d.waitForIdleBalances())
 		d.put("balances/"+k, snap)
@@ -183,6 +195,13 @@ func (d *driver) trade(name, proto string) tradeRun {
 			stop("缺样本：卖方可用 USDT 为零；请核对 setup seller 的正常预存步骤")
 		}
 	})
+}
+
+func (d *driver) trade(name, proto string) tradeRun {
+	amount, _ := scenarioOrder(d.scope, d.gatewayMode())
+	t := tradeRun{d: d, name: name, proto: proto, number: d.key(d.scope + "/" + name)}
+	k := d.scope + "/" + name
+	t.baseline()
 	t.step("下单与冻结", func() {
 		v := d.createParams(t.number, amount)
 		path := "/mapi.php"
@@ -281,6 +300,13 @@ func (t tradeRun) finish(released bool) object {
 		q, n, f = 0, 0, 0
 	}
 	d.evidence("after", after)
+	if d.liveEPay {
+		delta := object{}
+		for _, balance := range []string{"seller", "merchant", "ledger_fee_accounts"} {
+			delta[balance] = num(after, balance) - num(before, balance)
+		}
+		d.evidence("balance_delta_usdt_micro", delta)
+	}
 	checkBalanceDelta(before, after, -q, n, f)
 	return after
 }
@@ -304,6 +330,9 @@ func (t tradeRun) release() object {
 		calls := t.d.rows("reconciliation", "reconciliation_verification_evidence", "SELECT id,verified_at FROM reconciliation_verification_evidence WHERE order_id=$1 AND eligible AND operation='query_payment' AND convert_from(record_json,'UTF8')::jsonb->>'Outcome'='paid'", t.order)
 		require(len(calls) > 0, "missing independent paid verification")
 		t.d.evidence("reconciliation_release", auth)
+		if t.d.liveEPay {
+			t.d.evidence("independent_paid_observations", calls)
+		}
 		t.finish(true)
 	})
 	return obj(step.Evidence["after"])
@@ -528,6 +557,7 @@ func (d *driver) dispute() {
 }
 
 var scenarios = map[string]func(*driver){
+	livePhase:        (*driver).runLiveEPay,
 	"coverage":       (*driver).coverage,
 	"seller-offline": (*driver).sellerOffline,
 	"bot-notices":    (*driver).botNotices,
@@ -558,6 +588,9 @@ func (d *driver) releasedTrade(copies int) {
 func (d *driver) run(s string) {
 	var complete bool
 	if d.read("finished/"+s, &complete) && complete {
+		if s == livePhase {
+			d.disableLiveEPay()
+		}
 		return
 	}
 	d.liveStep("场景会话与行情", func() {

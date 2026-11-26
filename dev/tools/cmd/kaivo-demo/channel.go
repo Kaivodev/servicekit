@@ -10,11 +10,18 @@ import (
 )
 
 // Existing form-md5 installations resume the original ceremony checkpoints.
-func channelKey(code, key string) string {
-	if code == epayChannel {
-		return key + "/" + code
+func channelKey(variant, key string) string {
+	if variant == epayChannel || variant == liveVariant {
+		return key + "/" + variant
 	}
 	return key
+}
+
+func channelStepName(variant, label string) string {
+	if variant == liveVariant {
+		label = "测试上游 " + label
+	}
+	return channelKey(variant, label)
 }
 
 func simulatorAccount(code string) string {
@@ -42,6 +49,7 @@ func unpaidTimeoutSeconds(raw string) int64 {
 
 type channelSpec struct {
 	name, minAmount, maxAmount string
+	priority                   int
 	tradeFile, queryFile       string
 	tradeKey, queryKey         string
 	tradeConfig, queryConfig   object
@@ -52,7 +60,7 @@ func channelSetup(code string, gateway bool, address, timeout string) channelSpe
 		query := object{"gateway": address, "pid": "1001", "unpaid_timeout_seconds": timeout}
 		trade := maps.Clone(query)
 		trade["product_name"] = "Demo payment"
-		return channelSpec{name: "Demo EPay V1", minAmount: "101", maxAmount: "10000000",
+		return channelSpec{name: "Demo EPay V1", priority: 1, minAmount: "101", maxAmount: "10000000",
 			tradeFile: "handoff/epay.json", queryFile: "handoff/epay.json", tradeKey: "merchant_key", queryKey: "merchant_key",
 			tradeConfig: trade, queryConfig: query}
 	}
@@ -61,7 +69,7 @@ func channelSetup(code string, gateway bool, address, timeout string) channelSpe
 	if gateway {
 		maxAmount = "100"
 	}
-	return channelSpec{name: "Demo MD5", minAmount: "1", maxAmount: maxAmount,
+	return channelSpec{name: "Demo MD5", priority: 1, minAmount: "1", maxAmount: maxAmount,
 		tradeFile: "handoff/trade.json", queryFile: "handoff/query.json", tradeKey: "shared", queryKey: "query_key",
 		tradeConfig: config, queryConfig: config}
 }
@@ -99,10 +107,15 @@ func (d *driver) channels() {
 	}
 }
 
-func (d *driver) setupChannel(code string, gateway bool) {
+func (d *driver) setupChannel(variant string, gateway bool) {
+	live := variant == liveVariant
+	code := variant
+	if live {
+		code = epayChannel
+	}
 	op := d.browser("operations")
-	key := func(k string) string { return channelKey(code, k) }
-	step := func(label string, run func()) { d.step(key(label), run) }
+	key := func(k string) string { return channelKey(variant, k) }
+	step := func(label string, run func()) { d.step(channelStepName(variant, label), run) }
 	epay := code == epayChannel
 	var timeout string
 	if epay {
@@ -110,12 +123,12 @@ func (d *driver) setupChannel(code string, gateway bool) {
 		require(d.value(key("unpaid-timeout"), func() string { return timeout }) == timeout,
 			"payment instruction TTL changed since EPay channel setup")
 	}
-	spec := channelSetup(code, gateway, d.addresses().gateway, timeout)
-	for _, plugin := range []struct{ code, owner, path string }{{code, "payment", "/plugins"}, {code + "_verify", "reconciliation", "/verification/plugins"}} {
-		d.step("双批发布 "+plugin.code, func() {
-			m := op.approve(plugin.code, plugin.owner, plugin.path, plugin.path, d.upload(plugin.code))
-			d.put("plugin/"+plugin.code, str(obj(m["plugin_version"]), "plugin_version_id"))
-		})
+	var spec channelSpec
+	if live {
+		spec = liveChannelSpec(d.liveCredentials(), timeout)
+	} else {
+		spec = channelSetup(code, gateway, d.addresses().gateway, timeout)
+		d.publishChannelPlugins(code)
 	}
 	ch := d.key(key("channel"))
 	if gateway {
@@ -124,9 +137,8 @@ func (d *driver) setupChannel(code string, gateway bool) {
 			tradeStep, sealLabel = "商户密钥凭据", "seal-merchant-key"
 		}
 		step(tradeStep, func() {
-			var creds map[string]string
-			decode(d.input(spec.tradeFile), &creds)
-			require(len(creds) == 1 && creds[spec.tradeKey] != "", "missing simulator trade credential")
+			creds := d.channelCredentials(variant, spec.tradeFile, spec.tradeKey)
+			require(len(creds) == 1 && creds[spec.tradeKey] != "", "missing trade credential")
 			b := credentialBytes(creds)
 			r := op.write(key(sealLabel), "/channel-accounts/credentials", func() object {
 				return object{"channel_account_id": ch, "channel_code": code, "credentials_json": b64.EncodeToString(b)}
@@ -161,7 +173,7 @@ func (d *driver) setupChannel(code string, gateway bool) {
 			}
 		}
 		require(len(digest) == 32, "payment requires a verified seller review in its configured development seller reviews file")
-		c := object{"channel_account_id": ch, "channel_code": code, "name": spec.name, "seller_account_id": seller, "seller_review_sha256": b64.EncodeToString(digest), "payment_methods": []string{"alipay"}, "fiat_currency": "CNY", "min_amount_fiat_minor": spec.minAmount, "max_amount_fiat_minor": spec.maxAmount, "daily_limit_fiat_minor": "100000000", "priority": 1, "weight": 1, "credentials_ref": "sim-md5-v1", "config_json": conf, "enabled": enabled, "callback_source_cidrs": d.callbackCIDRs()}
+		c := object{"channel_account_id": ch, "channel_code": code, "name": spec.name, "seller_account_id": seller, "seller_review_sha256": b64.EncodeToString(digest), "payment_methods": []string{"alipay"}, "fiat_currency": "CNY", "min_amount_fiat_minor": spec.minAmount, "max_amount_fiat_minor": spec.maxAmount, "daily_limit_fiat_minor": "100000000", "priority": spec.priority, "weight": 1, "credentials_ref": "sim-md5-v1", "config_json": conf, "enabled": enabled, "callback_source_cidrs": d.callbackCIDRs()}
 		if gateway {
 			c["credentials_ref"] = d.required(key("trade-ref"))
 			c["credentials_sha256"] = d.required(key("trade-digest"))
@@ -196,7 +208,7 @@ func (d *driver) setupChannel(code string, gateway bool) {
 		approved := d.browser("risk").approve(key("risk"), "payment", "/risk-policies/requests", "/risk-policies", object{"change": object{"risk_policy_version": d.key(key("risk")), "channel_account_id": ch, "hold_duration_seconds": 20, "exceptional_extension_seconds": 60, "dispute_handling_timeout_seconds": 120, "effective_at": effect(), "expected_control_version": 0}})
 		d.put(key("effective/risk"), str(obj(approved["risk_policy"]), "effective_at"))
 	})
-	if epay {
+	if epay && !live {
 		d.liveStep(key("EPay 通道凭据核对"), func() {
 			current := op.api("GET", "/channel-accounts/"+ch, "", nil)
 			c := obj(current["configuration"])
@@ -239,7 +251,15 @@ func (d *driver) setupChannel(code string, gateway bool) {
 				d.sleep(delay)
 			}
 		}
-		submit("enable-channel", "channel-accounts", object{"change": object{"configuration": config(true), "expected_control_version": version()}})
+		v := version()
+		if live {
+			// Replaying an approved enable must use its original version.
+			versionKey := key("enable-control-version")
+			if !d.read(versionKey, &v) {
+				d.put(versionKey, v)
+			}
+		}
+		submit("enable-channel", "channel-accounts", object{"change": object{"configuration": config(true), "expected_control_version": v}})
 	})
 	if gateway && code == md5Channel {
 		d.liveStep("form-md5 通道限额 1.00 元", func() {
@@ -261,12 +281,14 @@ func (d *driver) setupChannel(code string, gateway bool) {
 		witnessStep = "EPay 同钥凭据见证"
 	}
 	step(witnessStep, func() {
-		var creds map[string]string
-		decode(d.input(spec.queryFile), &creds)
-		source := spec.witnessSource(code, creds, d.input("inputs/upstream-sim/config.json"))
+		creds := d.channelCredentials(variant, spec.queryFile, spec.queryKey)
+		source := "operator-file/EPAY_TEST_KEY"
+		if !live {
+			source = spec.witnessSource(code, creds, d.input("inputs/upstream-sim/config.json"))
+		}
 		b := encoded(creds)
 		if gateway {
-			require(len(creds) == 1, "unexpected simulator query credential")
+			require(len(creds) == 1, "unexpected verification credential fields")
 			b = credentialBytes(creds)
 		}
 		sum := sha256.Sum256(b)
@@ -292,4 +314,23 @@ func (d *driver) setupChannel(code string, gateway bool) {
 		p = "/verification/enables"
 		op.approve(key("verification-enable"), "reconciliation", p+"/requests", p, object{"verification_account_id": verifyID, "expected_control_version": num(v, "control_version"), "plugin_version_id": d.required("plugin/" + code + "_verify")})
 	})
+}
+
+func (d *driver) publishChannelPlugins(code string) {
+	op := d.browser("operations")
+	for _, plugin := range []struct{ code, owner, path string }{{code, "payment", "/plugins"}, {code + "_verify", "reconciliation", "/verification/plugins"}} {
+		d.step("双批发布 "+plugin.code, func() {
+			m := op.approve(plugin.code, plugin.owner, plugin.path, plugin.path, d.upload(plugin.code))
+			d.put("plugin/"+plugin.code, str(obj(m["plugin_version"]), "plugin_version_id"))
+		})
+	}
+}
+
+func (d *driver) channelCredentials(variant, path, field string) map[string]string {
+	if variant == liveVariant {
+		return map[string]string{field: d.liveCredentials().key}
+	}
+	var creds map[string]string
+	decode(d.input(path), &creds)
+	return creds
 }

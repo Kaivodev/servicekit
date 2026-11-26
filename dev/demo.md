@@ -36,12 +36,33 @@ stack demo run cancel
 | 模式与通道 | 模拟器账户 | 金额范围（分） | 场景及每单金额 |
 |---|---|---:|---|
 | 网关 `epay_v1` | `epay-demo`，PID 1001 | 101–10000000 | main、duplicates、dispute、seller-offline、bot-notices、statement、archived-work、cancel，每单 2.00 元 |
+| 网关 `epay_v1` 测试上游（显式开通） | 运营者提供的测试商户 | 111 | epay-live，1.11 元，优先级 0 |
 | 网关 `sim_form_md5` | `md5-demo` | 1–100 | refund-insufficient、refund-before-release、refund-after-release、dispute-refund-before-release、dispute-refund-after-release，每单 1.00 元 |
 | 本机 plaintext、K8s 的 `sim_form_md5` | `md5-demo` | 1–10000000 | 按上述场景取 2.00 或 1.00 元，两种金额均走 form-md5 |
 
 同一卖方使用同一支付方式，payment 按金额筛选候选通道。渠道定价、风控、核验账户各按通道双批，商户平台默认定价只开通一次。报告从 `payment_orders` 读取原单通道和金额，随后按实际账户设置单笔测试场景。payment 用 `AIPAY_PLUGIN_CALLBACK_URL=http://<backend>/callback/{channel_code}` 派发通知地址，EPay 用 GET 通知，form-md5 用 POST。EPay 插件不提供退款，五个退款场景保留 form-md5 的自动退款验收，后续按 UG-8 切换演示为卖方人工退款。
 
 交易和核验配置使用同一个 T。驱动从 payment.env 读取 `AIPAY_PLUGIN_INSTRUCTION_TTL`，加 1 小时后向上取整秒。默认 10 分钟得到 `"4200"`。EPay 的两笔 cancel 订单在商户关单前对各自的模拟器场景写入 `query_addtime_backdate_seconds=T+120`（默认 4320）。它只回拨查单应答的 `addtime`。插件在未付超时后返回 `closed`，上游收银页仍可付款。
+
+## EPay 测试上游联调
+
+网关栈先完成常规开通和商户 V1 应用的收款资格。运营者提供权限为 `0600` 的普通文件，每行一个 `KEY=VALUE`，分别填写 `EPAY_TEST_BASE_URL`（HTTPS 根地址）、`EPAY_TEST_PID`（无前导零的正整数）、`EPAY_TEST_KEY`（无空白和控制字符）。包的发布审批材料中，`epay_v1` 和 `epay_v1_verify` 的 `domains` 都须列出该主机名。
+
+```sh
+export KAIVO_DEMO_EPAY_LIVE_FILE=/path/to/private/epay-test.env
+python3 -B dev/native/stack.py demo setup epay-live
+python3 -B dev/native/stack.py demo run epay-live
+```
+
+无参数 setup 只开通常规通道。显式 setup 为同一卖方新增「EPay 测试上游」，沿用已发布的两份插件。按 A136 ③，交易侧通过 payment 的 `StoreChannelCredentials` 密封 KEY，核验侧以 `operator-file/EPAY_TEST_KEY` 见证同一规范摘要，再独立密封。续跑时驱动重新读取文件，三项值须与首次开通一致。报告中的网关地址只展示主机名，PID 标为 `<configured>`。
+
+两条模拟器通道优先级为 1。测试上游只接 111 分，优先级为 0，payment 先选它。联调通过商户 V1 的 `/mapi.php` 下单，因为 backend 的 V2 应答签名不接受字段值中的原始 `&`，已作为 backend 问题另报。
+
+V1 返回 HTTP 200 且 `code == 1` 时，驱动优先取 `payurl`，缺省时取 `qrcode`。核对原单的通道账户 ID 后，驱动将完整链接打印到 stdout，供付款人在浏览器支付 1.11 元。链接可以带上游 PID 和签名等多个参数。原文或任一层 URL 解码后含 KEY 的链接会被拒绝。报告和检查点只保留 `scheme://host/path`。
+
+真实上游的回调到不了本机，payment 对未付订单的主动查单间隔最长 10 分钟。付款后可能还要等约 10 分钟才能确认，驱动每 15 秒检查一次账本付款时间。`AIPAY_DEMO_EPAY_LIVE_CLIENT_IP` 默认 `127.0.0.1`，可设为有效 IP。`AIPAY_DEMO_EPAY_LIVE_WAIT` 默认 `30m`，超时报告“未付款”。重跑同一命令可继续等待原单。
+
+放币和网关取证完成后，风控账号读取测试通道的当前版本，通过平台 `emergency-disable` 停止新派单。付款失败或中途放弃时，运行 `python3 -B dev/native/stack.py demo setup epay-live-off` 可单独停用，已停用时跳过。停用不关单、不退款。凭据仍留在本机交易网关和核验网关的数据库中，随本机栈删除。
 
 ## 开通清单
 
@@ -67,6 +88,7 @@ stack demo run cancel
 
 | 场景 | 真实操作与验收条件 | 当前状态 |
 |---|---|---|
+| epay-live | 浏览器支付 1.11 元，核对网关建单和查单记录、独立 paid 观测、放币授权及余额，最后停用测试通道。 | 待验证机 |
 | main | V1 /mapi.php 下单。卖方门户冻结 Q 后显示模拟收银页，HTTPS POST 付款，模拟器向 backend 回调。payment 主动查单产生 OrderPaid，商户验签并回 success。风险到期后 reconciliation 独立查单、签授权，ledger 放币。卖方减少 Q，商户增加 N，三项费用合计增加 F，Q=N+F | 2026-11-26 本机 mTLS 栈在 EPay 通过 |
 | cancel | V2 /api/pay/create、/api/pay/close。两笔独立订单，首次需两条间隔至少五秒的 closed/unpaid 才归还 Q。EPay 查 payment 跳过关单审计、超时推定完成码和取消核验请求。嵌入模式迟付单使用 late_payment。在首条核验后收银付款，要求其后观察到 paid 且没有取消授权。payment 可能先于独立复查查到付款并转入放币核验，所以这条 paid 记在取消或放币核验下都算，再等待放币，按该单基线核对卖方 −Q、商户 +N、三项费用 +F | 2026-11-26 本机 mTLS 栈在 EPay 通过（迟付步骤在断言修正后续跑，沿用原样本证据） |
 | refund-insufficient | 已放币原单需由商户真实支用到余额低于 N。提交退款后核对零预留、上游无退款 | 待验证机 |

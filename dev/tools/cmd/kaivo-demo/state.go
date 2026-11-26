@@ -37,10 +37,18 @@ func require(ok bool, s string) {
 }
 func encoded(v any) []byte { b, e := json.Marshal(v); check(e); return b }
 func decode(b []byte, v any) {
+	check(decodeJSON(b, v))
+}
+func decodeJSON(b []byte, v any) error {
 	dec := json.NewDecoder(bytes.NewReader(b))
 	dec.UseNumber()
-	check(dec.Decode(v))
-	require(dec.Decode(new(any)) == io.EOF, "invalid trailing data")
+	if err := dec.Decode(v); err != nil {
+		return err
+	}
+	if dec.Decode(new(any)) != io.EOF {
+		return errors.New("invalid trailing data")
+	}
+	return nil
 }
 func obj(v any) object { m, ok := v.(map[string]any); require(ok, "missing response object"); return m }
 func str(m object, k string) string {
@@ -104,6 +112,7 @@ type driver struct {
 	demoEnvironment
 	root, repo, dir, scope string
 	output                 string
+	liveEPay               bool
 	data                   map[string]json.RawMessage
 	history                report
 	active                 *result
@@ -141,8 +150,15 @@ func (d *driver) trace(s string) {
 func (d *driver) evidence(k string, v any) { d.active.Evidence[k] = v }
 func (d *driver) report() {
 	out := filepath.Join(d.dir, "reports", d.scope)
-	b, e := json.MarshalIndent(d.history, "", "  ")
-	check(e)
+	reportJSON := func(v any) []byte {
+		var buf bytes.Buffer
+		enc := json.NewEncoder(&buf)
+		enc.SetIndent("", "  ")
+		enc.SetEscapeHTML(!d.liveEPay)
+		check(enc.Encode(v))
+		return bytes.TrimSuffix(buf.Bytes(), []byte("\n"))
+	}
+	b := reportJSON(d.history)
 	check(atomic(out+".json", b))
 	var md strings.Builder
 	logLabel := "日志目录"
@@ -169,8 +185,7 @@ func (d *driver) report() {
 			fmt.Fprintln(&md, "\n"+s.Error)
 		}
 		if len(s.Evidence) > 0 {
-			b, e := json.MarshalIndent(s.Evidence, "", "  ")
-			check(e)
+			b := reportJSON(s.Evidence)
 			fmt.Fprintf(&md, "\n```json\n%s\n```\n", b)
 		}
 	}
