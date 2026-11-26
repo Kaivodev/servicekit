@@ -31,6 +31,9 @@ func materialBytes(b []byte, desc pr.MessageDescriptor, m object) []byte {
 	for _, f := range byNumber {
 		k := string(f.Name())
 		v := m[k]
+		if desc.FullName() == "aipay.common.v1.Money" && k == "units" {
+			v = m["amount_minor"]
+		}
 		if desc.FullName() == "aipay.common.v1.TradeQuoteSnapshot" {
 			if k == "fiat_currency" {
 				v = obj(m["fiat_amount"])["currency"]
@@ -175,8 +178,6 @@ func (proposer *browser) approve(label, owner, path, assertPath string, body obj
 	d.login(proposer.name)
 	requesterID := d.required("user/" + proposer.name)
 	r := proposer.write(label, path, func() object { return body })
-	header := obj(r["approval_request"])
-	digest := challenge(owner, requesterID, r)
 	d.evidence("requested_by", requesterID)
 	d.evidence("proposer", proposer.name)
 	material := obj(r["material"])
@@ -201,8 +202,29 @@ func (proposer *browser) approve(label, owner, path, assertPath string, body obj
 	if pkg, ok := body["package_sha256"]; ok {
 		require(obj(obj(r["material"])["plugin_version"])["package_sha256"] == pkg, "published digest differs from local package")
 	}
-	aid := str(header, "id")
+	return d.approveExisting(label, owner, requesterID, assertPath, r)
+}
+
+// The owner may already have accepted a signature before a previous run stopped.
+func (d *driver) approveExisting(label, owner, requesterID, assertPath string, r object) object {
+	digest := challenge(owner, requesterID, r)
+	aid := str(obj(r["approval_request"]), "id")
+	credentials := map[string]string{}
+	// Existing manual reviews may include a registered reviewer from a different
+	// session. Reconciliation independently verifies both signatures at issuance.
+	if obj(r["material"])["kind"] == "seller_refund" {
+		for _, item := range approvalRecords(r) {
+			record := obj(item)
+			credentials[str(record, "approver_id")] = str(obj(record["assertion"]), "credential_id")
+		}
+	}
 	for _, person := range approvers {
+		credentials[d.key("person/"+person)] = b64.EncodeToString(d.credential(person).ID)
+	}
+	for _, person := range approvers {
+		if len(approvalRecords(r)) == 2 || signedBy(r, d.key("person/"+person)) {
+			continue
+		}
 		d.login(person)
 		r = d.browser(person).write(label+"/"+person, assertPath+"/approvals/"+aid+"/assertions", func() object { return object{"assertion": d.assert(person, digest)} })
 		require(bytes.Equal(challenge(owner, requesterID, r), digest), "approval changed between people")
@@ -212,15 +234,29 @@ func (proposer *browser) approve(label, owner, path, assertPath string, body obj
 	verified := map[string]bool{}
 	for _, v := range records {
 		record := obj(v)
-		for _, person := range approvers {
-			if record["approver_id"] == d.key("person/"+person) && obj(record["assertion"])["credential_id"] == b64.EncodeToString(d.credential(person).ID) && record["request_id"] == aid {
-				verified[person] = true
-			}
+		person := str(record, "approver_id")
+		if credential, ok := credentials[person]; ok && obj(record["assertion"])["credential_id"] == credential && record["request_id"] == aid {
+			verified[person] = true
 		}
 	}
 	require(len(verified) == 2, "owner approval identities do not match registered people")
 	status := str(obj(r["approval_request"]), "status")
 	require(status == "approved" || status == "executed", "owner did not execute two approvals")
 	d.evidence("approval_id", aid)
+	d.evidence("request_digest", b64.EncodeToString(digest))
 	return obj(r["material"])
+}
+
+func approvalRecords(r object) []any {
+	records, _ := r["approvals"].([]any)
+	return records
+}
+
+func signedBy(r object, person string) bool {
+	for _, v := range approvalRecords(r) {
+		if obj(v)["approver_id"] == person {
+			return true
+		}
+	}
+	return false
 }

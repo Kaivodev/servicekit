@@ -73,6 +73,11 @@ func (b *browser) request(method, path, ctype string, body []byte, headers map[s
 
 func (b *browser) send(req *http.Request, label string) (int, []byte) {
 	// The client has one fixed listener and cookie scope per browser. It never follows redirects.
+	code, out, _ := b.sendWithHeaders(req, label)
+	return code, out
+}
+
+func (b *browser) sendWithHeaders(req *http.Request, label string) (int, []byte, http.Header) {
 	res, e := localHTTP.Do(req)
 	if e != nil {
 		stop("%s %s transport failed", req.Method, label)
@@ -92,12 +97,21 @@ func (b *browser) send(req *http.Request, label string) (int, []byte) {
 		b.d.put("cookies/"+b.name, b.cookies)
 	}
 	b.d.trace(fmt.Sprintf("%s %s → HTTP %d · request %s", req.Method, label, res.StatusCode, res.Header.Get("X-Request-ID")))
-	return res.StatusCode, out
+	return res.StatusCode, out, res.Header
 }
 func (b *browser) api(method, path, key string, body object) object {
 	return b.apiGrant(method, path, key, body, "")
 }
 func (b *browser) apiGrant(method, path, key string, body object, grant string) object {
+	return b.portalAPI(method, path, key, body, grant, nil)
+}
+
+// An image upload needs the server's canonical JPEG command digest before MFA.
+func (b *browser) submitRecent(c portalCommand) object {
+	return b.portalAPI("POST", c.path, c.key, c.body, "", &c)
+}
+
+func (b *browser) portalAPI(method, path, key string, body object, grant string, recent *portalCommand) object {
 	var data []byte
 	h := map[string]string{}
 	if grant != "" {
@@ -124,7 +138,7 @@ func (b *browser) apiGrant(method, path, key string, body object, grant string) 
 		keys := slices.Sorted(maps.Keys(body))
 		b.d.trace(fmt.Sprintf("%s %s · fields %s · idempotency %s", method, label, strings.Join(keys, ","), h["Idempotency-Key"]))
 	}
-	code, out := b.http(method, b.prefix+path, label, "application/json", data, h)
+	code, out, headers := b.sendWithHeaders(b.request(method, b.prefix+path, "application/json", data, h), label)
 	var env struct {
 		Code    int
 		Data    object
@@ -139,6 +153,12 @@ func (b *browser) apiGrant(method, path, key string, body object, grant string) 
 		require(decodeJSON(out, &env) == nil, "invalid portal response")
 	} else {
 		decode(out, &env)
+	}
+	if recent != nil && env.Code == 428 && (code == 200 || code == 428) {
+		digest := raw(headers.Get("X-Command-SHA256"))
+		require(len(digest) == len(recent.digest), "missing canonical reauthentication digest")
+		copy(recent.digest[:], digest)
+		return b.apiGrant(method, path, key, body, b.grant(*recent))
 	}
 	if code != 200 || env.Code != 200 {
 		if postReleaseEntry {

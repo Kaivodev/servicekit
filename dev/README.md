@@ -242,6 +242,7 @@ stack demo run main
 stack demo run cancel
 stack demo run refund-before-release
 stack demo run refund-after-release
+stack demo run settle-refunds
 stack demo run dispute
 stack demo run dispute-refund-before-release -o ../.local/dev/native/demo/reports/dispute-refund-before-release.md
 stack demo run dispute-refund-after-release -o ../.local/dev/native/demo/reports/dispute-refund-after-release.md
@@ -252,6 +253,8 @@ stack demo run archived-work -o ../.local/dev/native/demo/reports/archived-work.
 stack demo run statement -o ../.local/dev/native/demo/reports/statement.md
 ```
 
+- `stack demo run settle-refunds` 扫描演示卖方待提交凭证、待复核和异议期内的退款，支持旧订单。驱动按原单金额提交演示 PNG，完成 TOTP 与双人 WebAuthn 复核，等待核验授权和账本入账，核对卖方可用余额增加 Q、退款占用归零。中断后重跑同一命令可续办。
+- 已有本机栈在停机时执行 `stack demo-config`，更新 IAM 路由、开启 payment 退款通知，并将 payment 异议期与 reconciliation 异议期下限设为 10 秒。使用含本轮修改的 kaivo-demo 和已迁移的服务启动。
 - `demo setup [iam|registry|packages|seller|channels|merchant]` 可单独运行某个阶段。无参数时依次开通，首个真实失败会停止。本机 mTLS 和 Compose 由 payment.env 中的网关地址选择 Rust ABI v3；本机 plaintext 和 UG-4b 之前的 K8s 演示使用 Go 1.27.3 与 upstream-plugins v0.2.2。Rust 工具链与预制包布局见[演示制包](demo.md#网关制包与凭据)。
 - 网关制包或预制包目录需要四包，分别是 `epay_v1`、`epay_v1_verify`、`sim_form_md5`、`sim_form_md5_verify`。默认两条模拟器通道按金额分流，101–10000000 分走 EPay（`epay-demo`，PID 1001），1–100 分走 form-md5（`md5-demo`）。本机 plaintext、K8s 的 form-md5 继续覆盖 1–10000000 分。
 - main、duplicates、dispute、seller-offline、bot-notices、statement、archived-work、cancel 下单 2.00 元。refund-insufficient、refund-before-release、refund-after-release、dispute-refund-before-release、dispute-refund-after-release 下单 1.00 元。EPay 插件不支持退款，退款场景保留在 form-md5，待 UG-8 人工退款演示接入。每笔原单的实际通道记录在报告中。

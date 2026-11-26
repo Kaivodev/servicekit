@@ -281,6 +281,9 @@ class Configuration(unittest.TestCase):
     def assert_demo_settings(self, envs, root, compose):
         public = Path("/run/kaivo/public") if compose else root / "certs/public"
         inputs = Path("/run/kaivo/inputs") if compose else root / "inputs/ledger"
+        self.assertEqual(envs["payment"]["AIPAY_PAYMENT_REFUND_OBJECTION_WINDOW"], "10s")
+        self.assertEqual(envs["payment"]["AIPAY_PAYMENT_REFUND_NOTICES_ENABLED"], "true")
+        self.assertEqual(envs["reconciliation"]["AIPAY_RECONCILIATION_REFUND_OBJECTION_WINDOW_MIN"], "10s")
         self.assertEqual(envs["payment"]["AIPAY_PAYMENT_EVENTS"], "on")
         self.assertEqual(envs["payment"]["AIPAY_LEDGER_EVENT_KEYS_FILE"], str(public / "ledger.jwks"))
         self.assertEqual(envs["payment"]["AIPAY_LEDGER_RPC_ADDRESS"], "ledger:9102" if compose else "127.0.0.1:9102")
@@ -300,7 +303,7 @@ class Configuration(unittest.TestCase):
                 for folder in ("env", "inputs/iam", "inputs/payment", "inputs/ledger", "handoff"):
                     (root / folder).mkdir(parents=True)
                 cfg.dump(root / "inputs/iam/routes.json", [])
-                for name in ("backend", "payment", "ledger", "notifier"):
+                for name in ("backend", "payment", "ledger", "notifier", "reconciliation"):
                     cfg.save_env(root / "env" / (name + ".env"), {})
                 cfg.save_env(root / "env/iam-migrate.env", {"AIPAY_DATABASE_URL": "iam-owner"})
                 cfg.save_env(root / "env/iam.env", {"AIPAY_DATABASE_URL": "iam-runtime"})
@@ -319,7 +322,7 @@ class Configuration(unittest.TestCase):
                     self.assertTrue(seed.startswith(b"-----BEGIN PRIVATE KEY-----"))
                     self.assertTrue((root / "handoff/ledger-report-public.pem").read_bytes() ==
                                     subprocess.check_output(["openssl", "pkey", "-in", key, "-pubout"]))
-                    envs = {s: cfg.read_env(root / "env" / (s + ".env")) for s in ("backend", "ledger", "payment")}
+                    envs = {s: cfg.read_env(root / "env" / (s + ".env")) for s in ("backend", "ledger", "payment", "reconciliation")}
                     self.assert_demo_settings(envs, root, compose)
                     self.assertEqual(envs["payment"]["AIPAY_PAYMENT_DEV_SELLER_REVIEWS_FILE"], "custom-review.json")
                     self.assertEqual(json.loads((root / "inputs/iam/routes.json").read_bytes()), cfg.routes())

@@ -413,8 +413,11 @@ def ensure_report_key(root, key=None):
 
 def demo_settings(root, svc, compose):
     public = Path("/run/kaivo/public") if compose else root / "certs/public"
+    if svc == "reconciliation":
+        return {"AIPAY_RECONCILIATION_REFUND_OBJECTION_WINDOW_MIN": "10s"}
     if svc == "payment":
-        return {"AIPAY_PAYMENT_EVENTS": "on", "AIPAY_LEDGER_RPC_ADDRESS": address("ledger", compose),
+        return {"AIPAY_PAYMENT_REFUND_OBJECTION_WINDOW": "10s", "AIPAY_PAYMENT_REFUND_NOTICES_ENABLED": "true",
+                "AIPAY_PAYMENT_EVENTS": "on", "AIPAY_LEDGER_RPC_ADDRESS": address("ledger", compose),
                 "AIPAY_LEDGER_RPC_SERVER_NAME": "ledger",
                 "AIPAY_LEDGER_EVENT_KEYS_FILE": str(public / "ledger.jwks")}
     if svc == "backend":
@@ -465,6 +468,7 @@ def upgrade_demo(root, compose=False):
                    "AIPAY_LEDGER_DEV_USD_RATES_FILE": str(inputs("ledger") / "usd-rates.json"),
                    "AIPAY_LEDGER_PAYMENT_SERVER_NAME": "payment",
                    "AIPAY_LEDGER_PAYMENT_JWKS_FILE": str(public / "payment.jwks")},
+        "reconciliation": {},
         "payment": {"AIPAY_PAYMENT_DEV_SELLER_REVIEWS_FILE": str(inputs("payment") / "seller-reviews.json")},
     }
     for svc, additions in changes.items():

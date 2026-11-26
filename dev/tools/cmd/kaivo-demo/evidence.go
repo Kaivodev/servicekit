@@ -238,7 +238,7 @@ func (d *driver) ledgerTrade(order string) object {
 	if !d.read("trade-snapshot/"+order, &snapshot) {
 		view := d.browser("operations").api("GET", "/orders/"+order, "", nil)
 		trade := obj(obj(view["snapshot"])["trade"])
-		require(trade["order_id"] == order && trade["seller_account_id"] == seller && trade["account_id"] == d.required("merchant-account"), "platform order scope mismatch")
+		require(trade["order_id"] == order && trade["seller_account_id"] == seller && (d.scope == "settle-refunds" || trade["account_id"] == d.required("merchant-account")), "platform order scope mismatch")
 		quote := obj(trade["quote"])
 		snapshot = object{"account_id": trade["account_id"]}
 		for _, k := range []string{"escrow_usdt", "recipient_usdt", "platform_fee_usdt"} {
@@ -253,18 +253,20 @@ func (d *driver) ledgerTrade(order string) object {
 	}
 	require(units(hold, "amount_usdt_micro") == num(normalized(snapshot), "escrow_usdt"), "portal escrow differs from locked quote")
 	hold["status"] = strings.ToUpper(str(hold, "status"))
-	rows := d.rows("ledger", "ledger_trade_reservations", "SELECT paid_verified_at,released_seq FROM ledger_trade_reservations WHERE order_id=$1", order)
-	require(len(rows) == 1, "missing ledger posting evidence")
+	rows := d.rows("ledger", "ledger_trade_reservations", "SELECT account_id,paid_verified_at,released_seq FROM ledger_trade_reservations WHERE order_id=$1", order)
+	require(len(rows) == 1 && rows[0]["account_id"] == snapshot["account_id"], "missing ledger posting or mismatched recipient")
 	for k, v := range rows[0] {
 		hold[k] = v
 	}
 	return normalized(hold)
 }
-func (d *driver) chainEvidence(order string) {
-	d.evidence("seller_hold_platform_quote_and_ledger_posting", d.ledgerTrade(order))
+func (d *driver) chainEvidence(order string) object {
+	hold := d.ledgerTrade(order)
+	d.evidence("seller_hold_platform_quote_and_ledger_posting", hold)
 	d.evidence("payment_outbox", d.rows("payment", "payment_outbox", "SELECT event_type,event_id,sequence FROM payment_outbox WHERE order_id=$1 ORDER BY sequence", order))
 	d.evidence("ledger_trade_authorizations", d.rows("ledger", "ledger_trade_authorizations", "SELECT source_event_id,source_sequence,expected_version,event_type,result_status,posting_seq FROM ledger_trade_authorizations WHERE order_id=$1 ORDER BY source_sequence", order))
 	d.evidence("reconciliation_verification_evidence", d.rows("reconciliation", "reconciliation_verification_evidence", "SELECT id,operation,category,verified_at FROM reconciliation_verification_evidence WHERE order_id=$1 ORDER BY verified_at", order))
 	d.evidence("ledger_trade_refunds", d.rows("ledger", "ledger_trade_refunds", "SELECT refund_id,branch,reserved_usdt,control_version,reserve_seq FROM ledger_trade_refunds WHERE order_id=$1", order))
+	return hold
 }
 func normalized(v object) object { var r object; decode(encoded(v), &r); return r }

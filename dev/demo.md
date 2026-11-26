@@ -92,6 +92,7 @@ V1 返回 HTTP 200 且 `code == 1` 时，驱动优先取 `payurl`，缺省时取
 | main | V1 /mapi.php 下单。卖方门户冻结 Q 后显示模拟收银页，HTTPS POST 付款，模拟器向 backend 回调。payment 主动查单产生 OrderPaid，商户验签并回 success。风险到期后 reconciliation 独立查单、签授权，ledger 放币。卖方减少 Q，商户增加 N，三项费用合计增加 F，Q=N+F | 2026-11-26 本机 mTLS 栈在 EPay 通过 |
 | cancel | V2 /api/pay/create、/api/pay/close。两笔独立订单，首次需两条间隔至少五秒的 closed/unpaid 才归还 Q。EPay 查 payment 跳过关单审计、超时推定完成码和取消核验请求。嵌入模式迟付单使用 late_payment。在首条核验后收银付款，要求其后观察到 paid 且没有取消授权。payment 可能先于独立复查查到付款并转入放币核验，所以这条 paid 记在取消或放币核验下都算，再等待放币，按该单基线核对卖方 −Q、商户 +N、三项费用 +F | 2026-11-26 本机 mTLS 栈在 EPay 通过（迟付步骤在断言修正后续跑，沿用原样本证据） |
 | refund-insufficient | 已放币原单需由商户真实支用到余额低于 N。提交退款后核对零预留、上游无退款 | 待验证机 |
+| settle-refunds | 按演示卖方扫描已有人工退款，续办凭证与双人审批，核对 reconciliation 授权、ledger 核销和卖方余额。可处理旧场景留下的订单，无需原模拟器记录 | 待验证机 |
 | refund-before-release | V2 收银付款后、放币前请求全额 /api/pay/refund。查核 ledger PRE_RELEASE 占用、reconciliation 查退款、最终分录、/api/pay/refundquery 和余额复原 | 2026-11-26 form-md5 下单、付款通过；payment 已含 A139 人工退款，`/api/pay/refund` 进入 AWAITING_SELLER，待 UG-8 改写 |
 | refund-after-release | V2 放币后先核对 N、F，再全额退款。ledger 的 POST_RELEASE 预留等于 N。核实后商户和费用冲销、卖方恢复 Q。第二笔单要求商户实际可用低于 N 才发退款，核对无预留及模拟器独立 refund-query 查无退款 | 待验证机 |
 | dispute | 运营登记原单和商户 /order 证据，卖方在本人门户追加原单证据。风控人员提交放给原收款人的裁决，两名审批人签署，等待 reconciliation 复核与 ledger 落账 | 2026-11-26 本机 mTLS 栈在 EPay 通过 |

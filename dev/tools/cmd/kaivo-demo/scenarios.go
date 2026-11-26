@@ -282,10 +282,10 @@ func (t tradeRun) paid(copies int) {
 		})
 	})
 }
-func (t tradeRun) terminal(status string) {
+func (t tradeRun) terminal(status string) object {
 	d := t.d
 	waitFor(status, 2*time.Minute, func() bool { return d.ledgerTrade(t.order)["status"] == status })
-	d.chainEvidence(t.order)
+	return d.chainEvidence(t.order)
 }
 func (t tradeRun) finish(released bool) object {
 	d := t.d
@@ -571,6 +571,7 @@ var scenarios = map[string]func(*driver){
 	},
 	"cancel":                        func(d *driver) { d.cancel(false); d.cancel(true) },
 	"refund-insufficient":           (*driver).insufficient,
+	"settle-refunds":                (*driver).settleRefunds,
 	"refund-before-release":         func(d *driver) { d.refund(false) },
 	"refund-after-release":          func(d *driver) { d.refund(true) },
 	"dispute":                       (*driver).dispute,
@@ -587,6 +588,10 @@ func (d *driver) releasedTrade(copies int) {
 
 func (d *driver) run(s string) {
 	var complete bool
+	if s == "settle-refunds" {
+		scenarios[s](d)
+		return
+	}
 	if d.read("finished/"+s, &complete) && complete {
 		if s == livePhase {
 			d.disableLiveEPay()
