@@ -112,6 +112,85 @@ class Configuration(unittest.TestCase):
             finally:
                 os.chdir(cwd)
 
+    def test_epay_upgrade_in_place(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for directory in ("env", "inputs/upstream-sim", "handoff"):
+                (root / directory).mkdir(parents=True)
+            sim_path = root / "inputs/upstream-sim/config.json"
+            payment_path, recon_path = (root / "env" / (s + ".env") for s in ("payment", "reconciliation"))
+            handoff = root / "handoff/epay.json"
+            md5 = dict(id="md5-demo", style="form-md5", shared_secret="trade", query_shared_secret="query")
+            sim = dict(listen="127.0.0.1:9080", control_token="keep-token", accounts=[md5, dict(md5, id="other")])
+            cfg.dump(sim_path, sim)
+            callback = "AIPAY_PLUGIN_CALLBACK_URL"
+            mapping = "AIPAY_RECONCILIATION_PLUGIN_CHANNELS"
+            origin = "https://[::1]:18080"
+            payment = cfg.gateway_client_settings("upstream-gateway-trade") | {
+                callback: origin + "/callback/sim_form_md5?site=dev", "OTHER": "with=equals"}
+            channels = {"sim_form_md5_verify": "sim_form_md5", "other_verify": "other"}
+            cfg.save_env(payment_path, payment)
+            cfg.save_env(recon_path, cfg.gateway_client_settings("upstream-gateway-verification") |
+                         {mapping: json.dumps(channels), "OTHER": "keep"})
+            cfg.coverage_mode(root, "attestation", "6m")
+            recon = cfg.read_env(recon_path)
+            for path in (sim_path, payment_path, recon_path):
+                path.chmod(0o640)
+            # Exercise the writer's permission preservation separately from the full 0600 verifier.
+            with patch.object(stack, "request", return_value=None), patch.object(stack, "verify") as verify:
+                stack.epay_on(root)
+                verify.assert_called_once_with(root)
+                updated = json.loads(sim_path.read_text())
+                epay = updated["accounts"].pop()
+                self.assertEqual(updated, sim)
+                key = epay.pop("shared_secret")
+                self.assertTrue(len(key) == 32 and key.isascii() and key.isalnum())
+                self.assertEqual(epay, dict(id="epay-demo", style="epay-v1", pid=1001))
+                self.assertTrue(json.loads(handoff.read_text()) == {"merchant_key": key})
+                self.assertEqual(cfg.read_env(payment_path), payment | {callback: origin + "/callback/{channel_code}?site=dev"})
+                after = cfg.read_env(recon_path)
+                self.assertEqual(json.loads(after.pop(mapping)), channels | {"epay_v1_verify": "epay_v1"})
+                recon.pop(mapping)
+                self.assertEqual(after, recon)
+                for path in (sim_path, payment_path, recon_path):
+                    self.assertEqual(path.stat().st_mode & 0o777, 0o640)
+                self.assertEqual(handoff.stat().st_mode & 0o777, 0o600)
+                with patch.object(cfg, "write", side_effect=AssertionError("unexpected rewrite")):
+                    stack.epay_on(root)
+                # Retry after the simulator was updated but the handoff was not installed.
+                handoff.unlink()
+                stack.epay_on(root)
+                self.assertTrue(json.loads(handoff.read_text()) == {"merchant_key": key})
+                for previous in ({"shared": key}, {"shared": "stale"}):
+                    cfg.dump(handoff, previous, mode=0o640)
+                    stack.epay_on(root)
+                    self.assertTrue(json.loads(handoff.read_text()) == {"merchant_key": key})
+                    self.assertEqual(handoff.stat().st_mode & 0o777, 0o640)
+                    with patch.object(cfg, "write", side_effect=AssertionError("unexpected rewrite")):
+                        stack.epay_on(root)
+
+    def test_epay_refuses_running_services(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for running in ("upstream-sim", "payment", "reconciliation", *cfg.GATEWAYS):
+                with self.subTest(running=running), patch.object(stack, "request", side_effect=lambda n, a: n == running), \
+                     self.assertRaisesRegex(ValueError, "run down"):
+                    stack.epay_on(Path(tmp))
+
+    def test_epay_requires_native_gateway(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for marker, reason in (("transport.plaintext", "plaintext"), ("stack.env", "Compose")):
+                with self.subTest(marker=marker):
+                    (root / marker).touch()
+                    with self.assertRaisesRegex(ValueError, reason):
+                        stack.epay_on(root)
+                    (root / marker).unlink()
+            (root / "env").mkdir()
+            cfg.save_env(root / "env/payment.env", {})
+            cfg.save_env(root / "env/reconciliation.env", {})
+            with patch.object(stack, "request", return_value=None), self.assertRaisesRegex(ValueError, "gateways"):
+                stack.epay_on(root)
+
     def test_profiles(self):
         for compose in (False, True):
             with self.subTest(compose=compose), tempfile.TemporaryDirectory() as tmp:
@@ -170,7 +249,16 @@ class Configuration(unittest.TestCase):
                 self.assertTrue(envs["iam"]["AIPAY_QUEUE_REDIS_URL"].endswith("/1"))
                 self.assertEqual(envs["payment"]["AIPAY_IAM_RPC_ADDRESS"], "iam:9101" if compose else "127.0.0.1:9101")
                 self.assertFalse(any("DATABASE" in k or "SIGNING" in k or "REDIS" in k for k in envs["notifier"]))
-                sim = json.loads(files[root / "inputs/upstream-sim/config.json"])["accounts"][0]
+                sim, epay = json.loads(files[root / "inputs/upstream-sim/config.json"])["accounts"]
+                self.assertEqual((sim["id"], sim["style"]), ("md5-demo", "form-md5"))
+                self.assertEqual((epay["id"], epay["style"], epay["pid"]), ("epay-demo", "epay-v1", 1001))
+                self.assertTrue(len(epay["shared_secret"]) == 32 and epay["shared_secret"].isascii()
+                                and epay["shared_secret"].isalnum())
+                self.assertTrue(json.loads(files[root / "handoff/epay.json"]) == {"merchant_key": epay["shared_secret"]})
+                host = "backend" if compose else "127.0.0.1"
+                self.assertEqual(envs["payment"]["AIPAY_PLUGIN_CALLBACK_URL"], f"http://{host}:8080/callback/{{channel_code}}")
+                self.assertEqual(json.loads(envs["reconciliation"]["AIPAY_RECONCILIATION_PLUGIN_CHANNELS"]),
+                                 {"epay_v1_verify": "epay_v1", "sim_form_md5_verify": "sim_form_md5"})
                 query = json.loads(files[root / "handoff/query.json"])["query_key"]
                 trade = json.loads(files[root / "handoff/trade.json"])["shared"]
                 self.assertTrue(query == sim["query_shared_secret"] != sim["shared_secret"] == trade)

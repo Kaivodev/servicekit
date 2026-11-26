@@ -14,9 +14,10 @@ import tempfile
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from stack_config import (DEPOSIT_SERVICES, GATEWAYS, LIBRARY, OWNERS, SERVICES, STATE, WORKSPACE,
-                          coverage_mode, gateway_client_settings, native_deposit_inputs, prepare, read_env, refresh, save_env, switch_gateway_clients, upgrade_demo, write)
+                          coverage_mode, dump, gateway_client_settings, native_deposit_inputs, new_epay_account,
+                          prepare, read_env, refresh, save_env, switch_gateway_clients, upgrade_demo, write)
 from deposit_scenario import SPEC, generate
-from verify import verify
+from verify import epay_handoff, verify
 import telemetry
 from processes import health, request, service_env, services, start, stop, supervise, transport
 
@@ -181,6 +182,53 @@ def demo_config(root):
     upgrade_demo(root)
 
 
+def epay_on(root):
+    if (root / "stack.env").is_file():
+        raise ValueError("epay-on requires a native stack; the native controller cannot check running Compose containers")
+    if transport(root) == "plaintext":
+        raise ValueError("epay-on requires mTLS gateway mode; plaintext is unsupported")
+    if any(request(name, "pid") for name in ("upstream-sim", "payment", "reconciliation", *GATEWAYS)):
+        raise ValueError("run down before enabling EPay")
+
+    payment_path = root / "env/payment.env"
+    recon_path = root / "env/reconciliation.env"
+    payment, recon = read_env(payment_path), read_env(recon_path)
+    if not payment.get("AIPAY_UPSTREAM_GATEWAY_ADDRESS") or not recon.get("AIPAY_RECONCILIATION_UPSTREAM_GATEWAY_ADDRESS"):
+        raise ValueError("epay-on requires configured trade and verification gateways")
+    callback = "AIPAY_PLUGIN_CALLBACK_URL"
+    url = urlsplit(payment[callback])
+    if url.scheme not in ("http", "https") or not url.hostname:
+        raise ValueError("invalid payment callback URL")
+    mapping = "AIPAY_RECONCILIATION_PLUGIN_CHANNELS"
+    channels = json.loads(recon[mapping])
+    sim_path = root / "inputs/upstream-sim/config.json"
+    sim = json.loads(sim_path.read_bytes())
+    accounts = sim["accounts"]
+    if not accounts or accounts[0]["id"] != "md5-demo" or accounts[0]["style"] != "form-md5":
+        raise ValueError("expected md5-demo as the primary form-md5 account")
+    append_epay = not any(a["id"] == "epay-demo" for a in accounts)
+    if append_epay:
+        accounts.append(new_epay_account())
+    credential = epay_handoff(accounts)
+    handoff = root / "handoff/epay.json"
+    previous = json.loads(handoff.read_bytes()) if handoff.exists() else None
+
+    # Persist the authoritative key first so a retry can complete any interrupted upgrade.
+    if append_epay:
+        dump(sim_path, sim, mode=sim_path.stat().st_mode & 0o777)
+    # This also migrates the legacy "shared" field using the simulator's existing key.
+    if previous != credential:
+        dump(handoff, credential, mode=handoff.stat().st_mode & 0o777 if handoff.exists() else 0o600)
+    if url.path != "/callback/{channel_code}":
+        payment[callback] = url._replace(path="/callback/{channel_code}").geturl()
+        save_env(payment_path, payment, mode=payment_path.stat().st_mode & 0o777)
+    if channels.get("epay_v1_verify") != "epay_v1":
+        channels["epay_v1_verify"] = "epay_v1"
+        recon[mapping] = json.dumps(channels, separators=(",", ":"))
+        save_env(recon_path, recon, mode=recon_path.stat().st_mode & 0o777)
+    verify(root)
+
+
 def main():
     os.umask(0o077)
     parser = argparse.ArgumentParser(description=__doc__)
@@ -194,6 +242,7 @@ def main():
     coverage = sub.add_parser("coverage")
     coverage.add_argument("mode", choices=("file", "attestation", "status"))
     coverage.add_argument("--validity", metavar="DURATION", help="attestation lifetime (default 4m, range 1m to 26h)")
+    sub.add_parser("epay-on", help="upgrade a stopped native mTLS gateway stack in place for the EPay demo")
     modes = sub.add_parser("telemetry").add_subparsers(dest="mode", required=True)
     modes.add_parser("on").add_argument("--endpoint")
     modes.add_parser("off")
@@ -289,6 +338,9 @@ def main():
             build(ROOT / "bin", args.workspace)
         elif args.action == "demo-config":
             demo_config(ROOT)
+        elif args.action == "epay-on":
+            epay_on(ROOT)
+            print("Verified native EPay configuration")
         elif args.action == "provision":
             provision()
         elif args.action == "migrate":

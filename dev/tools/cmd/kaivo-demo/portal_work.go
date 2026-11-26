@@ -64,14 +64,25 @@ func channelState(seller, platform object, account, channel string, online bool,
 
 func (d *driver) sellerOffline() {
 	seller, op := d.browser("seller"), d.browser("operations")
-	account, ch := d.required("seller-account"), d.required("uuid/channel")
+	amount, code := scenarioOrder("seller-offline", d.gatewayMode())
+	account, ch := d.required("seller-account"), d.required(channelKey(code, "uuid/channel"))
 	path := "/accounts/" + account + "/channels/" + ch
 	var initial object
-	d.step("唯一演示通道", func() {
-		list := op.api("GET", "/channel-accounts?limit=2", "", nil)
-		items, ok := list["items"].([]any)
-		require(ok && len(items) == 1 && list["next_cursor"] == nil, "expected exactly one demo channel")
-		platform := obj(items[0])
+	baseline := "唯一演示通道"
+	if code == epayChannel {
+		baseline = "EPay 卖方通道"
+	}
+	d.step(baseline, func() {
+		var platform object
+		if code == epayChannel {
+			platform = op.api("GET", "/channel-accounts/"+ch, "", nil)
+		} else {
+			list := op.api("GET", "/channel-accounts?limit=2", "", nil)
+			items, ok := list["items"].([]any)
+			require(ok && len(items) == 1 && list["next_cursor"] == nil, "expected exactly one demo channel")
+			platform = obj(items[0])
+		}
+		require(obj(platform["configuration"])["channel_code"] == code, "unexpected seller channel code")
 		initial = channelState(seller.api("GET", path, "", nil), platform, account, ch, true, num(platform, "seller_online_version"), num(platform, "control_version"))
 		d.put("offline/baseline", initial)
 		d.evidence("baseline", initial)
@@ -100,7 +111,7 @@ func (d *driver) sellerOffline() {
 	})
 	d.step("下线期间拒绝新订单", func() {
 		number := d.key("offline/rejected")
-		code, r := d.signedEPay("v2", "/api/pay/create", d.createParams(number))
+		code, r := d.signedEPay("v2", "/api/pay/create", d.createParams(number, amount))
 		require(code == 200 && num(r, "code") == -1 && r["msg"] == "支付通道不可用" && r["pay_info"] == nil, "expected signed no-channel rejection")
 		rows := d.rows("payment", "payment_orders", "SELECT id FROM payment_orders WHERE application_id=$1 AND out_trade_no=$2", d.required("app/v2"), number)
 		require(len(rows) == 0, "offline order was inserted")
@@ -129,7 +140,13 @@ func (d *driver) archivedWork() {
 	d.step("开通平台运维", func() { d.invite("sre", "sre"); d.login("sre") })
 	b := d.browser("sre")
 	t := d.trade("归档样本", "v2")
-	t.step("持续返回未知查单结果", func() { d.sim("PUT", "/__test/scenarios/md5-demo/"+t.order, object{"query_unknown": true}) })
+	t.step("持续返回未知查单结果", func() {
+		if t.channel == epayChannel {
+			t.setScenario(object{"api_fault": "malformed"})
+		} else {
+			t.setScenario(object{"query_unknown": true})
+		}
+	})
 	d.step("平台列出本单归档任务", func() {
 		budget := 3 * time.Hour
 		if v := os.Getenv("AIPAY_DEMO_ARCHIVE_WAIT"); v != "" {
@@ -139,8 +156,14 @@ func (d *driver) archivedWork() {
 		}
 		end := time.Now().Add(budget)
 		var sample object
+		var firstFailure []object
 		for {
 			sample = oneFact(d.facts("payment", "sample_work", `SELECT object_id,attempts,available_at,archived_at,completed_at FROM payment_work WHERE kind='order' AND object_id=$1`, t.order), "演示订单任务")
+			if t.channel == epayChannel && len(firstFailure) == 0 {
+				firstFailure = d.facts("payment", "首次查单失败", `SELECT exchange_id,occurred_at,category,error_code
+					FROM payment_gateway_executions WHERE order_id=$1 AND operation='query_payment'
+					AND category='unknown' AND error_code='upstream_unknown' AND responses>0 ORDER BY occurred_at LIMIT 1`, t.order)
+			}
 			d.report()
 			if sample["archived_at"] != nil || sample["completed_at"] != nil || !time.Now().Before(end) {
 				break
@@ -156,6 +179,7 @@ func (d *driver) archivedWork() {
 			items, ok := page["items"].([]any)
 			require(ok, "invalid archived task list")
 			if row := archivedOrder(items, t.order); row != nil {
+				require(t.channel != epayChannel || len(firstFailure) == 1, "archived EPay order has no failed upstream query")
 				require(sample["archived_at"] == nil || sameInstant(row["archived_at"], sample["archived_at"]), "portal archived time differs from work row")
 				d.put("archive/original", row)
 				d.evidence("archived", row)
@@ -175,7 +199,7 @@ func (d *driver) archivedWork() {
 	var original object
 	d.read("archive/original", &original)
 	t.step("上游恢复与运维重新入队", func() {
-		d.sim("PUT", "/__test/scenarios/md5-demo/"+t.order, object{"query_unknown": false})
+		t.setScenario(object{})
 		c := requeueCommand("order", t.order, d.key("requeue/"+t.order), requeueReason, num(original, "version"))
 		r := b.apiGrant("POST", c.path, c.key, c.body, b.grant(c))
 		require(r["object_id"] == t.order && r["kind"] == "order" && r["archived_at"] == nil && num(r, "attempts") == 0 && num(r, "version") == num(original, "version")+1 && r["last_error_code"] == original["last_error_code"], "unexpected requeue result")
@@ -190,6 +214,13 @@ func (d *driver) archivedWork() {
 		waitFor("payment worker reclaimed restored task", 90*time.Second, func() bool {
 			row := oneFact(d.facts("payment", "worker_after_requeue", `SELECT version,attempts,completed_at,archived_at,
                 completed_at >= $2::timestamptz AS completed_after FROM payment_work WHERE kind='order' AND object_id=$1`, t.order, str(audit, "occurred_at")), "恢复后任务")
+			if t.channel == epayChannel {
+				// A successful pending poll can reset attempts before we observe the claim.
+				queried := d.facts("payment", "恢复后的查单", `SELECT exchange_id,occurred_at FROM payment_gateway_executions
+					WHERE order_id=$1 AND operation='query_payment' AND category='succeeded' AND occurred_at >= $2 ORDER BY occurred_at LIMIT 1`,
+					t.order, str(audit, "occurred_at"))
+				return num(row, "version") == num(original, "version")+1 && len(queried) > 0
+			}
 			return reclaimedWork(row, num(original, "version"))
 		})
 	})
@@ -197,8 +228,22 @@ func (d *driver) archivedWork() {
 		d.login("seller")
 		d.login("operations")
 		d.refreshMarket()
+		if t.channel == epayChannel {
+			// Restoring an old order can itself register the A140 system intent.
+			order := oneFact(d.facts("payment", "恢复后的订单",
+				"SELECT close_requested,close_reason FROM payment_orders WHERE id=$1", t.order), "恢复后的订单")
+			if order["close_requested"] == true {
+				t.terminal("CANCELLED")
+				t.setScenario(object{})
+				return
+			}
+			t.backdateUnpaid()
+		}
 		d.epay("v2", "/api/pay/close", url.Values{"out_trade_no": {t.number}})
 		t.terminal("CANCELLED")
+		if t.channel == epayChannel {
+			t.setScenario(object{})
+		}
 	})
 }
 

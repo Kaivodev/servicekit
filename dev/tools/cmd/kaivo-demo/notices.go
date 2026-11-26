@@ -92,7 +92,7 @@ func (d *driver) botNotices() {
 	t := d.trade("通知", "v2")
 	t.paid(1)
 	trade := d.required("trade-no/" + d.scope + "/" + t.name)
-	paid := fmt.Sprintf("已收款\n平台单号 %s\n商户单号 %s\n金额 1.00 CNY", trade, t.number)
+	paid := fmt.Sprintf("已收款\n平台单号 %s\n商户单号 %s\n金额 %s CNY", trade, t.number, t.amount)
 	t.step("已收款双投递", func() { t.notice("MerchantPaymentReceived", "已收款", paid) })
 	t.release()
 	t.step("资金已可用双投递", func() {

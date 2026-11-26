@@ -5,7 +5,7 @@ func round11Plan(name string) (checks, notes []string) {
 	switch name {
 	case "seller-offline":
 		return []string{
-			"核对唯一通道与两端版本。用卖方 TOTP 对下线命令再认证，先付款，再切换接单状态。",
+			"核对本单通道与两端版本。用卖方 TOTP 对下线命令再认证，先付款，再切换接单状态。",
 			"核对下线及上线各自的卖方版本 +1、平台 control_version 不变和两端变更时间。下线时记录 V2 签名拒绝和该商户单号零订单。",
 			"核对原单 paid_verified_at、下线时间、放币分录、独立授权及余额。另用新的商户单号验证上线后收银。",
 		}, []string{

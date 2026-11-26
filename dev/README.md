@@ -33,6 +33,29 @@ python3 dev/native/stack.py down
 
 先停栈，备份数据库、队列与整份私有状态目录，再把旧状态目录移出 prepare 的目标路径。devcert 每次都会重签整套身份，新栈要配套使用新数据库、缓存、队列和演示断点。本机使用空的专用 PostgreSQL 实例重新 `prepare`、`build --workspace`、`migrate`。Compose 重新 `prepare`，用新的 Compose 项目名（例如在每条命令加 `-p aipay-ug4`）创建空卷。`--add-missing-credentials` 只维护历史五服务栈，`demo-config` 只用于已具备相应身份和数据库的栈。
 
+### 已有栈升级到 UG-7
+
+已完成 form-md5 开通的本机 mTLS 网关栈可以原地升级，沿用原数据库、卖方与 `demo/state.json`。从目标栈所在工作区的 servicekit 根目录执行，确认该目录含本轮驱动和控制器，同级 upstream-sim 源码已支持 `query_addtime_backdate_seconds`。保持独立终端的 `stack.py demo serve` 运行。
+
+```sh
+stack() { python3 -B dev/native/stack.py "$@"; }
+stack down
+stack epay-on
+stack build --workspace
+stack up
+stack demo setup packages
+stack demo setup channels
+stack demo run main
+stack demo run seller-offline
+stack demo run cancel
+```
+
+`epay-on` 在停机时补齐模拟器账户和私有 handoff，更新回调路径与核验插件映射，并执行离线校验。凭据字段名取自插件 manifest 的 `secrets` 键名。EPay 交易和核验两侧按 A136 ③ 分别密封同一个商户 KEY，均从 `handoff/epay.json` 的唯一字段 `merchant_key` 读取。升级旧文件时复用模拟器原 KEY 并保留权限，重复执行会跳过已符合要求的文件。命令仅支持本机网关模式。plaintext 使用内嵌插件，Compose 容器的运行状态由 Docker 管理，本机控制器无法检查。
+
+`build --workspace` 同时更新 kaivo-demo 与模拟器。控制器从同级 upstream-sim 复制 go.mod 和 go.sum 到临时目录，以 `GOWORK=off go build -mod=mod -modfile …` 构建 `./cmd/upstream-sim` 到原栈的 `bin/upstream-sim`。若 `stack coverage status` 显示 attestation，放币和取消都需要有效证明，可在上述 `down` 与 `up` 之间执行 `stack coverage file`。
+
+`packages` 制作四个包，`channels` 复用已完成的 md5 步骤，先将旧通道上限双批收窄到 100 分，再开通 EPay。若 EPay 已绑定旧凭据，驱动会重新密封，在支付插件绑定前核对交易凭据的引用和摘要。任一不符时，按通道当前版本双批更新，并保留启用状态。seller-offline 要求 EPay 下线期间拒绝 2.00 元新单，只调优先级仍会让该单落到 form-md5。
+
 ## 预发开发材料
 
 从 servicekit 根目录构建 `kaivo-stagingseed`，再运行 deploy 的引导脚本。生成器从当前 kubectl context 读取四个预发命名空间中的受管对象，只通过 stdout 管道交付材料。对象、键名和挂载方式见 [deploy 的 servicekit 开发材料接口](../../deploy/README.md#servicekit-开发材料接口)。
@@ -180,7 +203,7 @@ kaivo_queue_tasks{state="pending"}
 
 ## 阶段 2 演示驱动
 
-使用本机进程栈。从 servicekit 根目录按上节准备、构建和迁移。UG-4 之前的栈按[升级步骤](#从-ug-4-之前的栈升级)重新开通。
+使用本机进程栈。从 servicekit 根目录按上节准备、构建和迁移。已开通 form-md5 的本机网关栈见 [UG-7 原地升级步骤](#已有栈升级到-ug-7)。
 
 先在一个终端启动模拟 Telegram API、商户接收端和 CONNECT 代理，并保持运行。
 
@@ -210,7 +233,10 @@ stack demo run statement -o ../.local/dev/native/demo/reports/statement.md
 ```
 
 - `demo setup [iam|registry|packages|seller|channels|merchant]` 可单独运行某个阶段。无参数时依次开通，首个真实失败会停止。本机 mTLS 和 Compose 由 payment.env 中的网关地址选择 Rust ABI v3；本机 plaintext 和 UG-4b 之前的 K8s 演示使用 Go 1.27.3 与 upstream-plugins v0.2.2。Rust 工具链与预制包布局见[演示制包](demo.md#网关制包与凭据)。
-- 第 11 轮四个场景已于 2026-11-24 在本机进程栈通过，结果见[验证机记录](#2026-11-24-第-11-轮演示验收)。卖方场景会切换唯一通道，通知场景会绑定演示商户群。归档场景按 payment 的真实退避等待，可用 `AIPAY_DEMO_ARCHIVE_WAIT=0s` 立即检查并留待续跑。对账场景优先使用已有文件，新栈可能要等到下一次 UTC+8 零点。详见[步骤与证据](demo.md#第-11-轮运行条件)。
+- 网关制包或预制包目录需要四包，分别是 `epay_v1`、`epay_v1_verify`、`sim_form_md5`、`sim_form_md5_verify`。同一卖方按金额分流，101–10000000 分走 EPay（`epay-demo`，PID 1001），1–100 分走 form-md5（`md5-demo`）。本机 plaintext、K8s 的 form-md5 继续覆盖 1–10000000 分。
+- main、duplicates、dispute、seller-offline、bot-notices、statement、archived-work、cancel 下单 2.00 元。refund-insufficient、refund-before-release、refund-after-release、dispute-refund-before-release、dispute-refund-after-release 下单 1.00 元。EPay 插件不支持退款，退款场景保留在 form-md5，待 UG-8 人工退款演示接入。每笔原单的实际通道记录在报告中。
+- EPay 两实例的 `unpaid_timeout_seconds` 等于 payment 的付款指令有效期加 1 小时，向上取整秒。默认 10 分钟对应 T=4200 秒。cancel 在关单前只回拨原单查单应答的建单时间 T+120 秒，未付单须经两次间隔至少 5 秒的独立观测才归还担保。迟付单在首次观测后仍可收银付款。
+- 第 11 轮四个场景已于 2026-11-24 在本机进程栈通过，结果见[验证机记录](#2026-11-24-第-11-轮演示验收)。卖方场景会切换该金额对应的通道，通知场景会绑定演示商户群。归档场景按 payment 的真实退避等待，可用 `AIPAY_DEMO_ARCHIVE_WAIT=0s` 立即检查并留待续跑。对账场景优先使用已有文件，新栈可能要等到下一次 UTC+8 零点。详见[步骤与证据](demo.md#第-11-轮运行条件)。
 - 两个争议退款场景已于 2026-11-22 在本机进程栈通过。各使用一笔新订单。放币后场景也通过平台登记争议，登记失败会把现场状态写入报告。重跑同名场景沿用原单和已签材料。
 - `demo run 场景 -o 文件` 在每步结束时更新报告，失败时保留已有证据和错误。`.json` 输出 JSON，其他文件名输出 Markdown。默认的两份场景报告仍位于 `demo/reports/`。
 - `demo setup iam` 由管理员 1 邀请风控人员（`platform-risk`），管理员 2 批准，风控人员接受邀请后注册自己的 WebAuthn 凭据。风控人员提交 20 秒风控策略和争议裁决；运营登记争议，提交通道、方式、定价、插件和核验账户申请。每份审批材料都按提交人的 IAM 用户 ID 核对，再由两名已登记的审批人分别签署。

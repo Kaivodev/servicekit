@@ -9,6 +9,7 @@ from pathlib import Path
 import re
 import secrets
 import shutil
+import string
 import subprocess
 import tempfile
 from urllib.parse import quote, urlsplit, urlunsplit, parse_qsl
@@ -48,8 +49,8 @@ def write(path, data, *, mode=None):
             Path(f.name).unlink(missing_ok=True)
 
 
-def dump(path, value):
-    write(path, json.dumps(value, separators=(",", ":")) + "\n")
+def dump(path, value, **write_options):
+    write(path, json.dumps(value, separators=(",", ":")) + "\n", **write_options)
 
 
 def save_env(path, values, **write_options):
@@ -212,6 +213,11 @@ def routes():
     return rules + json.loads((LIBRARY / "dev/portal-routes.json").read_text())
 
 
+def new_epay_account():
+    key = "".join(secrets.choice(string.ascii_letters + string.digits) for _ in range(32))
+    return dict(id="epay-demo", style="epay-v1", pid=1001, shared_secret=key)
+
+
 def generate_inputs(root, sim_listen):
     for svc in SERVICES:
         for parent in ("inputs", "logs", "data"):
@@ -232,12 +238,14 @@ def generate_inputs(root, sim_listen):
         write(inputs / svc / "epay.der", der)
     write(root / "handoff/platform-public.pem", subprocess.check_output(["openssl", "pkey", "-pubout"], input=rsa))
     payment_secret, query_secret = secrets.token_hex(32), secrets.token_hex(32)
+    epay = new_epay_account()
     dump(inputs / "payment/seller-reviews.json", [])
     dump(root / "handoff/trade.json", {"shared": payment_secret})
     dump(root / "handoff/query.json", {"query_key": query_secret})
+    dump(root / "handoff/epay.json", {"merchant_key": epay["shared_secret"]})
     dump(inputs / "upstream-sim/config.json", dict(environment="test", listen=sim_listen, base_url="https://127.0.0.1:9443",
          control_token=secrets.token_urlsafe(32), accounts=[dict(id="md5-demo", style="form-md5",
-         shared_secret=payment_secret, query_shared_secret=query_secret)]))
+         shared_secret=payment_secret, query_shared_secret=query_secret), epay]))
     dump(inputs / "iam/routes.json", routes() + [TRADE_CREDENTIALS_ROUTE])
     write(inputs / "backend/bot-token", "10001:" + secrets.token_urlsafe(32))
     refresh(root)
@@ -557,7 +565,7 @@ def prepare(root, admin, cache, queue, compose=False):
                               PAYMENT_APPROVAL_RP_ID=RP, PAYMENT_APPROVAL_ORIGINS=ORIGIN, PAYMENT_DEV_RATE_FILE=inputs / "rate.json",
                               PAYMENT_DEV_SELLER_REVIEWS_FILE=inputs / "seller-reviews.json", PAYMENT_DEV_RATE_MAX_AGE="10m", PLUGIN_ENABLED="true",
                               PLUGIN_TEST_ONLY_ALLOW_HTTP="true",
-                              PLUGIN_CALLBACK_URL=f"http://{address('backend', compose)}/callback/sim_form_md5",
+                              PLUGIN_CALLBACK_URL=f"http://{address('backend', compose)}/callback/{{channel_code}}",
                               PAYMENT_NOTIFICATION_IAM_ADDRESS=address("iam", compose), PAYMENT_NOTIFICATION_LOCAL_RSA_FILE=inputs / "epay.der")
             elif svc == "notifier":
                 values.update(NOTIFIER_GRPC_ADDR=f"{listen}:9115", NOTIFIER_PAYMENT_ADDRESS=address("payment", compose),
@@ -576,7 +584,7 @@ def prepare(root, admin, cache, queue, compose=False):
                               RECONCILIATION_ADMIN="on", RECONCILIATION_ADMIN_PAYMENT_ADDRESS=address("payment", compose),
                               RECONCILIATION_ADMIN_RP_ID=RP, RECONCILIATION_ADMIN_ORIGINS=ORIGIN,
                               RECONCILIATION_DISPUTE_REGISTRY="on", RECONCILIATION_WEBAUTHN_RP_ID=RP, RECONCILIATION_WEBAUTHN_ORIGINS=ORIGIN,
-                              RECONCILIATION_PLUGIN_CHANNELS='{"sim_form_md5_verify":"sim_form_md5"}', RECON_DEPOSITS="off",
+                              RECONCILIATION_PLUGIN_CHANNELS='{"sim_form_md5_verify":"sim_form_md5","epay_v1_verify":"epay_v1"}', RECON_DEPOSITS="off",
                               RECON_COLLECTION_ADDR="collection:9106" if compose else "127.0.0.1:9106",
                               RECON_COLLECTION_SERVER_NAME="collection", RECON_COLLECTION_JWKS_FILE=public / "collection.jwks")
             elif svc == "backend":

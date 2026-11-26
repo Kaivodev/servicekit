@@ -10,9 +10,41 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 )
+
+const (
+	md5Channel  = "sim_form_md5"
+	epayChannel = "epay_v1"
+)
+
+func pluginWorld(code string) string {
+	if strings.HasSuffix(code, "_verify") {
+		return "verification"
+	}
+	return "payment"
+}
+
+var releaseVersion = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`)
+
+func versionAtLeast(version, minimum string) bool {
+	got, want := releaseVersion.FindStringSubmatch(version), releaseVersion.FindStringSubmatch(minimum)
+	if got == nil || want == nil {
+		return false
+	}
+	for i := 1; i <= 3; i++ {
+		// Canonical decimal integers compare by length, then lexically at equal length.
+		if len(got[i]) != len(want[i]) {
+			return len(got[i]) > len(want[i])
+		}
+		if got[i] != want[i] {
+			return got[i] > want[i]
+		}
+	}
+	return true
+}
 
 func (d *driver) gatewayMode() bool {
 	return d.native() && d.env("payment")["AIPAY_UPSTREAM_GATEWAY_ADDRESS"] != ""
@@ -40,11 +72,18 @@ func gatewayPackage(code string, manifest, wasm []byte, expectedCommit string) (
 	var canonical bytes.Buffer
 	writeGatewayJSON(&canonical, manifestObject)
 	require(bytes.Equal(canonical.Bytes(), manifest), "manifest.json must contain canonical v3 bytes: "+code)
-	world := "payment"
-	if code == "sim_form_md5_verify" {
-		world = "verification"
+	if code == epayChannel || code == epayChannel+"_verify" {
+		config, _ := manifestObject["config"].(object)
+		field, _ := config["unpaid_timeout_seconds"].(object)
+		require(field["type"] == "string" && field["required"] == true, code+" manifest must declare required string unpaid_timeout_seconds")
+		minimum := "0.3.0"
+		if pluginWorld(code) == "verification" {
+			minimum = "0.2.0"
+		}
+		v, _ := manifestObject["version"].(string)
+		require(versionAtLeast(v, minimum), fmt.Sprintf("%s requires version %s or newer (manifest version %q)", code, minimum, v))
 	}
-	require(str(manifestObject, "type") == world, "wrong plugin world: "+code)
+	require(str(manifestObject, "type") == pluginWorld(code), "wrong plugin world: "+code)
 	require(str(manifestObject, "code") == code && num(manifestObject, "abi_version") == 3, "wrong plugin code or ABI (expected v3): "+code)
 	commit := str(obj(manifestObject["build"]), "source_commit")
 	_, err := hex.DecodeString(commit)
@@ -98,7 +137,7 @@ func (d *driver) gatewayPackages() {
 		packages, err = filepath.Abs(prebuilt)
 		check(err)
 	}
-	for _, code := range []string{"sim_form_md5", "sim_form_md5_verify"} {
+	for _, code := range []string{md5Channel, md5Channel + "_verify", epayChannel, epayChannel + "_verify"} {
 		d.liveStep("Rust 插件 "+code, func() {
 			pkg := filepath.Join(packages, code)
 			var receipt []byte

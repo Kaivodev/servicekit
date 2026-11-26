@@ -1,8 +1,10 @@
 """Offline checks on a prepared stack. OpenSSL output stays inside the verifier."""
 import base64
 import json
+import re
 import stat
 import subprocess
+from urllib.parse import urlsplit
 
 from stack_config import APP_ROLES, GATEWAYS, PEERS, SERVICES, read_env
 
@@ -14,6 +16,15 @@ def check(ok, message):
 
 def openssl(*args, data=None):
     return subprocess.run(["openssl", *args], input=data, check=True, capture_output=True).stdout
+
+
+def epay_handoff(accounts):
+    epay = [a for a in accounts if a["id"] == "epay-demo"]
+    check(len(epay) == 1 and epay[0].get("style") == "epay-v1" and epay[0].get("pid") == 1001,
+          "invalid EPay simulator account")
+    key = epay[0].get("shared_secret")
+    check(isinstance(key, str) and re.fullmatch(r"[A-Za-z0-9]{32}", key), "invalid EPay simulator key")
+    return {"merchant_key": key}
 
 
 def verify(root):
@@ -50,7 +61,17 @@ def verify(root):
         if name == "notifier":
             check(not any(k.startswith(("AIPAY_DATABASE", "AIPAY_QUEUE", "AIPAY_SIGNING", "AIPAY_PLUGIN"))
                           for k in env), "unexpected notifier credentials")
-    sim = json.loads((root / "inputs/upstream-sim/config.json").read_text())["accounts"][0]
+    payment_env = read_env(root / "env/payment.env")
+    check(urlsplit(payment_env["AIPAY_PLUGIN_CALLBACK_URL"]).path == "/callback/{channel_code}"
+          and payment_env["AIPAY_PLUGIN_CALLBACK_URL"].count("{channel_code}") == 1, "invalid callback template")
+    channels = json.loads(read_env(root / "env/reconciliation.env")["AIPAY_RECONCILIATION_PLUGIN_CHANNELS"])
+    check(all(channels.get(code + "_verify") == code for code in ("sim_form_md5", "epay_v1")),
+          "missing verification plugin mapping")
+    accounts = json.loads((root / "inputs/upstream-sim/config.json").read_text())["accounts"]
+    sim = accounts[0]
+    check(sim["id"] == "md5-demo" and sim["style"] == "form-md5", "missing primary form-md5 account")
+    check(epay_handoff(accounts) == json.loads((root / "handoff/epay.json").read_bytes()),
+          "EPay handoff credential mismatch")
     shared = json.loads((root / "handoff/trade.json").read_bytes())["shared"]
     if (root / "transport.plaintext").exists():
         payment = json.loads((root / "inputs/payment/plugins.json").read_bytes())["credentials"]["sim-md5-v1"]

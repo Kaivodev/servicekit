@@ -121,16 +121,58 @@ func (d *driver) cashier(link string, pay bool) {
 type tradeRun struct {
 	d                                *driver
 	name, proto, number, order, link string
+	channel, amount                  string
+}
+
+func scenarioOrder(scenario string, gateway bool) (amount, channel string) {
+	switch scenario {
+	case "main", "duplicates", "dispute", "seller-offline", "bot-notices", "statement", "archived-work", "cancel":
+		if gateway {
+			return "2.00", epayChannel
+		}
+		return "2.00", md5Channel
+	default:
+		return "1.00", md5Channel
+	}
+}
+
+func (t tradeRun) setScenario(fields object) {
+	t.d.sim("PUT", "/__test/scenarios/"+simulatorAccount(t.channel)+"/"+t.order, fields)
 }
 
 func (t tradeRun) step(label string, f func()) *result {
 	t.d.step(t.name+" "+label, f)
 	return t.d.active
 }
-func (d *driver) createParams(number string) url.Values {
-	return url.Values{"out_trade_no": {number}, "type": {"alipay"}, "name": {"阶段二担保"}, "money": {"1.00"}, "notify_url": {d.addresses().notify + "/notify"}, "return_url": {"https://merchant.aipay.test/return"}, "clientip": {"127.0.0.1"}, "method": {"web"}}
+func (d *driver) createParams(number, amount string) url.Values {
+	return url.Values{"out_trade_no": {number}, "type": {"alipay"}, "name": {"阶段二担保"}, "money": {amount}, "notify_url": {d.addresses().notify + "/notify"}, "return_url": {"https://merchant.aipay.test/return"}, "clientip": {"127.0.0.1"}, "method": {"web"}}
 }
+
+// Resolve the immutable binding on the created order before using any upstream
+// endpoint. On resume this also recovers pre-UG-7 embedded order amounts.
+func (t tradeRun) readOrderRoute() (order, code, money string) {
+	d := t.d
+	rows := d.rows("payment", "payment_orders", `SELECT id::text AS order_id,channel_code,
+		(data#>>'{snapshot,trade,quote,fiat_amount}')::bigint AS amount_minor FROM payment_orders
+		WHERE account_id=$1 AND application_id=$2 AND out_trade_no=$3`, d.required("merchant-account"), d.required("app/"+t.proto), t.number)
+	require(len(rows) == 1, "order for merchant number not found")
+	order, code = str(rows[0], "order_id"), str(rows[0], "channel_code")
+	cents := num(rows[0], "amount_minor")
+	money = fmt.Sprintf("%d.%02d", cents/100, cents%100)
+	d.evidence("订单 ID", order)
+	d.evidence("订单通道", code)
+	d.evidence("订单金额（元）", money)
+	gateway := d.gatewayMode()
+	amount, expected := scenarioOrder(d.scope, gateway)
+	require(code == expected, fmt.Sprintf("order %s routed to %s, expected %s", order, code, expected))
+	if gateway {
+		require(money == amount, "gateway order amount differs from scenario")
+	}
+	return order, code, money
+}
+
 func (d *driver) trade(name, proto string) tradeRun {
+	amount, _ := scenarioOrder(d.scope, d.gatewayMode())
 	t := tradeRun{d: d, name: name, proto: proto, number: d.key(d.scope + "/" + name)}
 	k := d.scope + "/" + name
 	t.step("余额基线", func() {
@@ -142,7 +184,7 @@ func (d *driver) trade(name, proto string) tradeRun {
 		}
 	})
 	t.step("下单与冻结", func() {
-		v := d.createParams(t.number)
+		v := d.createParams(t.number, amount)
 		path := "/mapi.php"
 		link := "payurl"
 		if proto == "v2" {
@@ -150,6 +192,9 @@ func (d *driver) trade(name, proto string) tradeRun {
 			link = "pay_info"
 		}
 		r := d.epay(proto, path, v)
+		order, code, money := t.readOrderRoute()
+		d.put("channel/"+k, code)
+		d.put("amount/"+k, money)
 		if proto == "v1" && r[link] == nil {
 			link = "qrcode"
 		}
@@ -160,9 +205,6 @@ func (d *driver) trade(name, proto string) tradeRun {
 		// /orders pages oldest first, so a long-lived demo merchant cannot find a
 		// new order there. Resolve the ID by merchant number, then check the bot view.
 		app := d.required("app/" + proto)
-		ids := d.rows("payment", "payment_orders", "SELECT id::text AS order_id FROM payment_orders WHERE account_id=$1 AND application_id=$2 AND out_trade_no=$3", d.required("merchant-account"), app, t.number)
-		require(len(ids) == 1, "order for merchant number not found")
-		order := str(ids[0], "order_id")
 		view := d.bot(k+"/order", "/order "+app+" "+order)
 		require(regexp.MustCompile("^"+regexp.QuoteMeta(order)+" · 应用 "+regexp.QuoteMeta(app)+" · 业务 "+regexp.QuoteMeta(d.required("business"))+" · 商户单号 "+regexp.QuoteMeta(t.number)+" · 平台单号 "+regexp.QuoteMeta(str(r, "trade_no"))+" · ").MatchString(view), "bot order view differs from the created order")
 		d.put("order/"+k, order)
@@ -175,13 +217,22 @@ func (d *driver) trade(name, proto string) tradeRun {
 	})
 	t.link = d.required("cashier/" + k)
 	t.order = d.required("order/" + k)
+	if !d.read("channel/"+k, &t.channel) || !d.read("amount/"+k, &t.amount) {
+		t.step("订单通道", func() {
+			order, code, money := t.readOrderRoute()
+			require(order == t.order, "saved order differs from payment order")
+			d.put("channel/"+k, code)
+			d.put("amount/"+k, money)
+		})
+		t.channel, t.amount = d.required("channel/"+k), d.required("amount/"+k)
+	}
 	return t
 }
 func (t tradeRun) paid(copies int) {
 	d := t.d
 	t.step("收银与主动查单", func() {
 		if copies > 1 {
-			d.sim("PUT", "/__test/scenarios/md5-demo/"+t.order, object{"callback_copies": copies})
+			t.setScenario(object{"callback_copies": copies})
 		}
 		d.cashier(t.link, true)
 		waitFor("acknowledged callback copies and ledger OrderPaid", 60*time.Second, func() bool {
@@ -190,7 +241,7 @@ func (t tradeRun) paid(copies int) {
 			matches := []object{}
 			event := ""
 			for _, r := range rows {
-				if r["order_id"] == t.order && r["ack"] == true {
+				if r["account_id"] == simulatorAccount(t.channel) && r["order_id"] == t.order && r["ack"] == true {
 					if event == "" {
 						event = str(r, "event_id")
 					}
@@ -263,7 +314,7 @@ func (t tradeRun) notify() {
 			var rs []receipt
 			decode(t.d.fixtureRecord("notifications.json"), &rs)
 			for _, r := range rs {
-				if r.MerchantOrder == t.number && r.Trade == t.d.required("trade-no/"+t.d.scope+"/"+t.name) && r.Money == "1.00" && r.PID == t.d.required("pid/v1") {
+				if r.MerchantOrder == t.number && r.Trade == t.d.required("trade-no/"+t.d.scope+"/"+t.name) && r.Money == t.amount && r.PID == t.d.required("pid/v1") {
 					t.d.evidence("merchant_receipt", r)
 					return true
 				}
@@ -272,6 +323,55 @@ func (t tradeRun) notify() {
 		})
 	})
 }
+
+func (t tradeRun) backdateUnpaid() {
+	seconds, err := strconv.ParseInt(t.d.required(channelKey(t.channel, "unpaid-timeout")), 10, 64)
+	check(err)
+	fields := object{"query_addtime_backdate_seconds": seconds + 120}
+	t.setScenario(fields)
+	t.d.evidence("未付超时（秒）", seconds)
+	t.d.evidence("模拟器场景", fields)
+}
+
+// Pay only inside the late-payment window after the first independent
+// closed/unpaid observation, before any second one.
+func (t tradeRun) awaitFirstUnpaid(obs string) {
+	d := t.d
+	waitFor("first independent closed/unpaid", time.Minute, func() bool {
+		rs := d.rows("reconciliation", "reconciliation_verification_evidence", obs, t.order)
+		count := 0
+		var first object
+		for _, r := range rs {
+			if r["outcome"] == "closed_unpaid" {
+				count++
+				first = r
+			}
+		}
+		require(count < 2, "second unpaid observation already occurred")
+		if count == 1 {
+			observed, e := time.Parse(time.RFC3339Nano, str(first, "verified_at"))
+			check(e)
+			require(time.Now().Before(observed.Add(5*time.Second)), "late-payment window already closed")
+			d.evidence("first_observation", rs)
+			return true
+		}
+		return false
+	})
+}
+
+func (t tradeRun) inferredCloseEvidence() {
+	d := t.d
+	audits := d.facts("payment", "关单审计", `SELECT id,action,occurred_at FROM payment_audit_logs
+		WHERE target_id=$1 AND action='order.close_skipped_unsupported'`, t.order)
+	require(len(audits) > 0, "missing unsupported close audit")
+	queries := d.facts("payment", "超时推定关单的查单记录", `SELECT exchange_id,upstream_code,occurred_at FROM payment_gateway_executions
+		WHERE order_id=$1 AND operation='query_payment' AND category='succeeded' AND upstream_code='timeout_inferred_close' ORDER BY occurred_at`, t.order)
+	require(len(queries) > 0, "missing timeout-inferred query completion")
+	events := d.facts("payment", "取消核验请求", `SELECT event_id,sequence FROM payment_outbox
+		WHERE order_id=$1 AND event_type='OrderCancellationVerificationRequested'`, t.order)
+	require(len(events) > 0, "missing cancellation verification request")
+}
+
 func (d *driver) cancel(late bool) {
 	name := "未付"
 	if late {
@@ -279,12 +379,16 @@ func (d *driver) cancel(late bool) {
 	}
 	t := d.trade(name, "v2")
 	t.step("关单", func() {
-		if late {
-			d.sim("PUT", "/__test/scenarios/md5-demo/"+t.order, object{"late_payment": true})
+		if t.channel == epayChannel {
+			t.backdateUnpaid()
+		} else if late {
+			t.setScenario(object{"late_payment": true})
 		}
 		d.epay("v2", "/api/pay/close", url.Values{"out_trade_no": {t.number}})
 	})
-	const obs = "SELECT id,verified_at,convert_from(record_json,'UTF8')::jsonb->>'Outcome' AS outcome FROM reconciliation_verification_evidence WHERE order_id=$1 AND operation='query_payment' ORDER BY verified_at"
+	const obs = `SELECT id,verified_at,convert_from(record_json,'UTF8')::jsonb->>'Outcome' AS outcome,
+		convert_from(record_json,'UTF8')::jsonb->>'Kind' AS kind FROM reconciliation_verification_evidence
+		WHERE order_id=$1 AND eligible AND operation='query_payment' ORDER BY verified_at`
 	if !late {
 		t.step("二次未付核验并归还", func() {
 			t.terminal("CANCELLED")
@@ -302,43 +406,55 @@ func (d *driver) cancel(late bool) {
 			}
 			require(!first.IsZero() && last.Sub(first) >= 5*time.Second, "missing two separated closed/unpaid observations")
 			d.evidence("independent_observations", rows)
+			if t.channel == epayChannel {
+				t.inferredCloseEvidence()
+			}
 			t.finish(false)
 		})
 		return
 	}
 	t.step("两次观察之间迟付", func() {
-		waitFor("first independent closed/unpaid", time.Minute, func() bool {
-			rs := d.rows("reconciliation", "reconciliation_verification_evidence", obs, t.order)
-			count := 0
+		// Any eligible paid observation after the first closed/unpaid one shows the
+		// late payment. Payment may find it first and start the release review, so
+		// reconciliation can record it under either kind. A resumed step accepts it.
+		paidAfterFirst := func(rs []object) bool {
+			unpaid := false
 			for _, r := range rs {
 				if r["outcome"] == "closed_unpaid" {
-					count++
+					unpaid = true
+				} else if unpaid && r["outcome"] == "paid" {
+					return true
 				}
 			}
-			require(count < 2, "second unpaid observation already occurred")
-			if count == 1 {
-				observed, e := time.Parse(time.RFC3339Nano, str(rs[len(rs)-1], "verified_at"))
-				check(e)
-				require(time.Now().Before(observed.Add(5*time.Second)), "late-payment window already closed")
-				d.evidence("first_observation", rs)
-				return true
-			}
 			return false
-		})
-		d.cashier(t.link, true)
-		waitFor("independent recheck after late payment", time.Minute, func() bool {
+		}
+		if !paidAfterFirst(d.rows("reconciliation", "reconciliation_verification_evidence", obs, t.order)) {
+			t.awaitFirstUnpaid(obs)
+			d.cashier(t.link, true)
+		}
+		waitFor("independent paid observation after late payment", time.Minute, func() bool {
 			rs := d.rows("reconciliation", "reconciliation_verification_evidence", obs, t.order)
-			if len(rs) >= 2 && rs[len(rs)-1]["outcome"] == "paid" {
+			if paidAfterFirst(rs) {
 				d.evidence("independent_observations", rs)
 				return true
 			}
 			return false
 		})
 		d.chainEvidence(t.order)
+		if t.channel == epayChannel {
+			t.inferredCloseEvidence()
+		}
 		require(d.ledgerTrade(t.order)["status"] != "CANCELLED" && len(d.rows("ledger", "ledger_trade_authorizations", "SELECT source_event_id FROM ledger_trade_authorizations WHERE order_id=$1 AND event_type='TradeCancellationAuthorized'", t.order)) == 0, "late payment released escrow as unpaid")
 		d.evidence("after", d.balanceSnapshot(d.scope+"/late"))
 	})
 	t.release()
+	if t.channel == epayChannel {
+		t.step("无取消授权", func() {
+			auth := d.facts("reconciliation", "取消授权", `SELECT authorization_id FROM reconciliation_authorizations
+				WHERE order_id=$1 AND event_type='TradeCancellationAuthorized'`, t.order)
+			require(len(auth) == 0, "cancellation authorization issued for late payment")
+		})
+	}
 }
 func (d *driver) refund(after bool) {
 	t := d.trade("退款", "v2")
@@ -353,7 +469,7 @@ func (d *driver) refund(after bool) {
 		if !after {
 			require(h["released_seq"] == nil, "order already released")
 		}
-		d.epay("v2", "/api/pay/refund", url.Values{"out_trade_no": {t.number}, "out_refund_no": {t.number}, "money": {"1.00"}})
+		d.epay("v2", "/api/pay/refund", url.Values{"out_trade_no": {t.number}, "out_refund_no": {t.number}, "money": {t.amount}})
 	})
 	t.step("独立核实并核销", func() {
 		t.terminal("REFUNDED")
@@ -476,7 +592,7 @@ func (d *driver) insufficient() {
 			stop("缺样本：本单已放币；请在商户独立支用余额至低于 N 后续跑负例")
 		}
 		require(available < n, "merchant still has N; clean stack has no merchant spending/withdrawal entry. Resume this sample only after an independently authorized debit")
-		v := d.epay("v2", "/api/pay/refund", url.Values{"out_trade_no": {t.number}, "money": {"1.00"}, "out_refund_no": {t.number}})
+		v := d.epay("v2", "/api/pay/refund", url.Values{"out_trade_no": {t.number}, "money": {t.amount}, "out_refund_no": {t.number}})
 		require(v["msg"] == "结果待确认", "unexpected outcome for insufficient balance")
 		p := "/accounts/" + d.required("seller-account") + "/refunds?order_id=" + t.order
 		var refund string
