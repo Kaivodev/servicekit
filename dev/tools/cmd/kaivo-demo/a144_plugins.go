@@ -19,10 +19,14 @@ func (p a144Plugin) account(d *driver) object {
 	view := d.browser("operations").api("GET", p.accountPath+"/"+p.accountID, "", nil)
 	c := obj(view["configuration"])
 	require(c[p.accountField] == p.accountID && c["channel_account_id"] == d.required("uuid/"+channelKey(epayChannel, "channel")), "EPay 账户绑定不符")
-	var config object
-	decode(raw(str(c, "config_json")), &config)
-	require(config["gateway"] == d.addresses().gateway && config["pid"] == "1001", "EPay 账户未指向演示模拟器")
-	require(config["unpaid_timeout_seconds"] == d.required(channelKey(epayChannel, "unpaid-timeout")), "EPay 未付款超时与开通记录不符")
+	// Admin reads may withhold the opaque configuration bytes. Setup already
+	// checked them; verify again only when the owner returns them.
+	if encoded, _ := c["config_json"].(string); encoded != "" {
+		var config object
+		decode(raw(encoded), &config)
+		require(config["gateway"] == d.addresses().gateway && config["pid"] == "1001", "EPay 账户未指向演示模拟器")
+		require(config["unpaid_timeout_seconds"] == d.required(channelKey(epayChannel, "unpaid-timeout")), "EPay 未付款超时与开通记录不符")
+	}
 	if p.owner == "payment" {
 		require(c["enabled"] == true && c["channel_code"] == p.code, "EPay 交易通道尚未启用")
 	} else {
