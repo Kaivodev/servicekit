@@ -73,7 +73,7 @@ func TestA144CancellationPayload(t *testing.T) {
 }
 
 func TestNativeGatewayScenarioPrerequisites(t *testing.T) {
-	for _, scenario := range []string{a144NotFound, a144NotSent, a145NeverSent, a145StaleBinding, a145UnpaidBeforeT, a145LatePayment, a145Refusals} {
+	for _, scenario := range []string{a144NotFound, a144NotSent, a145NeverSent, a145StaleBinding, a145UnpaidBeforeT, a145LatePayment, a145Refusals, kQueryTransient, kLedgerCancelEvent} {
 		root := t.TempDir()
 		amount, channel := scenarioOrder(scenario, true)
 		if scenarios[scenario] == nil || channel != epayChannel || amount != "2.00" {
@@ -97,37 +97,51 @@ func TestNativeGatewayScenarioPrerequisites(t *testing.T) {
 		check(atomic(payment, nil))
 		refuses("需要交易与核验网关")
 		check(atomic(filepath.Join(root, "env/reconciliation.env"), []byte("AIPAY_RECONCILIATION_UPSTREAM_GATEWAY_ADDRESS=verify\n")))
-		if scenario != a144NotSent && scenario != a145NeverSent {
-			for _, mode := range []string{"staging", "production"} {
-				check(atomic(payment, []byte("AIPAY_UPSTREAM_GATEWAY_ADDRESS=trade\nAIPAY_ENVIRONMENT="+mode+"\n")))
-				refuses("开发环境")
+		check(atomic(filepath.Join(root, "inputs/upstream-sim/config.json"), []byte(`{"environment":"test"}`)))
+		for _, mode := range []string{"staging", "production"} {
+			check(atomic(payment, []byte("AIPAY_UPSTREAM_GATEWAY_ADDRESS=trade\nAIPAY_ENVIRONMENT="+mode+"\n")))
+			if scenario != a144NotSent && scenario != a145NeverSent && scenario != kQueryTransient {
+				refuses("AIPAY_ENVIRONMENT=development")
+			} else {
+				refuses("control token")
 			}
 		}
 		check(atomic(payment, []byte("AIPAY_UPSTREAM_GATEWAY_ADDRESS=trade\nAIPAY_ENVIRONMENT=development\n")))
-		check(atomic(filepath.Join(root, "inputs/upstream-sim/config.json"), []byte(`{"environment":"test"}`)))
-		refuses("控制令牌")
+		refuses("control token")
 	}
 }
 
-func TestA144OwnerEnvironment(t *testing.T) {
+func TestPaymentDevOwnerEnvironment(t *testing.T) {
 	root := t.TempDir()
 	e := nativeEnvironment{root: root, dir: root}
-	check(atomic(filepath.Join(root, "env/payment.env"), []byte("AIPAY_ENVIRONMENT=development\n")))
 	check(atomic(filepath.Join(root, "env/payment-migrate.env"), []byte("AIPAY_DATABASE_URL=owner-db\n")))
 	bin := filepath.Join(root, "bin/payment")
 	check(atomic(bin, []byte("#!/bin/sh\nprintf '%s/%s' \"$AIPAY_ENVIRONMENT\" \"$AIPAY_DATABASE_URL\"\n")))
 	check(os.Chmod(bin, 0700))
 	t.Setenv("AIPAY_ENVIRONMENT", "parent")
-	args := []string{"dev", "backdate-create", "--order", "order", "--seconds", "4320"}
-	if got := string(e.owner("payment", "AIPAY_DATABASE_URL", args...)); got != "development/owner-db" {
-		t.Fatal("wrong payment owner environment")
+	for _, args := range [][]string{
+		{"dev", "backdate-create", "--order", "order", "--seconds", "4320"},
+		{"dev", "archive-work", "--order", "order"},
+	} {
+		check(atomic(filepath.Join(root, "env/payment.env"), []byte("AIPAY_ENVIRONMENT=development\n")))
+		if !isPaymentDevCommand("payment", args) || isPaymentDevCommand("ledger", args) {
+			t.Fatalf("incorrect owner gate for %s", args[1])
+		}
+		if got := string(e.owner("payment", "AIPAY_DATABASE_URL", args...)); got != "development/owner-db" {
+			t.Fatalf("wrong payment owner environment for %s", args[1])
+		}
+		check(atomic(filepath.Join(root, "env/payment.env"), []byte("AIPAY_ENVIRONMENT=staging\n")))
+		expectFailure(t, func() { e.owner("payment", "AIPAY_DATABASE_URL", args...) })
+		expectFailure(t, func() { new(kubeEnvironment).owner("payment", "AIPAY_DATABASE_URL", args...) })
+	}
+	for _, args := range [][]string{nil, {"dev"}, {"dev", "other"}, {"archive-work"}, {"other", "backdate-create"}} {
+		if isPaymentDevCommand("payment", args) {
+			t.Fatalf("unexpected payment dev command: %v", args)
+		}
 	}
 	if got := string(e.owner("payment", "AIPAY_DATABASE_URL", "another")); got != "/owner-db" {
 		t.Fatal("unrelated owner command inherited the environment")
 	}
-	check(atomic(filepath.Join(root, "env/payment.env"), []byte("AIPAY_ENVIRONMENT=staging\n")))
-	expectFailure(t, func() { e.owner("payment", "AIPAY_DATABASE_URL", args...) })
-	expectFailure(t, func() { new(kubeEnvironment).owner("payment", "AIPAY_DATABASE_URL", args...) })
 }
 
 func TestA144ReadsEnabledPackages(t *testing.T) {

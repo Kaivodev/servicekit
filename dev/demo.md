@@ -82,6 +82,8 @@ V1 返回 HTTP 200 且 `code == 1` 时，驱动优先取 `payurl`，缺省时取
 
 ## 资金场景清单
 
+Both K scenarios require the native stack with trade and verification gateways, payment at schema version 24 or later, and the simulator test control token. Set `AIPAY_ENVIRONMENT=development` on payment for `k-ledger-cancel-event` so its owner can run `dev archive-work`.
+
 本表按 UG-7 配置验收。切换前的运行结果见 [验证机历史记录](README.md#验证机记录)。
 
 每个担保样本取余额基线前都会等待卖方和商户的在途持有归零，上一场景遗留的风控持有会先自然放币。若 2 分钟内仍未归零，驱动会停止，并在报告中列出非零余额、待释放笔数和卖方冻结订单。
@@ -98,6 +100,8 @@ V1 返回 HTTP 200 且 `code == 1` 时，驱动优先取 `payurl`，缺省时取
 | a145-unpaid-before-t | Lose one create and shift the instruction TTL. Verify that both signatures precede the unpaid timeout, then trace the two not_found_unpaid observations to cancellation and the seller balance. | Pending native run |
 | a145-late-payment | Force-close a bound order using two closed_unpaid observations, then pay at its cashier. Match the late-payment row, platform view and audit to the approval. Close the seller evidence review and check that escrow is unchanged. | Pending native run |
 | a145-refusals | Check early submission, self-approval with the risk credential, approval after payment, and submission on the paid order. Verify the normal merchant notification and release with zero cancellation requests. | Pending native run |
+| k-query-transient | Create a 2.00 EPay order and pause the listener for 60 seconds. Check the query failure kind, AWAITING_PAYMENT and PENDING states, and the retained instruction. Repeat the create during the pause and match its payurl. After recovery, pay through that link and verify the merchant receipt and RELEASED balances. | Pending native run |
+| k-ledger-cancel-event | Close an unpaid 2.00 EPay order. Once payment requests verification, archive its work and check that reconciliation has issued no cancellation authorization yet. Verify one `order.ledger_cancelled`, zero `order.ledger_verified`, one `order.dev_work_archived`, unfinished archived work, and the returned escrow. | Pending native run |
 | refund-insufficient | 已放币原单需由商户独立支用到可用余额低于 N。验签 V2 拒绝，核对 payment 的预留拒绝审计与 stopped/RESERVING、零退款预留、零卖方凭证、零上游退款调用。账本仍为 RELEASED，分录序号不变 | 待验证机 |
 | settle-refunds | 按演示卖方扫描已有人工退款，续办凭证与双人审批，核对 reconciliation 授权、ledger 核销和卖方余额。可处理旧场景留下的订单，无需原模拟器记录 | 待验证机 |
 | refund-before-release | 商户 V2 全额退款返回已签名的受理回执及退款号。卖方提交凭证、平台双签，等待异议期结束和独立授权。核对 PRE_RELEASE 占用 Q、REFUNDED、原余额及 V2 退款终态查询 | 待验证机 |

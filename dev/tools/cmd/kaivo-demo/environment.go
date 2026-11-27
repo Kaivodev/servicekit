@@ -1,10 +1,13 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -99,10 +102,14 @@ func (d nativeEnvironment) owner(service, dbvar string, args ...string) []byte {
 	}
 	require(dsn != "", "missing "+service+" ceremony connection")
 	list := []string{"PATH=" + os.Getenv("PATH"), dbvar + "=" + dsn}
-	if isBackdateCreate(service, args) {
+	bin := filepath.Join(d.root, "bin", service)
+	if isPaymentDevCommand(service, args) {
 		mode := d.env("payment")["AIPAY_ENVIRONMENT"]
-		require(mode == "development", "dev backdate-create 仅允许在 payment 开发环境运行")
+		require(mode == "development", "payment dev commands require AIPAY_ENVIRONMENT=development")
 		list = append(list, "AIPAY_ENVIRONMENT="+mode)
+		if args[1] == "archive-work" {
+			return d.archiveWork(bin, list, args)
+		}
 	}
 	if dbvar == "AIPAY_IAM_BOOTSTRAP_DATABASE_URL" {
 		for k, v := range d.env("iam") {
@@ -111,5 +118,25 @@ func (d nativeEnvironment) owner(service, dbvar string, args ...string) []byte {
 			}
 		}
 	}
-	return command(d.dir, list, filepath.Join(d.root, "bin", service), args...)
+	return command(d.dir, list, bin, args...)
+}
+
+func (d nativeEnvironment) archiveWork(bin string, env, args []string) []byte {
+	const timeout = 10 * time.Second
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	var reply []byte
+	waitFor("payment to release the order work lease", timeout, func() bool {
+		cmd := exec.CommandContext(ctx, bin, args...)
+		cmd.Dir, cmd.Env = d.dir, env
+		var err error
+		reply, err = cmd.Output()
+		if exit, ok := err.(*exec.ExitError); ok && bytes.Contains(exit.Stderr, []byte("retry if it is executing")) {
+			return false
+		}
+		require(ctx.Err() == nil, "timed out archiving the order work")
+		require(err == nil, "payment dev archive-work failed")
+		return true
+	})
+	return reply
 }

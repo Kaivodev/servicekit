@@ -17,8 +17,8 @@ const (
 	a144Reason   = "create_not_found_inferred"
 )
 
-func isBackdateCreate(service string, args []string) bool {
-	return service == "payment" && len(args) >= 2 && args[0] == "dev" && args[1] == "backdate-create"
+func isPaymentDevCommand(service string, args []string) bool {
+	return service == "payment" && len(args) >= 2 && args[0] == "dev" && (args[1] == "backdate-create" || args[1] == "archive-work")
 }
 
 func (d *driver) checkA144Environment(scenario string) {
@@ -27,20 +27,26 @@ func (d *driver) checkA144Environment(scenario string) {
 		_, err := os.Stat(filepath.Join(d.root, "stack.env"))
 		require(os.IsNotExist(err), scenario+" 仅支持本机进程栈，请检查状态目录是否属于 Compose")
 		require(d.gatewayMode() && d.env("reconciliation")["AIPAY_RECONCILIATION_UPSTREAM_GATEWAY_ADDRESS"] != "", scenario+" 需要交易与核验网关")
-		if scenario == a144NotFound || isA145Scenario(scenario) && scenario != a145NeverSent {
-			require(d.env("payment")["AIPAY_ENVIRONMENT"] == "development", "dev backdate-create 仅允许在 payment 开发环境运行")
+		if scenario == a144NotFound || scenario == kLedgerCancelEvent || isA145Scenario(scenario) && scenario != a145NeverSent {
+			require(d.env("payment")["AIPAY_ENVIRONMENT"] == "development", scenario+" requires AIPAY_ENVIRONMENT=development for payment dev commands")
 		}
 		var cfg struct {
 			Environment string
 			Token       string `json:"control_token"`
 		}
 		decode(d.input("inputs/upstream-sim/config.json"), &cfg)
-		require(cfg.Environment == "test" && cfg.Token != "", scenario+" 需要启用 upstream-sim 测试控制接口及控制令牌")
+		require(cfg.Environment == "test" && cfg.Token != "", scenario+" requires the simulator test control API and a control token")
+		var pause listenerPause
+		if scenario == kQueryTransient && d.read(queryPauseKey, &pause) && time.Now().Before(pause.ResumeAt.Add(listenerResumeMargin)) {
+			// The listener also serves the control API. This run already authenticated the pause.
+			return
+		}
 		// Exercise the authenticated control path before any publication or fault.
 		var next object
 		decode(d.sim("GET", "/__test/accounts/"+simulatorAccount(epayChannel)+"/next-create", nil), &next)
-		if scenario == a144NotSent || scenario == a145NeverSent || scenario == a145LatePayment || scenario == a145Refusals {
-			require(len(next) == 0, "EPay 模拟器已有待执行的下单故障")
+		switch scenario {
+		case a144NotSent, a145NeverSent, a145LatePayment, a145Refusals, kQueryTransient, kLedgerCancelEvent:
+			require(len(next) == 0, "the EPay simulator already has a pending create fault")
 		}
 	})
 }

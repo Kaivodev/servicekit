@@ -294,6 +294,8 @@ stack demo run a145-stale-binding
 stack demo run a145-unpaid-before-t
 stack demo run a145-late-payment
 stack demo run a145-refusals
+stack demo run k-query-transient
+stack demo run k-ledger-cancel-event
 stack demo run settle-refunds
 stack demo run refund-before-release
 stack demo run refund-after-release
@@ -324,6 +326,8 @@ stack demo run refund-insufficient
 - `a145-unpaid-before-t` loses one create and waits for payment to record a missing order. It backdates the instruction anchors by the TTL plus 60 seconds and checks that risk obtained two approvals before the channel unpaid deadline. The proof links the independent observations to the ledger posting and excludes a system-inferred close.
 - `a145-late-payment` keeps the cashier link for a bound order. After approval it backdates the simulator query response by the unpaid timeout plus 120 seconds. Two closed-unpaid observations authorize cancellation. A subsequent cashier payment is linked to the forced-close approval, then closed by seller evidence and two reviewers with the original escrow posting intact.
 - `a145-refusals` uses one order to check early submission (409), requester self-approval (403), approval after payment (409), and a fresh submission on the paid order (409). Risk uses its own WebAuthn credential enrolled at platform login. Its IAM role lacks approval permission, so the platform can return 403 before payment receives the assertion. The driver checks signature records, the merchant receipt, release balances, and the absence of a cancellation request.
+- `k-query-transient` pauses the simulator for 60 seconds after a 2.00 EPay create. It checks the failed query audit, pending payment and intact instruction, then repeats the merchant create during the pause and pays through the original cashier after recovery. It verifies the merchant receipt and release balances. Both K scenarios require the native stack, trade and verification gateways, the simulator test control token, and payment at schema version 24 or later.
+- `k-ledger-cancel-event` closes an unpaid 2.00 EPay order and uses `payment dev archive-work` before reconciliation authorizes cancellation. It requires one ledger cancellation event audit, no work-path verification, an archived unfinished work row, and the returned escrow. An authorization already visible at archive time makes the run inconclusive. This scenario also requires `AIPAY_ENVIRONMENT=development` for payment.
 - main、duplicates、dispute、seller-offline、bot-notices、statement、archived-work、cancel 下单 2.00 元。本轮退款和 late-payment 场景每单 1.00 元，使用 form-md5 收银。商户 V2、争议裁决及平台运营发起的退款共用卖方举证、双人复核、独立授权与账本核销流程。每笔原单的实际通道记录在报告中。
 - `manual-refund` 验证放币后驳回首版凭证、审批第二版，以及卖方监听对平台复核路由返回 404。`manual-refund-failure` 验证放币前失败授权恢复原担保后正常放币。`late-payment` 等待平台取消后才付款，经主动查单和凭证双签结案。`refund-insufficient` 单独运行，报告会记录所需 N 与商户可用余额。
 - EPay 两实例的 `unpaid_timeout_seconds` 等于 payment 的付款指令有效期加 1 小时，向上取整秒。默认 10 分钟对应 T=4200 秒。cancel 在关单前只回拨原单查单应答的建单时间 T+120 秒，未付单须经两次间隔至少 5 秒的独立观测才归还担保。迟付单在首次观测后仍可收银付款。

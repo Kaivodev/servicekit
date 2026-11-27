@@ -19,6 +19,9 @@ const (
 	a145LatePayment   = "a145-late-payment"
 	a145Refusals      = "a145-refusals"
 
+	kQueryTransient    = "k-query-transient"
+	kLedgerCancelEvent = "k-ledger-cancel-event"
+
 	unboundClose    = pay.OrderCancellationBasis_ORDER_CANCELLATION_BASIS_OPERATOR_FORCED_CLOSE
 	boundClose      = pay.OrderCancellationBasis_ORDER_CANCELLATION_BASIS_OPERATOR_FORCED_CLOSE_BOUND
 	forcedReason    = "operator_forced_close"
@@ -370,7 +373,7 @@ func (d *driver) runA145NeverSent() {
 		require(d.read("resume-after/"+t.number, &after), "missing listener resume time")
 		// The simulator answers the pause before closing its listener, so it
 		// reopens slightly after the recorded time. Leave a margin.
-		if delay := time.Until(after) + 5*time.Second; delay > 0 {
+		if delay := time.Until(after) + listenerResumeMargin; delay > 0 {
 			d.sleep(delay)
 		}
 		var next object

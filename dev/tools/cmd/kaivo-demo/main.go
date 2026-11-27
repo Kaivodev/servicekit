@@ -115,7 +115,7 @@ func executeContext(ctx context.Context, args []string) (err error) {
 		}
 		d.report()
 		d.stepGroup(target, func() {
-			if target == a144NotSent || target == a144NotFound || isA145Scenario(target) {
+			if target == a144NotSent || target == a144NotFound || isA145Scenario(target) || target == kQueryTransient || target == kLedgerCancelEvent {
 				d.checkA144Environment(target)
 			}
 			if localCapability(target) {

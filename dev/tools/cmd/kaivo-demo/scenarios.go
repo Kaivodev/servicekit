@@ -126,7 +126,7 @@ func scenarioOrder(scenario string, gateway bool) (amount, channel string) {
 	case livePhase:
 		return "1.11", epayChannel
 	case "main", "duplicates", "dispute", "seller-offline", "bot-notices", "statement", "archived-work", "cancel", a144NotSent, a144NotFound,
-		a145NeverSent, a145StaleBinding, a145UnpaidBeforeT, a145LatePayment, a145Refusals:
+		a145NeverSent, a145StaleBinding, a145UnpaidBeforeT, a145LatePayment, a145Refusals, kQueryTransient, kLedgerCancelEvent:
 		if gateway {
 			return "2.00", epayChannel
 		}
@@ -422,8 +422,14 @@ func (d *driver) cancel(late bool) {
 		convert_from(record_json,'UTF8')::jsonb->>'Kind' AS kind FROM reconciliation_verification_evidence
 		WHERE order_id=$1 AND eligible AND operation='query_payment' ORDER BY verified_at`
 	if !late {
+		if d.scope == kLedgerCancelEvent {
+			t.archiveCancellationWork()
+		}
 		t.step("二次未付核验并归还", func() {
 			t.terminal("CANCELLED")
+			if d.scope == kLedgerCancelEvent {
+				t.checkCancellationProjection()
+			}
 			rows := d.rows("reconciliation", "reconciliation_verification_evidence", obs, t.order)
 			var first, last time.Time
 			for _, r := range rows {
@@ -563,6 +569,9 @@ func (d *driver) dispute() {
 }
 
 var scenarios = map[string]func(*driver){
+	kQueryTransient:    (*driver).runKQueryTransient,
+	kLedgerCancelEvent: func(d *driver) { d.cancel(false) },
+
 	a145NeverSent:     (*driver).runA145NeverSent,
 	a145StaleBinding:  (*driver).runA145StaleBinding,
 	a145UnpaidBeforeT: (*driver).runA145UnpaidBeforeT,

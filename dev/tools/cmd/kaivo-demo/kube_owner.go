@@ -17,7 +17,7 @@ func adminLabel(service string) string {
 }
 
 func (k *kubeEnvironment) owner(service, dbvar string, args ...string) []byte {
-	require(!isBackdateCreate(service, args), "dev backdate-create 仅允许在本机开发栈运行")
+	require(!isPaymentDevCommand(service, args), "payment dev commands require the native development stack")
 	ns := k.namespaces[k.domain(service)]
 	var deployment object
 	decode(k.kubectl(nil, ns, "get", "deployment", service, "-o", "json"), &deployment)
