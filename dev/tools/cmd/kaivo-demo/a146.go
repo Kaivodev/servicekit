@@ -22,7 +22,7 @@ func disputeReturnPlan() ([]string, []string) {
 		"Refuse release to the recipient with HTTP 200, business code 409 and " + rulingOutcomeDenied + ". Check zero ruling requests and an unchanged control version.",
 		"Backdate the simulator order and approve return to the original seller with two signatures. Match the cancellation authorization to the ruling and two closed-unpaid observations at least the pinned window apart.",
 		"Verify CANCELLED, a return of Q without fees, the ledger cancellation audit, and the resolved payment, platform and seller dispute records.",
-		"Verify merchant V2 query status 0, successful close and zero payment notifications.",
+		"Verify merchant V2 query status 0, a refused close that leaves the order cancelled (existing behaviour after any platform-side cancellation) and zero payment notifications.",
 	}, []string{"Reconciliation stores the TradeCancellationAuthorized protobuf in reconciliation_authorizations.payload and the observation IDs in evidence_material."}
 }
 
@@ -114,9 +114,16 @@ func (d *driver) runDisputeReturn() {
 		query := d.epay("v2", "/api/pay/query", url.Values{"out_trade_no": {t.number}})
 		d.evidence("merchant_query", object{"out_trade_no": query["out_trade_no"], "status": query["status"], "code": query["code"]})
 		require(query["out_trade_no"] == t.number && num(query, "status") == 0, "merchant query did not report the original order as unpaid")
-		closeReply := d.epay("v2", "/api/pay/close", url.Values{"out_trade_no": {t.number}})
-		d.evidence("merchant_close", object{"out_trade_no": closeReply["out_trade_no"], "code": closeReply["code"]})
-		require(closeReply["out_trade_no"] == t.number && num(closeReply, "code") == 0, "merchant close did not succeed on the cancelled order")
+		// Existing behaviour for every platform-side cancellation (A140, A144,
+		// A145, a dispute return): payment only accepts a merchant close while
+		// the escrow is still RESERVED, so a later close is refused and changes
+		// nothing.
+		status, closeReply := d.signedEPay("v2", "/api/pay/close", url.Values{"out_trade_no": {t.number}})
+		d.evidence("merchant_close", object{"http_status": status, "code": closeReply["code"], "msg": closeReply["msg"]})
+		require(status == 200 && num(closeReply, "code") == -1, "merchant close on the cancelled order was not refused")
+		order := d.browser("operations").api("GET", "/orders/"+t.order, "", nil)
+		hold := d.ledgerTrade(t.order)
+		require(order["status"] == "cancelled" && hold["status"] == "CANCELLED", "the refused merchant close changed the cancelled order")
 		notices := d.facts("payment", "payment_notifications", "SELECT id,status FROM payment_notifications WHERE order_id=$1", t.order)
 		require(len(notices) == 0, "payment created a merchant notification for the unpaid order")
 	})
