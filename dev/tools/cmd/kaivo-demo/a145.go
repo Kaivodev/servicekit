@@ -191,15 +191,17 @@ func refusedWrite(path string, code int, write func()) (refused bool) {
 	return false
 }
 
+// The platform approval detail returns the owner request header, the
+// canonical material as protobuf JSON and the recorded approvals.
 func (t tradeRun) approvalDetail(id string) object {
 	d := t.d
 	person := approvers[0]
 	d.login(person)
 	r := d.browser(person).api("GET", "/approvals/payment/"+id, "", nil)
-	if approval, ok := r["approval"].(object); ok {
-		r = approval
-	}
-	require(obj(r["approval_request"])["id"] == id, "approval detail returned a different request")
+	require(r["owner_service"] == "payment" && obj(r["request"])["id"] == id && str(r, "canonical_material_json") != "", "approval detail returned a different request")
+	var material object
+	decode([]byte(str(r, "canonical_material_json")), &material)
+	require(material["kind"] == "forced_close" && obj(material["forced_close"]) != nil, "approval detail lost the forced-close material")
 	return r
 }
 
@@ -207,16 +209,16 @@ func (t tradeRun) submitClose(view object, reason string, attempt int) object {
 	d := t.d
 	version := num(view, "control_version")
 	aid := approvalInView(view)
-	var r object
-	if aid != "" {
-		r = t.approvalDetail(aid)
-	} else {
+	if aid == "" {
 		require(view["eligible"] == true, "order is ineligible for forced close")
 		d.evidence("submission_view", view)
-		r = d.browser("risk").write(fmt.Sprintf("risk/forced-close/%s/%d", t.order, attempt), t.submitPath(), func() object {
-			return object{"expected_control_version": version, "reason": reason}
-		})
 	}
+	// A resumed run replays the original submission through the same
+	// idempotency key; payment returns the committed approval unchanged.
+	r := d.browser("risk").write(fmt.Sprintf("risk/forced-close/%s/%d", t.order, attempt), t.submitPath(), func() object {
+		return object{"expected_control_version": version, "reason": reason}
+	})
+	require(aid == "" || str(obj(r["approval_request"]), "id") == aid, "replayed submission differs from the recorded request")
 	m := obj(r["material"])
 	require(m["kind"] == "forced_close" && m["requested_by"] == d.required("user/risk"), "unexpected forced-close material or requester")
 	op := obj(m["forced_close"])
@@ -564,6 +566,8 @@ func (t tradeRun) refuseSignature(person, aid string, code int, digest []byte) {
 	records, present := r["approvals"]
 	votes, ok := records.([]any)
 	require(present && (records == nil || ok && len(votes) == 0), "expected an empty approval record list after the refused signature")
+	stored := d.facts("payment", "approval_signatures", `SELECT approver_id FROM payment_admin_approvals WHERE request_id=$1`, aid)
+	require(len(stored) == 0, "payment recorded a signature for the refused assertion")
 	d.evidence("refused_assertion", object{"request_id": aid, "persona": person, "business_code": code, "approvals": 0})
 }
 

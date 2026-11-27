@@ -138,30 +138,32 @@ func TestA145ApprovalVectorsAndResume(t *testing.T) {
 			d.active = &result{Evidence: object{}}
 			d.put("user/risk", requester)
 			trade := tradeRun{d: d, order: str(obj(op["trade"]), "order_id")}
-			// Simulate a lost first signature response. The view points back to
-			// the same request; only the missing second signature may be posted.
+			// Simulate a lost first signature response. Recovery replays the
+			// submission and each signature under its recorded idempotency key;
+			// payment returns committed results, so only the second signer adds
+			// a record.
 			first := approvers[0]
+			submitted := object{"approval_request": header, "material": m, "approvals": []any{}}
 			approval["approvals"] = []any{object{"request_id": aid, "approver_id": d.key("person/" + first), "assertion": object{"credential_id": b64.EncodeToString(d.credential(first).ID)}}}
-			secondPerson := d.key("person/" + approvers[1])
-			secondCredential := b64.EncodeToString(d.credential(approvers[1]).ID)
 			var posts []string
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				path := strings.TrimPrefix(r.URL.Path, "/api/v1/platform")
 				var data object
 				switch {
-				case r.Method == "GET" && path == "/approvals/payment/"+aid:
-					data = approval
 				case r.Method == "GET" && path == "/auth/csrf":
 					data = object{"token": "csrf"}
+				case r.Method == "POST" && path == trade.submitPath():
+					data = submitted
 				case r.Method == "POST" && path == assertionPath(aid):
 					cookie, err := r.Cookie("__Host-kaivo_platform_session")
-					if err != nil || cookie.Value != approvers[1] || r.Header.Get("Idempotency-Key") == "" || r.Header.Get("X-CSRF-Token") != "csrf" {
+					if err != nil || !slices.Contains(approvers, cookie.Value) || r.Header.Get("Idempotency-Key") == "" || r.Header.Get("X-CSRF-Token") != "csrf" {
 						t.Error("unexpected signer or signature headers")
 						return
 					}
+					person := cookie.Value
 					var body struct{ Assertion object }
-					if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Assertion["credential_id"] != secondCredential {
-						t.Error("missing second approver assertion")
+					if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Assertion["credential_id"] != b64.EncodeToString(d.credential(person).ID) {
+						t.Error("assertion from the wrong credential")
 						return
 					}
 					var client struct{ Challenge string }
@@ -169,9 +171,13 @@ func TestA145ApprovalVectorsAndResume(t *testing.T) {
 					if client.Challenge != b64.EncodeToString(digest) {
 						t.Error("assertion uses the wrong request digest")
 					}
-					posts = append(posts, cookie.Value)
-					approval["approvals"] = append(approvalRecords(approval), object{"request_id": aid, "approver_id": secondPerson, "assertion": body.Assertion})
-					header["status"] = "approved"
+					posts = append(posts, person)
+					if !signedBy(approval, d.key("person/"+person)) {
+						approval["approvals"] = append(approvalRecords(approval), object{"request_id": aid, "approver_id": d.key("person/" + person), "assertion": body.Assertion})
+					}
+					if len(approvalRecords(approval)) == 2 {
+						header["status"] = "approved"
+					}
 					data = approval
 				default:
 					t.Errorf("unexpected write or read on recovery: %s %s", r.Method, path)
@@ -180,7 +186,7 @@ func TestA145ApprovalVectorsAndResume(t *testing.T) {
 				w.Write(encoded(object{"code": 200, "data": data}))
 			}))
 			defer server.Close()
-			for _, person := range approvers {
+			for _, person := range append([]string{"risk"}, approvers...) {
 				b := d.browser(person)
 				b.addr = strings.TrimPrefix(server.URL, "http://")
 				b.cookies["__Host-kaivo_platform_session"] = person
@@ -191,8 +197,9 @@ func TestA145ApprovalVectorsAndResume(t *testing.T) {
 				current := trade.submitClose(view, str(op, "reason"), 0)
 				d.approveExisting("forced-close/"+aid, "payment", requester, "/forced-closes", current)
 			}
-			if !slices.Equal(posts, approvers[1:]) || d.active.Evidence["approval_status"] != "approved" {
-				t.Fatal("recovery did not preserve the two approved signatures")
+			records := approvalRecords(approval)
+			if len(records) != 2 || !signedBy(approval, d.key("person/"+approvers[1])) || d.active.Evidence["approval_status"] != "approved" || !slices.Contains(posts, approvers[1]) {
+				t.Fatal("recovery did not end with exactly the two approved signatures", posts)
 			}
 		})
 	}
