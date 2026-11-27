@@ -521,7 +521,8 @@ func (t tradeRun) checkLateForcedClose(id, approval string) {
 		require(row["forced_close_request_id"] == approval, "late payment cites a different forced close")
 		d.login("operations")
 		view := d.browser("operations").api("GET", "/late-payments/"+id, "", nil)
-		require(view["forced_close_approval_request_id"] == approval && view["order_id"] == t.order, "platform late-payment view lost the forced-close origin")
+		// The platform view carries the order in its trade snapshot.
+		require(view["forced_close_approval_request_id"] == approval && obj(view["trade"])["order_id"] == t.order, "platform late-payment view lost the forced-close origin")
 		d.evidence("forced_close_approval_request_id", approval)
 		rows := d.facts("payment", "late_payment_audit", `SELECT id,changes#>>'{metadata,close_reason}' AS close_reason FROM payment_audit_logs
 			WHERE target_type='order' AND target_id=$1 AND action='order.late_payment_detected'`, t.order)
