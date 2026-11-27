@@ -108,10 +108,13 @@ func (b *browser) apiGrant(method, path, key string, body object, grant string) 
 
 // An image upload needs the server's canonical JPEG command digest before MFA.
 func (b *browser) submitRecent(c portalCommand) object {
-	return b.portalAPI("POST", c.path, c.key, c.body, "", &c)
+	return b.portalAPI("POST", c.path, c.key, c.body, "", func(digest []byte) string {
+		copy(c.digest[:], digest)
+		return b.grant(c)
+	})
 }
 
-func (b *browser) portalAPI(method, path, key string, body object, grant string, recent *portalCommand) object {
+func (b *browser) portalAPI(method, path, key string, body object, grant string, reauthenticate func([]byte) string) object {
 	var data []byte
 	h := map[string]string{}
 	if grant != "" {
@@ -154,11 +157,10 @@ func (b *browser) portalAPI(method, path, key string, body object, grant string,
 	} else {
 		decode(out, &env)
 	}
-	if recent != nil && env.Code == 428 && (code == 200 || code == 428) {
+	if reauthenticate != nil && env.Code == 428 && (code == 200 || code == 428) {
 		digest := raw(headers.Get("X-Command-SHA256"))
-		require(len(digest) == len(recent.digest), "missing canonical reauthentication digest")
-		copy(recent.digest[:], digest)
-		return b.apiGrant(method, path, key, body, b.grant(*recent))
+		require(len(digest) == sha256.Size, "missing canonical reauthentication digest")
+		return b.apiGrant(method, path, key, body, reauthenticate(digest))
 	}
 	if code != 200 || env.Code != 200 {
 		if postReleaseEntry {
@@ -176,7 +178,7 @@ func (b *browser) portalAPI(method, path, key string, body object, grant string,
 		if b.d.liveEPay {
 			stop("%s %s → HTTP %d, backend code %d", method, label, code, env.Code)
 		}
-		panic(failure{reason: fmt.Sprintf("%s %s → HTTP %d, backend code %d (%s)", method, label, code, env.Code, env.Message), method: method, path: path, httpStatus: code, businessCode: env.Code})
+		panic(failure{reason: fmt.Sprintf("%s %s → HTTP %d, backend code %d (%s)", method, label, code, env.Code, env.Message), method: method, path: path, httpStatus: code, businessCode: env.Code, message: env.Message})
 	}
 	return env.Data
 }

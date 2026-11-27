@@ -569,6 +569,8 @@ func (d *driver) dispute() {
 }
 
 var scenarios = map[string]func(*driver){
+	ledgerReadOnlyExit: (*driver).runLedgerReadOnlyExit,
+	ledgerCarryover:    (*driver).runLedgerCarryover,
 	kQueryTransient:    (*driver).runKQueryTransient,
 	kLedgerCancelEvent: func(d *driver) { d.cancel(false) },
 
@@ -623,6 +625,24 @@ func (d *driver) run(s string) {
 		}
 		return
 	}
+	if isLedgerScenario(s) {
+		d.liveStep("Ledger staff sessions", func() {
+			staff := []string{"finance", "approver1", "approver3"}
+			if s == ledgerReadOnlyExit {
+				staff = []string{"risk", "approver1", "approver2", "approver3"}
+			}
+			for _, n := range staff {
+				d.login(n)
+			}
+		})
+	} else {
+		d.orderSessions(s)
+	}
+	scenarios[s](d)
+	d.put("finished/"+d.scope, true)
+}
+
+func (d *driver) orderSessions(s string) {
 	d.liveStep("场景会话与行情", func() {
 		d.required("seller-account")
 		d.required("merchant-account")
@@ -643,8 +663,6 @@ func (d *driver) run(s string) {
 		require(strings.Contains(reply, "注册或登录已完成"), "merchant Telegram login refused")
 		d.refreshMarket()
 	})
-	scenarios[s](d)
-	d.put("finished/"+d.scope, true)
 }
 
 // This branch can resume after an independently authorized spend of the recipient funds.

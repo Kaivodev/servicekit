@@ -11,6 +11,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 )
@@ -42,11 +43,23 @@ func (d *driver) identities() {
 	} {
 		d.step("邀请 "+staff.name, func() { d.invite(staff.name, staff.role); d.login(staff.name) })
 	}
+	for _, staff := range []struct {
+		name  string
+		roles []string
+	}{
+		{"finance", []string{"finance"}},
+		{"approver3", []string{"approver", "finance", "risk"}},
+	} {
+		d.step("Invite "+staff.name, func() {
+			d.invite(staff.name, staff.roles...)
+			d.login(staff.name)
+		})
+	}
 }
-func (d *driver) invite(n, role string) {
+func (d *driver) invite(n string, roles ...string) {
 	d.login("admin1")
 	path := "/invitations/platform-staff"
-	body := object{"email": d.email(n), "platform_roles": []string{role}}
+	body := object{"email": d.email(n), "platform_roles": roles}
 	if n == "seller" {
 		path = "/invitations/sellers"
 		body = object{"email": d.email(n), "seller_account_id": d.required("seller-account")}
@@ -56,8 +69,8 @@ func (d *driver) invite(n, role string) {
 	if n == "seller" {
 		require(inv["seller_account_id"] == d.required("seller-account"), "invitation seller account mismatch")
 	}
-	if role == "risk" {
-		require(str(inv, "status") == "pending_approval", "risk invitation requires independent approval")
+	if slices.Contains(roles, "risk") || slices.Contains(roles, "finance") {
+		require(str(inv, "status") == "pending_approval", "protected invitation requires independent approval")
 	}
 	if str(inv, "status") == "pending_approval" {
 		d.login("admin2")
@@ -130,6 +143,39 @@ func (d *driver) registration() {
 			d.evidence("payment_key_id", paymentKey)
 		})
 	}
+	for _, n := range []string{"approver1", "approver2", "approver3"} {
+		d.liveStep("Register ledger "+n, func() { d.registerLedgerApprover(n) })
+	}
+}
+
+func (d *driver) registerLedgerApprover(n string) {
+	const dbvar = "AIPAY_LEDGER_APPROVERS_DATABASE_URL"
+	key := d.credential(n)
+	cose := key.cose()
+	person, user := d.key("person/"+n), d.required("user/"+n)
+	credentialHash, keyHash := fmt.Sprintf("%x", sha256.Sum256(key.ID)), fmt.Sprintf("%x", sha256.Sum256(cose))
+	lookup := func() string {
+		var rows []object
+		decode(d.owner("ledger", dbvar, "approvers", "list"), &rows)
+		for _, row := range rows {
+			if row["revoked_at"] == nil && row["iam_user_id"] == user && row["approver_id"] == person &&
+				row["credential_id_sha256"] == credentialHash && row["public_key_sha256"] == keyHash {
+				return str(row, "id")
+			}
+		}
+		return ""
+	}
+	kid := lookup()
+	if kid == "" {
+		kid = d.key(n + "/ledger")
+		path := d.declaration("ledger-"+n, object{
+			"id": kid, "approver_id": person, "iam_user_id": user, "ceremony_ref": "demo-" + n, "rp_id": rp,
+			"credential_id": b64.EncodeToString(key.ID), "public_key_cose": b64.EncodeToString(cose),
+		})
+		d.owner("ledger", dbvar, "approvers", "register", path)
+		require(lookup() == kid, "ledger registrar did not activate the declared key")
+	}
+	d.evidence("ledger_key_id", kid)
 }
 func spkiFingerprint(k *ecdsa.PublicKey) string {
 	b, e := x509.MarshalPKIXPublicKey(k)

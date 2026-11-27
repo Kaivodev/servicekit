@@ -240,10 +240,16 @@ func TestBootstrapAndReplay(t *testing.T) {
 	checkInventory(t, c, contract)
 	checkKeys(t, c)
 	routes := map[string]string{
-		"POST /api/v1/platform/channel-accounts/credentials":           "payment.channel.manage",
-		"GET /api/v1/platform/orders/:order_id/forced-close":           "payment.order.force_close.read",
-		"POST /api/v1/platform/orders/:order_id/forced-close-requests": "payment.order.force_close.submit",
-		"POST /api/v1/platform/forced-closes/approvals/:id/assertions": "payment.order.force_close.approve",
+		"POST /api/v1/platform/channel-accounts/credentials":                   "payment.channel.manage",
+		"GET /api/v1/platform/orders/:order_id/forced-close":                   "payment.order.force_close.read",
+		"POST /api/v1/platform/orders/:order_id/forced-close-requests":         "payment.order.force_close.submit",
+		"POST /api/v1/platform/forced-closes/approvals/:id/assertions":         "payment.order.force_close.approve",
+		"GET /api/v1/platform/ledger/read-only-exit":                           "ledger.read_only_exit.read",
+		"POST /api/v1/platform/ledger/read-only-exit/requests":                 "ledger.read_only_exit.submit",
+		"POST /api/v1/platform/ledger/read-only-exit/approvals/:id/assertions": "ledger.read_only_exit.approve",
+		"GET /api/v1/platform/ledger/carryovers":                               "ledger.carryover.read",
+		"POST /api/v1/platform/ledger/carryovers/requests":                     "ledger.carryover.submit",
+		"POST /api/v1/platform/ledger/carryovers/approvals/:id/assertions":     "ledger.carryover.approve",
 	}
 	checkRoutes := func(rows []map[string]any) {
 		t.Helper()
@@ -252,7 +258,8 @@ func TestBootstrapAndReplay(t *testing.T) {
 			key := row["method"].(string) + " " + row["path"].(string)
 			if permission, ok := routes[key]; ok {
 				counts[key]++
-				if row["permission"] != permission || !reflect.DeepEqual(row["audiences"], []any{"payment"}) {
+				audience, _, _ := strings.Cut(permission, ".")
+				if row["permission"] != permission || !reflect.DeepEqual(row["audiences"], []any{audience}) {
 					t.Errorf("incorrect policy for %s", key)
 				}
 			}

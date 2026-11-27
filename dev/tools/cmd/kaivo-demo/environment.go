@@ -94,6 +94,11 @@ func (d nativeEnvironment) stack(args ...string) []byte {
 	return command(d.repo, os.Environ(), "python3", append([]string{"-B", filepath.Join(d.repo, "dev/native/stack.py")}, args...)...)
 }
 func (d nativeEnvironment) owner(service, dbvar string, args ...string) []byte {
+	ledgerDev := service == "ledger" && len(args) > 0 && args[0] == "dev"
+	if ledgerDev {
+		require(len(args) >= 2 && args[1] == "enter-read-only", "unsupported ledger dev command")
+		require(dbvar == "AIPAY_DATABASE_URL", "ledger dev command requires the ledger owner connection")
+	}
 	var dsn string
 	if dbvar == sellersDatabase {
 		dsn = d.env("iam-sellers")[dbvar]
@@ -102,6 +107,11 @@ func (d nativeEnvironment) owner(service, dbvar string, args ...string) []byte {
 	}
 	require(dsn != "", "missing "+service+" ceremony connection")
 	list := []string{"PATH=" + os.Getenv("PATH"), dbvar + "=" + dsn}
+	if ledgerDev {
+		mode := d.env("ledger")["AIPAY_ENVIRONMENT"]
+		require(mode == "development", "ledger dev commands require AIPAY_ENVIRONMENT=development")
+		list = append(list, "AIPAY_ENVIRONMENT="+mode)
+	}
 	bin := filepath.Join(d.root, "bin", service)
 	if isPaymentDevCommand(service, args) {
 		mode := d.env("payment")["AIPAY_ENVIRONMENT"]

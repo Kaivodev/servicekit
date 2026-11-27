@@ -17,6 +17,7 @@ func adminLabel(service string) string {
 }
 
 func (k *kubeEnvironment) owner(service, dbvar string, args ...string) []byte {
+	require(!(service == "ledger" && len(args) > 0 && args[0] == "dev"), "ledger dev commands require the native development stack")
 	require(!isPaymentDevCommand(service, args), "payment dev commands require the native development stack")
 	ns := k.namespaces[k.domain(service)]
 	var deployment object

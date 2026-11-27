@@ -17,7 +17,11 @@ type portalCommand struct {
 }
 
 func commandPrefix(method, key string) []byte {
-	return appendField(appendField(appendField(nil, "aipay.web.command.v1"), "/aipay.payment.v1."+method), key)
+	return webCommandPrefix("/aipay.payment.v1."+method, key)
+}
+
+func webCommandPrefix(fullMethod, key string) []byte {
+	return appendField(appendField(appendField(nil, "aipay.web.command.v1"), fullMethod), key)
 }
 
 func onlineCommand(account, channel, key, reason string, version int64, online bool) portalCommand {

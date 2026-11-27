@@ -115,6 +115,12 @@ func executeContext(ctx context.Context, args []string) (err error) {
 		}
 		d.report()
 		d.stepGroup(target, func() {
+			if isLedgerScenario(target) {
+				require(d.native(), target+" requires the native development stack")
+				_, err := os.Stat(filepath.Join(d.root, "stack.env"))
+				require(os.IsNotExist(err), target+" requires the native process stack")
+				require(d.env("ledger")["AIPAY_ENVIRONMENT"] == "development", target+" requires AIPAY_ENVIRONMENT=development for ledger")
+			}
 			if target == a144NotSent || target == a144NotFound || isA145Scenario(target) || target == kQueryTransient || target == kLedgerCancelEvent {
 				d.checkA144Environment(target)
 			}

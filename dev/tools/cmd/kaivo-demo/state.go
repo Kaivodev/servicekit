@@ -24,7 +24,7 @@ var b64 = base64.RawURLEncoding
 
 type failure struct {
 	reason                   string
-	method, path             string
+	method, path, message    string
 	httpStatus, businessCode int
 }
 

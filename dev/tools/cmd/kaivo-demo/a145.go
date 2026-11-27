@@ -180,18 +180,23 @@ func assertionPath(id string) string  { return "/forced-closes/approvals/" + id 
 
 // Only a refusal of this exact write counts. A failed login, CSRF read,
 // transport error or malformed reply must still fail the scenario.
-func refusedWrite(path string, code int, write func()) (refused bool) {
+func refusedWrite(path string, code int, write func()) bool {
+	_, refused := portalRefusal(path, write, code)
+	return refused
+}
+
+func portalRefusal(path string, write func(), codes ...int) (result failure, refused bool) {
 	defer func() {
 		if v := recover(); v != nil {
 			f, ok := v.(failure)
-			if !ok || f.method != "POST" || f.path != path || f.businessCode != code || (f.httpStatus != 200 && f.httpStatus != code) {
+			if !ok || f.method != "POST" || f.path != path || !slices.Contains(codes, f.businessCode) || (f.httpStatus != 200 && f.httpStatus != f.businessCode) {
 				panic(v)
 			}
-			refused = true
+			result, refused = f, true
 		}
 	}()
 	write()
-	return false
+	return failure{}, false
 }
 
 // The platform approval detail returns the owner request header, the
