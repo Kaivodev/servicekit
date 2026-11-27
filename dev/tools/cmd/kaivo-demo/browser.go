@@ -230,37 +230,59 @@ func (d *driver) email(name string) string {
 	return name + "@demo.aipay.test"
 }
 
-// IAM charges every TOTP verification, successful or not, to a fixed
-// per-account window (default 5 attempts per 5 minutes). Stay one below the
-// limit and wait for the window to expire instead of tripping the lockout.
+// IAM charges every MFA verification (TOTP and WebAuthn, successful or not)
+// to one fixed per-account window (default 5 attempts per 5 minutes). Stay one
+// below the limit and wait for the window to expire instead of tripping the
+// lockout. The state key keeps its historical totp-window name.
 const (
 	totpWindow = 5*time.Minute + 2*time.Second
 	totpBudget = 4
 )
 
-func (d *driver) freshTOTP(name string) string {
-	var window struct {
-		Start time.Time
-		Count int
-	}
+type mfaWindow struct {
+	Start time.Time
+	Count int
+}
+
+// awaitMFA waits until name has MFA budget left in the IAM attempt window.
+// Call it before starting a login or reauthentication: an IAM challenge
+// expires after five minutes, as long as the window itself.
+func (d *driver) awaitMFA(name string) {
+	var window mfaWindow
 	d.read("totp-window/"+name, &window)
 	if window.Count >= totpBudget {
 		if wait := time.Until(window.Start.Add(totpWindow)); wait > 0 {
-			d.trace(fmt.Sprintf("waiting %s for the IAM TOTP attempt window of %s", wait.Round(time.Second), name))
+			d.trace(fmt.Sprintf("waiting %s for the IAM MFA attempt window of %s", wait.Round(time.Second), name))
 			d.sleep(wait)
 		}
 	}
-	var last int64
-	d.read("totp-step/"+name, &last)
-	for time.Now().Unix()/30 <= last || time.Now().Unix()%30 >= 28 {
-		d.sleep(250 * time.Millisecond)
+}
+
+// chargeMFA records one MFA verification for name after ready returns.
+func (d *driver) chargeMFA(name string, ready func()) time.Time {
+	d.awaitMFA(name)
+	if ready != nil {
+		ready()
 	}
+	var window mfaWindow
+	d.read("totp-window/"+name, &window)
 	now := time.Now()
 	if !now.Before(window.Start.Add(totpWindow)) {
 		window.Start, window.Count = now, 0
 	}
 	window.Count++
 	d.put("totp-window/"+name, window)
+	return now
+}
+
+func (d *driver) freshTOTP(name string) string {
+	now := d.chargeMFA(name, func() {
+		var last int64
+		d.read("totp-step/"+name, &last)
+		for time.Now().Unix()/30 <= last || time.Now().Unix()%30 >= 28 {
+			d.sleep(250 * time.Millisecond)
+		}
+	})
 	d.put("totp-step/"+name, now.Unix()/30)
 	return totp(d.required("totp/"+name), now)
 }
@@ -279,6 +301,7 @@ func (d *driver) login(name string) {
 	login := func() object {
 		return b.post("/auth/login", object{"email": d.email(name), "password": d.password(name)})
 	}
+	d.awaitMFA(name)
 	r := login()
 	if str(r, "state") == "setup_required" {
 		if name == "seller" {
@@ -337,6 +360,7 @@ func (b *browser) verifyMFA(r object) object {
 			}
 			require(offered, "credential not offered by IAM")
 		}
+		d.chargeMFA(name, nil)
 		answer = object{"assertion": d.assert(name, raw(str(opt, "challenge")))}
 	}
 	return b.post(p+"/verify", answer)

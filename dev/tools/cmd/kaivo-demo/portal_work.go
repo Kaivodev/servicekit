@@ -49,6 +49,7 @@ func (b *browser) grant(c portalCommand) string {
 	if b.name == "seller" {
 		scope = object{"type": "account", "account_type": "personal", "account_id": b.d.required("seller-account")}
 	}
+	b.d.awaitMFA(b.name)
 	begin := b.post("/auth/reauth", object{"password": b.d.password(b.name), "target": object{"acting_scope": scope,
 		"binding": object{"http_method": "POST", "http_path": b.prefix + c.template, "permission": c.permission, "body_sha256": b64.EncodeToString(c.digest[:])}}})
 	require(begin["challenge_purpose"] == "reauthentication", "expected command reauthentication challenge")
