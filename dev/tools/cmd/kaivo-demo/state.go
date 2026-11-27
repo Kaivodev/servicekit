@@ -22,9 +22,13 @@ type object = map[string]any
 
 var b64 = base64.RawURLEncoding
 
-type failure struct{ reason string }
+type failure struct {
+	reason                   string
+	method, path             string
+	httpStatus, businessCode int
+}
 
-func stop(format string, a ...any) { panic(failure{fmt.Sprintf(format, a...)}) }
+func stop(format string, a ...any) { panic(failure{reason: fmt.Sprintf(format, a...)}) }
 func check(e error) {
 	if e != nil {
 		stop("%s", e)

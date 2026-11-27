@@ -36,7 +36,7 @@ func simulatorAccount(code string) string {
 	}
 }
 
-func unpaidTimeoutSeconds(raw string) int64 {
+func instructionTTL(raw string) time.Duration {
 	ttl := 10 * time.Minute
 	if raw != "" {
 		var err error
@@ -44,6 +44,11 @@ func unpaidTimeoutSeconds(raw string) int64 {
 		require(err == nil && ttl >= time.Second && ttl <= 24*time.Hour && ttl%time.Microsecond == 0,
 			"invalid AIPAY_PLUGIN_INSTRUCTION_TTL (expected 1s..24h at microsecond precision)")
 	}
+	return ttl
+}
+
+func unpaidTimeoutSeconds(raw string) int64 {
+	ttl := instructionTTL(raw)
 	return int64((ttl + time.Hour + time.Second - 1) / time.Second)
 }
 

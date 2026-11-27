@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/hex"
 	"fmt"
+	"iter"
 	"net/url"
 	"path/filepath"
 	"slices"
@@ -36,23 +37,34 @@ func (p a144Plugin) account(d *driver) object {
 }
 
 func (p a144Plugin) find(d *driver, field, value string) object {
-	seen := map[string]bool{}
-	for cursor := ""; ; {
-		page := d.browser("operations").api("GET", p.plugins+"?limit=100&cursor="+url.QueryEscape(cursor), "", nil)
-		items, ok := page["items"].([]any)
-		require(ok, "缺少插件列表 "+p.code)
-		for _, item := range items {
-			row := obj(item)
-			if row["code"] == p.code && row[field] == value {
-				return row
+	for row := range p.versions(d) {
+		if row[field] == value {
+			return row
+		}
+	}
+	return nil
+}
+
+func (p a144Plugin) versions(d *driver) iter.Seq[object] {
+	return func(yield func(object) bool) {
+		seen := map[string]bool{}
+		for cursor := ""; ; {
+			page := d.browser("operations").api("GET", p.plugins+"?limit=100&cursor="+url.QueryEscape(cursor), "", nil)
+			items, ok := page["items"].([]any)
+			require(ok, "缺少插件列表 "+p.code)
+			for _, item := range items {
+				row := obj(item)
+				if row["code"] == p.code && !yield(row) {
+					return
+				}
 			}
+			cursor, _ = page["next_cursor"].(string)
+			if cursor == "" {
+				return
+			}
+			require(!seen[cursor], "插件列表重复返回相同游标")
+			seen[cursor] = true
 		}
-		cursor, _ = page["next_cursor"].(string)
-		if cursor == "" {
-			return nil
-		}
-		require(!seen[cursor], "插件列表重复返回相同游标")
-		seen[cursor] = true
 	}
 }
 
@@ -67,9 +79,9 @@ func (p a144Plugin) enabled(d *driver) object {
 		"package_sha256": hex.EncodeToString(digest), "publication_approval_request_id": str(plugin, "publication_approval_request_id")}
 }
 
-func (p a144Plugin) upgrade(d *driver, version string) {
+func (p a144Plugin) upgrade(d *driver, version, ref string) string {
 	op := d.browser("operations")
-	digest := d.required("hash/" + p.code)
+	digest := d.required("hash/" + packageKey(p.code, ref))
 	label := p.code + "/" + digest
 	var target string
 	d.liveStep("核对并双批发布 "+p.code, func() {
@@ -82,15 +94,28 @@ func (p a144Plugin) upgrade(d *driver, version string) {
 			target = str(plugin, "plugin_version_id")
 			d.evidence("已发布审批", str(plugin, "publication_approval_request_id"))
 		} else {
-			m := op.approve(label+"/publish", p.owner, p.plugins, p.plugins, d.upload(p.code))
+			m := op.approve(label+"/publish", p.owner, p.plugins, p.plugins, d.uploadPackage(p.code, ref))
 			target = str(obj(m["plugin_version"]), "plugin_version_id")
 		}
 		d.evidence("包摘要", digest)
 	})
-	d.liveStep("双批切换 "+p.code, func() {
+	p.enable(d, target, digest)
+	return target
+}
+
+func (p a144Plugin) enable(d *driver, target, digest string) {
+	op := d.browser("operations")
+	label := p.code + "/" + digest
+	step := "双批切换 " + p.code
+	if isA145Scenario(d.scope) {
+		step = "Enable " + p.code + " version " + target
+	}
+	d.liveStep(step, func() {
+		d.login("operations")
 		account := p.account(d)
 		plugin := p.find(d, "plugin_version_id", target)
 		require(plugin != nil && plugin[p.statusField] == "executed" && plugin["emergency_disabled"] == false, "待启用插件尚未发布或已停用 "+p.code)
+		require(hex.EncodeToString(raw(str(plugin, "package_sha256"))) == digest, "published package digest changed before binding")
 		if account["plugin_version_id"] != target {
 			version := num(account, "control_version")
 			pluginVersion := num(plugin, "control_version")
@@ -137,7 +162,7 @@ func (d *driver) a144Plugins() map[string]string {
 	if len(outdated) == 0 {
 		return pins
 	}
-	d.buildGatewayPackages("", outdated...)
+	d.buildGatewayPackages("", "", outdated...)
 	versions := map[string]string{}
 	d.liveStep("核对升级包版本", func() {
 		for _, p := range plugins {
@@ -154,7 +179,7 @@ func (d *driver) a144Plugins() map[string]string {
 	})
 	for _, p := range plugins {
 		if v, ok := versions[p.code]; ok {
-			p.upgrade(d, v)
+			p.upgrade(d, v, "")
 		}
 	}
 	d.liveStep("制包审批后刷新行情", d.refreshMarket)

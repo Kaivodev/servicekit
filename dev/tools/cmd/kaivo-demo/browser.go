@@ -176,7 +176,7 @@ func (b *browser) portalAPI(method, path, key string, body object, grant string,
 		if b.d.liveEPay {
 			stop("%s %s → HTTP %d, backend code %d", method, label, code, env.Code)
 		}
-		stop("%s %s → HTTP %d, backend code %d (%s)", method, label, code, env.Code, env.Message)
+		panic(failure{reason: fmt.Sprintf("%s %s → HTTP %d, backend code %d (%s)", method, label, code, env.Code, env.Message), method: method, path: path, httpStatus: code, businessCode: env.Code})
 	}
 	return env.Data
 }

@@ -239,18 +239,36 @@ func TestBootstrapAndReplay(t *testing.T) {
 	c := generate(t, nil, testTime)
 	checkInventory(t, c, contract)
 	checkKeys(t, c)
-	var credentialsRoutes int
-	for _, r := range decoded[[]map[string]any](t, raw(t, c, iamInputs, "routes.json")) {
-		if r["path"] == "/api/v1/platform/channel-accounts/credentials" {
-			credentialsRoutes++
-			if r["method"] != "POST" || r["permission"] != "payment.channel.manage" || !reflect.DeepEqual(r["audiences"], []any{"payment"}) {
-				t.Fatal("incorrect trade credentials route policy")
+	routes := map[string]string{
+		"POST /api/v1/platform/channel-accounts/credentials":           "payment.channel.manage",
+		"GET /api/v1/platform/orders/:order_id/forced-close":           "payment.order.force_close.read",
+		"POST /api/v1/platform/orders/:order_id/forced-close-requests": "payment.order.force_close.submit",
+		"POST /api/v1/platform/forced-closes/approvals/:id/assertions": "payment.order.force_close.approve",
+	}
+	checkRoutes := func(rows []map[string]any) {
+		t.Helper()
+		counts := map[string]int{}
+		for _, row := range rows {
+			key := row["method"].(string) + " " + row["path"].(string)
+			if permission, ok := routes[key]; ok {
+				counts[key]++
+				if row["permission"] != permission || !reflect.DeepEqual(row["audiences"], []any{"payment"}) {
+					t.Errorf("incorrect policy for %s", key)
+				}
+			}
+		}
+		for key := range routes {
+			if counts[key] != 1 {
+				t.Errorf("found %d entries for %s", counts[key], key)
 			}
 		}
 	}
-	if credentialsRoutes != 1 {
-		t.Fatal("expected exactly one trade credentials route")
+	portal, err := os.ReadFile("../../../portal-routes.json")
+	if err != nil {
+		t.Fatal(err)
 	}
+	checkRoutes(decoded[[]map[string]any](t, string(portal)))
+	checkRoutes(decoded[[]map[string]any](t, raw(t, c, iamInputs, "routes.json")))
 	calls, err := os.ReadFile(os.Getenv("SEED_TEST_CALLS"))
 	if err != nil || !slices.Equal(strings.Fields(string(calls)), []string{business, ledger, recon, sim}) {
 		t.Fatal("wrong kubectl namespaces")

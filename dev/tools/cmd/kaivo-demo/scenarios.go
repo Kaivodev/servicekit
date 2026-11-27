@@ -125,7 +125,8 @@ func scenarioOrder(scenario string, gateway bool) (amount, channel string) {
 	switch scenario {
 	case livePhase:
 		return "1.11", epayChannel
-	case "main", "duplicates", "dispute", "seller-offline", "bot-notices", "statement", "archived-work", "cancel", a144NotSent, a144NotFound:
+	case "main", "duplicates", "dispute", "seller-offline", "bot-notices", "statement", "archived-work", "cancel", a144NotSent, a144NotFound,
+		a145NeverSent, a145StaleBinding, a145UnpaidBeforeT, a145LatePayment, a145Refusals:
 		if gateway {
 			return "2.00", epayChannel
 		}
@@ -251,32 +252,37 @@ func (t tradeRun) paid(copies int) {
 			t.setScenario(object{"callback_copies": copies})
 		}
 		d.cashier(t.link, true)
-		waitFor("acknowledged callback copies and ledger OrderPaid", 60*time.Second, func() bool {
-			var rows []object
-			decode(d.sim("GET", "/__test/deliveries", nil), &rows)
-			matches := []object{}
-			event := ""
-			for _, r := range rows {
-				if r["account_id"] == simulatorAccount(t.channel) && r["order_id"] == t.order && r["ack"] == true {
-					if event == "" {
-						event = str(r, "event_id")
-					}
-					require(str(r, "event_id") == event, "callback copy event ID mismatch")
-					matches = append(matches, r)
+		t.observePaid(copies)
+	})
+}
+
+func (t tradeRun) observePaid(copies int) {
+	d := t.d
+	waitFor("acknowledged callback copies and ledger OrderPaid", 60*time.Second, func() bool {
+		var rows []object
+		decode(d.sim("GET", "/__test/deliveries", nil), &rows)
+		matches := []object{}
+		event := ""
+		for _, r := range rows {
+			if r["account_id"] == simulatorAccount(t.channel) && r["order_id"] == t.order && r["ack"] == true {
+				if event == "" {
+					event = str(r, "event_id")
 				}
+				require(str(r, "event_id") == event, "callback copy event ID mismatch")
+				matches = append(matches, r)
 			}
-			v := d.ledgerTrade(t.order)
-			if len(matches) >= copies && v["paid_verified_at"] != nil {
-				paid := d.rows("ledger", "ledger_trade_payments", "SELECT source_event_id,source_sequence,expected_version,paid_verified_at,encode(query_evidence_sha256,'hex') AS query_evidence_sha256 FROM ledger_trade_payments WHERE order_id=$1", t.order)
-				events := d.rows("payment", "payment_outbox", "SELECT event_id,sequence FROM payment_outbox WHERE event_type='OrderPaid' AND order_id=$1", t.order)
-				require(len(paid) == 1 && len(events) == 1 && paid[0]["source_event_id"] == events[0]["event_id"] && paid[0]["source_sequence"] == events[0]["sequence"], "OrderPaid evidence mismatch")
-				d.evidence("active_query_and_OrderPaid", paid)
-				d.evidence("upstream_callbacks", matches)
-				d.chainEvidence(t.order)
-				return true
-			}
-			return false
-		})
+		}
+		v := d.ledgerTrade(t.order)
+		if len(matches) >= copies && v["paid_verified_at"] != nil {
+			paid := d.rows("ledger", "ledger_trade_payments", "SELECT source_event_id,source_sequence,expected_version,paid_verified_at,encode(query_evidence_sha256,'hex') AS query_evidence_sha256 FROM ledger_trade_payments WHERE order_id=$1", t.order)
+			events := d.rows("payment", "payment_outbox", "SELECT event_id,sequence FROM payment_outbox WHERE event_type='OrderPaid' AND order_id=$1", t.order)
+			require(len(paid) == 1 && len(events) == 1 && paid[0]["source_event_id"] == events[0]["event_id"] && paid[0]["source_sequence"] == events[0]["sequence"], "OrderPaid evidence mismatch")
+			d.evidence("active_query_and_OrderPaid", paid)
+			d.evidence("upstream_callbacks", matches)
+			d.chainEvidence(t.order)
+			return true
+		}
+		return false
 	})
 }
 func (t tradeRun) terminal(status string) object {
@@ -557,15 +563,20 @@ func (d *driver) dispute() {
 }
 
 var scenarios = map[string]func(*driver){
-	a144NotSent:      (*driver).runA144NotSent,
-	a144NotFound:     (*driver).runA144NotFound,
-	livePhase:        (*driver).runLiveEPay,
-	"coverage":       (*driver).coverage,
-	"seller-offline": (*driver).sellerOffline,
-	"bot-notices":    (*driver).botNotices,
-	"statement":      (*driver).statement,
-	"archived-work":  (*driver).archivedWork,
-	"main":           func(d *driver) { d.releasedTrade(1) },
+	a145NeverSent:     (*driver).runA145NeverSent,
+	a145StaleBinding:  (*driver).runA145StaleBinding,
+	a145UnpaidBeforeT: (*driver).runA145UnpaidBeforeT,
+	a145LatePayment:   (*driver).runA145LatePayment,
+	a145Refusals:      (*driver).runA145Refusals,
+	a144NotSent:       (*driver).runA144NotSent,
+	a144NotFound:      (*driver).runA144NotFound,
+	livePhase:         (*driver).runLiveEPay,
+	"coverage":        (*driver).coverage,
+	"seller-offline":  (*driver).sellerOffline,
+	"bot-notices":     (*driver).botNotices,
+	"statement":       (*driver).statement,
+	"archived-work":   (*driver).archivedWork,
+	"main":            func(d *driver) { d.releasedTrade(1) },
 	"duplicates": func(d *driver) {
 		d.releasedTrade(3)
 		d.duplicateEnvelope()

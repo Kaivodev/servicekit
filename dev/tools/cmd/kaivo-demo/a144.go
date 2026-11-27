@@ -27,7 +27,7 @@ func (d *driver) checkA144Environment(scenario string) {
 		_, err := os.Stat(filepath.Join(d.root, "stack.env"))
 		require(os.IsNotExist(err), scenario+" 仅支持本机进程栈，请检查状态目录是否属于 Compose")
 		require(d.gatewayMode() && d.env("reconciliation")["AIPAY_RECONCILIATION_UPSTREAM_GATEWAY_ADDRESS"] != "", scenario+" 需要交易与核验网关")
-		if scenario == a144NotFound {
+		if scenario == a144NotFound || isA145Scenario(scenario) && scenario != a145NeverSent {
 			require(d.env("payment")["AIPAY_ENVIRONMENT"] == "development", "dev backdate-create 仅允许在 payment 开发环境运行")
 		}
 		var cfg struct {
@@ -39,10 +39,14 @@ func (d *driver) checkA144Environment(scenario string) {
 		// Exercise the authenticated control path before any publication or fault.
 		var next object
 		decode(d.sim("GET", "/__test/accounts/"+simulatorAccount(epayChannel)+"/next-create", nil), &next)
-		if scenario == a144NotSent {
+		if scenario == a144NotSent || scenario == a145NeverSent || scenario == a145LatePayment || scenario == a145Refusals {
 			require(len(next) == 0, "EPay 模拟器已有待执行的下单故障")
 		}
 	})
+}
+
+func acceptedCreate(status int, reply object) bool {
+	return status == 200 && (num(reply, "code") == 1 || num(reply, "code") == -1 && reply["msg"] == "结果待确认")
 }
 
 func (t tradeRun) a144Orders() []object {
@@ -79,7 +83,7 @@ func (d *driver) a144Trade(name string) (tradeRun, map[string]string) {
 			}
 			status, reply := d.signedEPay("v1", "/mapi.php", params)
 			d.evidence("商户应答", object{"HTTP": status, "code": reply["code"]})
-			if status != 200 || !(num(reply, "code") == 1 || num(reply, "code") == -1 && reply["msg"] == "结果待确认") {
+			if !acceptedCreate(status, reply) {
 				// A definitive refusal leaves the account-wide one-shot available
 				// to an unrelated order. A 5xx may still have committed this order.
 				if d.scope == a144NotFound && status < 500 {
@@ -238,21 +242,26 @@ func (t tradeRun) backdateA144Create() {
 		timeout, err := strconv.ParseInt(d.required(channelKey(t.channel, "unpaid-timeout")), 10, 64)
 		check(err)
 		seconds := timeout + 120
-		read := func() []object {
-			return d.facts("payment", "回拨审计", `SELECT id,actor_id,action,occurred_at,changes->'metadata' AS metadata FROM payment_audit_logs
-				WHERE target_type='order' AND target_id=$1 AND action='order.dev_create_backdated'`, t.order)
-		}
-		// The command subtracts time, so recover a committed invocation by its
-		// transactional audit even when the driver never received its output.
-		rows := read()
-		if len(rows) == 0 {
-			d.owner("payment", "AIPAY_DATABASE_URL", "dev", "backdate-create", "--order", t.order, "--seconds", strconv.FormatInt(seconds, 10))
-			rows = read()
-		}
-		row := oneFact(rows, "回拨审计")
-		require(num(obj(row["metadata"]), "seconds") == seconds && row["actor_id"] == "payment/dev", "属主回拨秒数或身份与预期不符")
+		t.backdateCreate(seconds, "回拨审计")
 		d.evidence("通道未付超时秒数", timeout)
 	})
+}
+
+func (t tradeRun) backdateCreate(seconds int64, source string) {
+	d := t.d
+	read := func() []object {
+		return d.facts("payment", source, `SELECT id,actor_id,action,occurred_at,changes->'metadata' AS metadata FROM payment_audit_logs
+				WHERE target_type='order' AND target_id=$1 AND action='order.dev_create_backdated'`, t.order)
+	}
+	// The command subtracts time, so recover a committed invocation by its
+	// transactional audit even when the driver never received its output.
+	rows := read()
+	if len(rows) == 0 {
+		d.owner("payment", "AIPAY_DATABASE_URL", "dev", "backdate-create", "--order", t.order, "--seconds", strconv.FormatInt(seconds, 10))
+		rows = read()
+	}
+	row := oneFact(rows, source)
+	require(num(obj(row["metadata"]), "seconds") == seconds && row["actor_id"] == "payment/dev", "属主回拨秒数或身份与预期不符")
 }
 
 func a144Cancellation(payload, order string) *pay.OrderCancellationVerificationRequested {
@@ -265,8 +274,12 @@ func a144Cancellation(payload, order string) *pay.OrderCancellationVerificationR
 }
 
 func (t tradeRun) a144CancellationEvidence(verifyPlugin string, version int64) string {
+	return t.cancellationEvidence(verifyPlugin, version, a144Reason, "not_found_unpaid", "两次独立缺单核验与取消授权")
+}
+
+func (t tradeRun) cancellationEvidence(verifyPlugin string, version int64, reason, outcome, label string) string {
 	d := t.d
-	step := t.step("两次独立缺单核验与取消授权", func() {
+	step := t.step(label, func() {
 		var authorizations []object
 		waitFor("带缺单原因的取消授权", 2*time.Minute, func() bool {
 			authorizations = d.facts("reconciliation", "取消授权与审计", `SELECT r.authorization_id,r.event_type,r.control_version,r.issued_at,a.action,a.reason_code,
@@ -274,25 +287,30 @@ func (t tradeRun) a144CancellationEvidence(verifyPlugin string, version int64) s
 				convert_from(r.evidence_material,'UTF8')::jsonb#>>'{Review,Evidence,Cancellation,Second,ID}' AS second_id
 				FROM reconciliation_authorizations r JOIN reconciliation_audit_logs a ON a.target_type='trade_authorization' AND a.target_id=r.authorization_id::text
 				WHERE r.order_id=$1 AND r.control_version=$2 AND r.event_type='TradeCancellationAuthorized'
-				AND a.action='reconciliation.authorize' AND a.result='succeeded' AND a.reason_code=$3`, t.order, version, a144Reason)
+				AND a.action='reconciliation.authorize' AND a.result='succeeded'`, t.order, version)
 			return len(authorizations) > 0
 		})
 		auth := oneFact(authorizations, "原单取消授权")
+		require(auth["reason_code"] == reason, "authorization audit reason differs from the cancellation basis")
 		// Use the two observations cited by the issued authorization. Unrelated
 		// polls on the same order cannot fill either side of the five-second window.
 		rows := d.facts("reconciliation", "授权采信的核验及审计", `SELECT e.id,e.verified_at,e.category,e.exchange_id,e.plugin_version_id,
 			convert_from(e.record_json,'UTF8')::jsonb->>'Outcome' AS outcome,a.action,a.reason_code
 			FROM reconciliation_verification_evidence e JOIN reconciliation_audit_logs a ON a.id=e.audit_id AND a.target_id=e.id::text
 			WHERE e.order_id=$1 AND e.plugin_version_id=$2 AND e.verification_account_id=$3 AND e.eligible AND e.operation='query_payment'
-			AND e.category='rejected' AND convert_from(e.record_json,'UTF8')::jsonb->>'Outcome'='not_found_unpaid'
+			AND convert_from(e.record_json,'UTF8')::jsonb->>'Outcome'=$8
+            AND ($8 <> 'not_found_unpaid' OR e.category='rejected')
 			AND (convert_from(e.record_json,'UTF8')::jsonb->>'ControlVersion')::bigint=$4 AND a.action='reconciliation.verification.query' AND a.reason_code=$5
 			AND e.id IN ($6,$7) ORDER BY e.verified_at,e.id`, t.order, verifyPlugin, d.required("uuid/"+channelKey(epayChannel, "verify-account")),
-			version, a144Reason, str(auth, "first_id"), str(auth, "second_id"))
+			version, reason, str(auth, "first_id"), str(auth, "second_id"), outcome)
 		require(len(rows) == 2 && rows[0]["id"] == auth["first_id"] && rows[1]["id"] == auth["second_id"], "取消授权未引用两次独立的缺单核验")
 		first, err := time.Parse(time.RFC3339Nano, str(rows[0], "verified_at"))
 		check(err)
 		second, err := time.Parse(time.RFC3339Nano, str(rows[1], "verified_at"))
 		check(err)
+		issued, err := time.Parse(time.RFC3339Nano, str(auth, "issued_at"))
+		check(err)
+		require(!issued.Before(second), "cancellation authorization predates its second observation")
 		d.evidence("观测间隔", second.Sub(first).String())
 		require(second.Sub(first) >= 5*time.Second, "取消授权的两次观测间隔不足 5 秒")
 		d.evidence("授权 ID", auth["authorization_id"])

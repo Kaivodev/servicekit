@@ -20,7 +20,18 @@ func (d *driver) latePayment() {
 		d.evidence("cancelled_version", hold["control_version"])
 		t.finish(false)
 	})
-	t.step("取消后收银付款", func() { d.cashier(t.link, true) })
+	t.completeLatePayment(cancelled, "")
+}
+
+func (t tradeRun) completeLatePayment(cancelled *result, approvalID string) {
+	d := t.d
+	t.step("取消后收银付款", func() {
+		if approvalID != "" {
+			t.payA145Cashier()
+		} else {
+			d.cashier(t.link, true)
+		}
+	})
 	detected := t.step("主动查单登记迟到付款", func() {
 		waitFor("late payment from active query", 2*time.Minute, func() bool {
 			rows := d.rows("payment", "payment_late_payments", `SELECT l.id,l.upstream_order_id,encode(l.query_evidence_sha256,'hex') AS digest,l.detected_at
@@ -38,6 +49,9 @@ func (d *driver) latePayment() {
 		})
 	})
 	s := latePaymentSubject(str(detected.Evidence, "late_payment_id"))
+	if approvalID != "" {
+		t.checkLateForcedClose(s.id, approvalID)
+	}
 	t.step("卖方提交迟付退款凭证", func() {
 		e := t.evidenceVersion(s, 1)
 		d.evidence("evidence_id", str(e, "evidence_id"))

@@ -289,6 +289,11 @@ stack demo run main
 stack demo run cancel
 stack demo run a144-not-sent
 stack demo run a144-not-found
+stack demo run a145-never-sent
+stack demo run a145-stale-binding
+stack demo run a145-unpaid-before-t
+stack demo run a145-late-payment
+stack demo run a145-refusals
 stack demo run settle-refunds
 stack demo run refund-before-release
 stack demo run refund-after-release
@@ -314,6 +319,11 @@ stack demo run refund-insufficient
 - Gateway setup publishes `epay_v1`, `epay_v1_verify`, `sim_form_md5` and `sim_form_md5_verify`. Orders of 101–10000000 cents use EPay (`epay-demo`, PID 1001) and 1–100 cents use form-md5 (`md5-demo`). In embedded mode form-md5 covers 1–10000000 cents.
 - `a144-not-sent` 和 `a144-not-found` 各下单 2.00 元，仅在启用 upstream-sim 测试控制接口的本机双网关栈运行。前者暂停监听 3 秒，核对重新获准建单、付款和放币。后者丢弃一次建单，先核对担保仍冻结，再用 payment 的开发专用命令 `dev backdate-create` 将最后一次建单时间回拨通道的 `unpaid_timeout_seconds` 加 120 秒，等待两次缺单核验和资金归还。预发和生产均禁止该回拨命令。
 - 升级网关后，已有通道和核验账户仍绑定原插件。两个 A144 场景都会在下单前读取绑定，若版本不足，从同级 upstream-gateway 的 HEAD 制包，通过双人审批发布并切换到 `epay_v1` ≥ 0.4.0、`epay_v1_verify` ≥ 0.3.0，回读版本和包摘要。已有订单继续使用建单时的交易插件。需使用包含这些版本的网关源码及 A144 版模拟器、payment（迁移 000021）和 reconciliation（迁移 000018）。
+- `a145-never-sent` pauses the simulator listener for 60 seconds and force-closes a 2.00 EPay order while payment is retrying an unsent create. It counts eligibility retries, checks for later dispatch grants and transmitted creates, and follows two independent missing-order observations through cancellation and return of the escrow. All five A145 scenarios require the native gateway stack and the simulator test control API. The four scenarios below also require payment in development mode for `dev backdate-create`.
+- `a145-stale-binding` builds the historical `epay_v1` 0.3.1 package from the sibling upstream-gateway tag `v0.5.0` and temporarily enables it on the trade account. Payment treats the missing order as an unavailable query. After the instruction TTL, the verification account recognizes the missing order twice and authorizes cancellation. Cleanup restores the newest published trade version with two approvals, including on failure.
+- `a145-unpaid-before-t` loses one create and waits for payment to record a missing order. It backdates the instruction anchors by the TTL plus 60 seconds and checks that risk obtained two approvals before the channel unpaid deadline. The proof links the independent observations to the ledger posting and excludes a system-inferred close.
+- `a145-late-payment` keeps the cashier link for a bound order. After approval it backdates the simulator query response by the unpaid timeout plus 120 seconds. Two closed-unpaid observations authorize cancellation. A subsequent cashier payment is linked to the forced-close approval, then closed by seller evidence and two reviewers with the original escrow posting intact.
+- `a145-refusals` uses one order to check early submission (409), requester self-approval (403), approval after payment (409), and a fresh submission on the paid order (409). Risk uses its own WebAuthn credential enrolled at platform login. Its IAM role lacks approval permission, so the platform can return 403 before payment receives the assertion. The driver checks signature records, the merchant receipt, release balances, and the absence of a cancellation request.
 - main、duplicates、dispute、seller-offline、bot-notices、statement、archived-work、cancel 下单 2.00 元。本轮退款和 late-payment 场景每单 1.00 元，使用 form-md5 收银。商户 V2、争议裁决及平台运营发起的退款共用卖方举证、双人复核、独立授权与账本核销流程。每笔原单的实际通道记录在报告中。
 - `manual-refund` 验证放币后驳回首版凭证、审批第二版，以及卖方监听对平台复核路由返回 404。`manual-refund-failure` 验证放币前失败授权恢复原担保后正常放币。`late-payment` 等待平台取消后才付款，经主动查单和凭证双签结案。`refund-insufficient` 单独运行，报告会记录所需 N 与商户可用余额。
 - EPay 两实例的 `unpaid_timeout_seconds` 等于 payment 的付款指令有效期加 1 小时，向上取整秒。默认 10 分钟对应 T=4200 秒。cancel 在关单前只回拨原单查单应答的建单时间 T+120 秒，未付单须经两次间隔至少 5 秒的独立观测才归还担保。迟付单在首次观测后仍可收银付款。

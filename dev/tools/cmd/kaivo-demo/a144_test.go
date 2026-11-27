@@ -72,8 +72,8 @@ func TestA144CancellationPayload(t *testing.T) {
 	}
 }
 
-func TestA144RunPrerequisites(t *testing.T) {
-	for _, scenario := range []string{a144NotFound, a144NotSent} {
+func TestNativeGatewayScenarioPrerequisites(t *testing.T) {
+	for _, scenario := range []string{a144NotFound, a144NotSent, a145NeverSent, a145StaleBinding, a145UnpaidBeforeT, a145LatePayment, a145Refusals} {
 		root := t.TempDir()
 		amount, channel := scenarioOrder(scenario, true)
 		if scenarios[scenario] == nil || channel != epayChannel || amount != "2.00" {
@@ -97,7 +97,7 @@ func TestA144RunPrerequisites(t *testing.T) {
 		check(atomic(payment, nil))
 		refuses("需要交易与核验网关")
 		check(atomic(filepath.Join(root, "env/reconciliation.env"), []byte("AIPAY_RECONCILIATION_UPSTREAM_GATEWAY_ADDRESS=verify\n")))
-		if scenario == a144NotFound {
+		if scenario != a144NotSent && scenario != a145NeverSent {
 			for _, mode := range []string{"staging", "production"} {
 				check(atomic(payment, []byte("AIPAY_UPSTREAM_GATEWAY_ADDRESS=trade\nAIPAY_ENVIRONMENT="+mode+"\n")))
 				refuses("开发环境")
@@ -229,7 +229,7 @@ func TestA144SwitchUsesCurrentOwnerVersions(t *testing.T) {
 			}))
 			defer server.Close()
 			op.addr = strings.TrimPrefix(server.URL, "http://")
-			switchVersion := func() { p.upgrade(d, p.minimum) }
+			switchVersion := func() { p.upgrade(d, p.minimum, "") }
 			if why := failureText(switchVersion); !strings.Contains(why, "test approval boundary") || proposals.Load() != 1 {
 				t.Fatal("failed to propose a switch from the enabled account", why)
 			}

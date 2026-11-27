@@ -65,7 +65,11 @@ func TestBackendRequestContracts(t *testing.T) {
 			check(entry+"/"+p, fields)
 		}
 	}
+	if _, ok := spec.Paths["/api/v1/platform/orders/{order_id}/forced-close"]["get"]; !ok {
+		t.Error("missing forced-close view")
+	}
 	for p, fields := range map[string]string{
+		"platform/orders/{order_id}/forced-close-requests":               "expected_control_version reason",
 		"platform/orders/{order_id}/refunds":                             "escrow_reservation_id expected_control_version reason",
 		"platform/refunds/{id}/failure-requests":                         "reason",
 		"platform/seller-refund-evidence/{id}/rejection":                 "expected_evidence_version reason",
@@ -81,7 +85,7 @@ func TestBackendRequestContracts(t *testing.T) {
 	for _, p := range []string{"channel-accounts", "payment-methods", "risk-policies", "verification/accounts"} {
 		check("platform/"+p+"/requests", "change")
 	}
-	for _, p := range []string{"channel-accounts", "payment-methods", "risk-policies", "verification/accounts", "plugins", "plugin-enables", "pricing-versions", "verification/plugins", "verification/enables", "dispute-rulings", "seller-refund-reviews", "seller-refund-failures"} {
+	for _, p := range []string{"channel-accounts", "payment-methods", "risk-policies", "verification/accounts", "plugins", "plugin-enables", "pricing-versions", "verification/plugins", "verification/enables", "dispute-rulings", "forced-closes", "seller-refund-reviews", "seller-refund-failures"} {
 		check("platform/"+p+"/approvals/{id}/assertions", "assertion")
 	}
 	for _, path := range []string{"/mapi.php", "/api/pay/create", "/api/pay/refund", "/api/pay/close", "/api/pay/refundquery", "/telegram/webhook", "/totp/enroll/{token}"} {

@@ -203,7 +203,12 @@ func (d *driver) packages() {
 	}
 }
 func (d *driver) upload(code string) object {
-	pkg := d.required("package/" + code)
+	return d.uploadPackage(code, "")
+}
+
+func (d *driver) uploadPackage(code, ref string) object {
+	key := packageKey(code, ref)
+	pkg := d.required("package/" + key)
 	var fixtures []object
 	e := filepath.WalkDir(filepath.Join(pkg, "fixtures"), func(p string, f fs.DirEntry, e error) error {
 		if e != nil || f.IsDir() {
@@ -216,11 +221,11 @@ func (d *driver) upload(code string) object {
 		return nil
 	})
 	check(e)
-	hash, e := hex.DecodeString(d.required("hash/" + code))
+	hash, e := hex.DecodeString(d.required("hash/" + key))
 	check(e)
 	manifest, wasm := file(filepath.Join(pkg, "manifest.json")), file(filepath.Join(pkg, "plugin.wasm"))
 	if d.gatewayMode() {
-		_, digest := d.checkGatewayPackage(code, manifest, wasm, d.gatewayHead(false))
+		_, digest := d.checkGatewayPackage(code, manifest, wasm, d.gatewayRevision(ref, ref != ""))
 		require(bytes.Equal(digest, hash), "gateway package changed since setup packages")
 	} else {
 		manifest = canonicalManifest(manifest)

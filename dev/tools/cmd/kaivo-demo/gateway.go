@@ -60,7 +60,7 @@ func (d *driver) gatewayRepo() string {
 	return filepath.Join(filepath.Dir(d.repo), "upstream-gateway")
 }
 
-func (d *driver) gatewayHead(required bool) string {
+func (d *driver) gatewayRevision(ref string, required bool) string {
 	repo := d.gatewayRepo()
 	if _, err := os.Stat(repo); os.IsNotExist(err) {
 		require(!required, "Rust plugin builds require the sibling upstream-gateway repository or KAIVO_DEMO_PLUGIN_PACKAGES")
@@ -68,7 +68,10 @@ func (d *driver) gatewayHead(required bool) string {
 	} else {
 		check(err)
 	}
-	return strings.TrimSpace(string(command(repo, os.Environ(), "git", "rev-parse", "--verify", "HEAD^{commit}")))
+	if ref == "" {
+		ref = "HEAD"
+	}
+	return strings.TrimSpace(string(command(repo, os.Environ(), "git", "rev-parse", "--verify", "--end-of-options", ref+"^{commit}")))
 }
 
 func (d *driver) checkGatewayPackage(code string, manifest, wasm []byte, head string) (string, []byte) {
@@ -133,23 +136,42 @@ func pluginCommand(dir string, env []string, bin string, args ...string) []byte 
 }
 
 func (d *driver) gatewayPackages() {
-	d.buildGatewayPackages(os.Getenv("KAIVO_DEMO_PLUGIN_PACKAGES"), md5Channel, md5Channel+"_verify", epayChannel, epayChannel+"_verify")
+	d.buildGatewayPackages(os.Getenv("KAIVO_DEMO_PLUGIN_PACKAGES"), "", md5Channel, md5Channel+"_verify", epayChannel, epayChannel+"_verify")
 }
 
-func (d *driver) buildGatewayPackages(prebuilt string, codes ...string) {
-	head := d.gatewayHead(prebuilt == "")
+func packageKey(code, ref string) string {
+	if ref == "" {
+		return code
+	}
+	return ref + "/" + code
+}
+
+func (d *driver) buildGatewayPackages(prebuilt, ref string, codes ...string) {
+	head := d.gatewayRevision(ref, prebuilt == "")
 	source := filepath.Join(d.dir, "upstream-gateway-"+head)
+	if ref != "" {
+		source = filepath.Join(d.dir, "gateway-revisions", head)
+	}
 	packages := prebuilt
 	var env []string
 	var ctl string
 	if prebuilt == "" {
 		if _, err := os.Stat(source); os.IsNotExist(err) {
-			pluginCommand(d.dir, os.Environ(), "git", "clone", "--no-local", "--", d.gatewayRepo(), source)
+			check(os.MkdirAll(filepath.Dir(source), 0700))
+			clone, err := os.MkdirTemp(filepath.Dir(source), ".gateway-source-")
+			check(err)
+			defer os.RemoveAll(clone)
+			pluginCommand(d.dir, os.Environ(), "git", "clone", "--no-local", "--no-checkout", "--", d.gatewayRepo(), clone)
+			pluginCommand(clone, os.Environ(), "git", "checkout", "--detach", head)
+			check(os.Rename(clone, source))
 		}
 		got := command(source, os.Environ(), "git", "rev-parse", "HEAD")
 		require(strings.TrimSpace(string(got)) == head, "cloned upstream-gateway HEAD changed; rerun packages")
 		require(len(command(source, os.Environ(), "git", "status", "--porcelain", "--untracked-files=all")) == 0, "demo upstream-gateway clone has uncommitted changes")
 		target := os.Getenv("CARGO_TARGET_DIR")
+		if ref != "" {
+			target = filepath.Join(source, "target")
+		}
 		if !filepath.IsAbs(target) {
 			if target == "" {
 				target = "target"
@@ -166,7 +188,12 @@ func (d *driver) buildGatewayPackages(prebuilt string, codes ...string) {
 		check(err)
 	}
 	for _, code := range codes {
-		d.liveStep("Rust 插件 "+code, func() {
+		key := packageKey(code, ref)
+		step := "Rust 插件 " + code
+		if ref != "" {
+			step = "Build " + code + " from " + ref
+		}
+		d.liveStep(step, func() {
 			pkg := filepath.Join(packages, code)
 			var receipt []byte
 			if prebuilt == "" {
@@ -186,8 +213,8 @@ func (d *driver) buildGatewayPackages(prebuilt string, codes ...string) {
 			fmt.Printf("%s source_commit %s package_sha256 %s\n", code, commit, hash)
 			d.evidence("commit", commit)
 			d.evidence("package_sha256", hash)
-			d.put("hash/"+code, hash)
-			d.put("package/"+code, pkg)
+			d.put("hash/"+key, hash)
+			d.put("package/"+key, pkg)
 		})
 	}
 }

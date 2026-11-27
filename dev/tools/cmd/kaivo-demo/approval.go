@@ -242,6 +242,11 @@ func (d *driver) approveExisting(label, owner, requesterID, assertPath string, r
 	require(len(verified) == 2, "owner approval identities do not match registered people")
 	status := str(obj(r["approval_request"]), "status")
 	require(status == "approved" || status == "executed", "owner did not execute two approvals")
+	if obj(r["material"])["kind"] == "forced_close" {
+		require(status == "approved", "payment did not approve the forced close")
+		d.evidence("approval_status", status)
+		d.evidence("approvers", []string{d.key("person/" + approvers[0]), d.key("person/" + approvers[1])})
+	}
 	d.evidence("approval_id", aid)
 	d.evidence("request_digest", b64.EncodeToString(digest))
 	return obj(r["material"])
