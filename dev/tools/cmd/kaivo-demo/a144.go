@@ -30,6 +30,10 @@ func (d *driver) checkA144Environment(scenario string) {
 		if scenario == a144NotFound || scenario == kLedgerCancelEvent || scenario == disputeReturn || isA145Scenario(scenario) && scenario != a145NeverSent {
 			require(d.env("payment")["AIPAY_ENVIRONMENT"] == "development", scenario+" requires AIPAY_ENVIRONMENT=development for payment dev commands")
 		}
+		if scenario == disputePaidRace {
+			_, err := os.Stat(filepath.Join(d.root, "deposits.enabled"))
+			require(err == nil, scenario+" requires deposits enabled for ledger-matches pause")
+		}
 		var cfg struct {
 			Environment string
 			Token       string `json:"control_token"`
@@ -43,10 +47,11 @@ func (d *driver) checkA144Environment(scenario string) {
 		}
 		// Exercise the authenticated control path before any publication or fault.
 		var next object
-		decode(d.sim("GET", "/__test/accounts/"+simulatorAccount(epayChannel)+"/next-create", nil), &next)
+		_, channel := scenarioOrder(scenario, true)
+		decode(d.sim("GET", "/__test/accounts/"+simulatorAccount(channel)+"/next-create", nil), &next)
 		switch scenario {
-		case a144NotSent, a145NeverSent, a145LatePayment, a145Refusals, kQueryTransient, kLedgerCancelEvent, disputeReturn:
-			require(len(next) == 0, "the EPay simulator already has a pending create fault")
+		case a144NotSent, a145NeverSent, a145LatePayment, a145Refusals, kQueryTransient, kLedgerCancelEvent, disputeReturn, disputePaidRelease, disputePaidRefund, disputePaidRace:
+			require(len(next) == 0, "the simulator account already has a pending create fault")
 		}
 	})
 }

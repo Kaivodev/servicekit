@@ -111,6 +111,8 @@ func executeContext(ctx context.Context, args []string) (err error) {
 	switch action {
 	case "run":
 		switch target {
+		case disputePaidRelease, disputePaidRefund, disputePaidRace:
+			d.history.Checks, d.history.SourceNotes = disputePaidPlan(target)
 		case disputeReturn:
 			d.history.Checks, d.history.SourceNotes = disputeReturnPlan()
 		case "dispute-refund-before-release", "dispute-refund-after-release", disputeReturnPaid:
@@ -129,7 +131,7 @@ func executeContext(ctx context.Context, args []string) (err error) {
 				require(os.IsNotExist(err), target+" requires the native process stack")
 				require(d.env("ledger")["AIPAY_ENVIRONMENT"] == "development", target+" requires AIPAY_ENVIRONMENT=development for ledger")
 			}
-			if target == a144NotSent || target == a144NotFound || isA145Scenario(target) || target == kQueryTransient || target == kLedgerCancelEvent || target == disputeReturn {
+			if target == a144NotSent || target == a144NotFound || isA145Scenario(target) || target == kQueryTransient || target == kLedgerCancelEvent || target == disputeReturn || isDisputePaidScenario(target) {
 				d.checkA144Environment(target)
 			}
 			if localCapability(target) {
@@ -215,7 +217,8 @@ func (d *driver) stepGroup(name string, run func()) {
 }
 func main() {
 	ctx := context.Background()
-	if os.Getenv("AIPAY_DEMO_TARGET") == "k8s" || len(os.Args) > 1 && os.Args[1] == "serve-k8s" {
+	if os.Getenv("AIPAY_DEMO_TARGET") == "k8s" || len(os.Args) > 1 && os.Args[1] == "serve-k8s" ||
+		len(os.Args) > 4 && os.Args[3] == "run" && os.Args[4] == disputePaidRace {
 		var cancel context.CancelFunc
 		ctx, cancel = signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 		defer cancel()

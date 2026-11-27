@@ -298,6 +298,9 @@ stack demo run k-query-transient
 stack demo run k-ledger-cancel-event
 stack demo run dispute-return
 stack demo run dispute-return-paid
+stack demo run dispute-paid-release
+stack demo run dispute-paid-refund
+stack demo run dispute-paid-race
 stack demo run ledger-adjustment
 stack demo run ledger-approvals-inbox
 stack demo run settle-refunds
@@ -349,6 +352,14 @@ stack demo run refund-insufficient
 - 经营域名使用 merchant.aipay.test，通知 origin 为 `http://localhost:9082`，路径为 /notify。payment 拒绝回环 IP 字面量作为登记来源。notifier 在开发配置下允许 HTTP、回环及精确主机 localhost，先在本机解析并固定 IP，再通过 3128 发 CONNECT。演示代理仅接受 127.0.0.1 或 ::1 的 9082 端口，全部监听绑定 IPv4 回环。无需修改 DNS 或 hosts。已有自定义代理或 allowlist 时，应检查它们是否允许这个目标。
 - `duplicates` 使用 9122 上的临时 ledger 拉取副本。两个 mTLS 连接读取同一份属主已签回执，副本退出后核对原钱包分录与游标竞争日志。新数据集使用 7 微单位的 duplicate-delivery；旧数据集沿用 normal 的回执重放并要求零增量。旧控制版本样本通过 `ledger-matches pause|resume` 只切换 ledger 的 matches 来源，模拟器原单和签名流持续存在。若在争议登记前失败，续跑同一场景会保留观测顺序。放弃该样本时可执行 `stack ledger-matches resume` 恢复正常拉取；`stack down` 也会停掉临时副本。
 - 运行数据在 `../.local/dev/native/demo/`。state.json 含每人自己的演示密钥、计数、密码、一次性材料和步骤断点，仅限本机私有目录。reports 下同名 JSON、Markdown 逐步记录结果。重复运行复用本次开通或原订单。通知记录在 notifications.json，Bot API 删除消息后在 messages.json 清除正文并保留消息 ID。真实入口缺口、有限资金样本和每条验收证据见[演示清单](demo.md)。
+
+### Buyer payments during an open dispute
+
+Run these scenarios on the native process stack with both simulator gateways, simulator test controls, a funded demo seller and merchant V2 setup. Use payment migration 000026, reconciliation migration 000022 and a backend that renders the A147 dispute views and A148 credential-only approval assertions.
+
+- `dispute-paid-release` opens a 2.00 unpaid dispute, approves return to the seller, then pays. It follows the fenced observation through the reported denial, verification and one merchant notification. Two approvals release the escrow after the risk hold. The merchant sees status 1.
+- `dispute-paid-refund` pays a 1.00 form-md5 order with an open dispute and no ruling. It checks duplicate callbacks, rejects a return proposal and completes a pre-release manual refund through seller evidence, two reviews and a signed merchant refund query.
+- `dispute-paid-race` requires deposits enabled. It backdates a 2.00 simulator order and **pauses ledger's reconciliation matches reader** while reconciliation authorizes cancellation and payment records the fence. It checks that release, refund and another return are all refused, resumes the reader within the signed authorization lifetime (five minutes locally), and follows the linked late payment through seller evidence and review to closure. The merchant sees status 0 and receives no payment notification.
 
 ## 本机卖方预存
 

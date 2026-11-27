@@ -253,6 +253,15 @@ func (d *driver) approveExisting(label, owner, requesterID, assertPath string, r
 	return obj(r["material"])
 }
 
+// Check fresh HTTP responses before a write result can be checkpointed.
+func checkRenderedApprovals(r object) {
+	for _, item := range approvalRecords(r) {
+		a := obj(obj(item)["assertion"])
+		str(a, "credential_id")
+		require(len(a) == 1, "rendered approval assertion must contain only credential_id")
+	}
+}
+
 func approvalRecords(r object) []any {
 	records, _ := r["approvals"].([]any)
 	return records

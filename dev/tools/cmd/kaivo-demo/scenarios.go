@@ -126,7 +126,7 @@ func scenarioOrder(scenario string, gateway bool) (amount, channel string) {
 	case livePhase:
 		return "1.11", epayChannel
 	case "main", "duplicates", "dispute", "seller-offline", "bot-notices", "statement", "archived-work", "cancel", a144NotSent, a144NotFound,
-		a145NeverSent, a145StaleBinding, a145UnpaidBeforeT, a145LatePayment, a145Refusals, kQueryTransient, kLedgerCancelEvent, disputeReturn:
+		a145NeverSent, a145StaleBinding, a145UnpaidBeforeT, a145LatePayment, a145Refusals, kQueryTransient, kLedgerCancelEvent, disputeReturn, disputePaidRelease, disputePaidRace:
 		if gateway {
 			return "2.00", epayChannel
 		}
@@ -605,6 +605,9 @@ var scenarios = map[string]func(*driver){
 	ledgerCarryover:      (*driver).runLedgerCarryover,
 	kQueryTransient:      (*driver).runKQueryTransient,
 	kLedgerCancelEvent:   func(d *driver) { d.cancel(false) },
+	disputePaidRelease:   (*driver).runDisputePaidRelease,
+	disputePaidRefund:    (*driver).runDisputePaidRefund,
+	disputePaidRace:      (*driver).runDisputePaidRace,
 	disputeReturn:        (*driver).runDisputeReturn,
 	disputeReturnPaid:    func(d *driver) { d.disputeRefund(false, true) },
 

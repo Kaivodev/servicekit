@@ -2,8 +2,8 @@ cloud.google.com/go/compute/metadata v0.9.0 h1:pDUj4QMoPejqq20dK0Pg2N4yG9zIkYGdB
 cloud.google.com/go/compute/metadata v0.9.0/go.mod h1:E0bWwX5wTnLPedCKqk3pJmVgCBSM6qQI1yTBdEb3C10=
 github.com/Kaivodev/observability v0.3.0 h1:BJ+JyYYT/dDap6AHZOfo5ZHoLtNC0EtGVuBTRL8IKQk=
 github.com/Kaivodev/observability v0.3.0/go.mod h1:ik+fdV+iv2Ft5AyU4RaVpgQsAzKMs7u8r7NNG7Rm8vU=
-github.com/Kaivodev/protobuf v0.25.0 h1:TKqSDjEu038+efH4TSZNSRmmEO/bRFghkfc2nA/osOE=
-github.com/Kaivodev/protobuf v0.25.0/go.mod h1:+sBbH4fsf/n0EbDLHG/mvWYHlxCSntVfhg71+64/VoM=
+github.com/Kaivodev/protobuf v0.26.0 h1:RWBBuh25SP4BvTuKBdyeCNWqIyMuOOC1kM1MX5bzbEM=
+github.com/Kaivodev/protobuf v0.26.0/go.mod h1:+sBbH4fsf/n0EbDLHG/mvWYHlxCSntVfhg71+64/VoM=
 github.com/cenkalti/backoff/v5 v5.0.3 h1:ZN+IMa753KfX5hd8vVaMixjnqRZ3y8CuJKRKj1xcsSM=
 github.com/cenkalti/backoff/v5 v5.0.3/go.mod h1:rkhZdG3JZukswDf7f0cwqPNk4K0sa+F97BxZthm/crw=
 github.com/cespare/xxhash/v2 v2.3.0 h1:UL815xU9SqsFlibzuggzjXhog7bL6oX9BbNZnL2UFvs=

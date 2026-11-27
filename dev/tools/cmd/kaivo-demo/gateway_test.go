@@ -166,8 +166,8 @@ func TestDemoOrderRouting(t *testing.T) {
 	for _, group := range []struct {
 		names, amount, channel, sim string
 	}{
-		{"main duplicates dispute seller-offline bot-notices statement archived-work cancel k-query-transient k-ledger-cancel-event dispute-return", "2.00", "epay_v1", "epay-demo"},
-		{"refund-insufficient refund-before-release refund-after-release dispute-refund-before-release dispute-refund-after-release manual-refund manual-refund-failure late-payment dispute-return-paid", "1.00", "sim_form_md5", "md5-demo"},
+		{"main duplicates dispute seller-offline bot-notices statement archived-work cancel k-query-transient k-ledger-cancel-event dispute-return dispute-paid-release dispute-paid-race", "2.00", "epay_v1", "epay-demo"},
+		{"refund-insufficient refund-before-release refund-after-release dispute-refund-before-release dispute-refund-after-release manual-refund manual-refund-failure late-payment dispute-return-paid dispute-paid-refund", "1.00", "sim_form_md5", "md5-demo"},
 	} {
 		for _, name := range strings.Fields(group.names) {
 			if scenarios[name] == nil {

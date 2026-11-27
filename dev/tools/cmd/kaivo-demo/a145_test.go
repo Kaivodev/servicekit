@@ -173,7 +173,7 @@ func TestA145ApprovalVectorsAndResume(t *testing.T) {
 					}
 					posts = append(posts, person)
 					if !signedBy(approval, d.key("person/"+person)) {
-						approval["approvals"] = append(approvalRecords(approval), object{"request_id": aid, "approver_id": d.key("person/" + person), "assertion": body.Assertion})
+						approval["approvals"] = append(approvalRecords(approval), object{"request_id": aid, "approver_id": d.key("person/" + person), "assertion": object{"credential_id": body.Assertion["credential_id"]}})
 					}
 					if len(approvalRecords(approval)) == 2 {
 						header["status"] = "approved"

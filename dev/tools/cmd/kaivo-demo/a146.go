@@ -86,7 +86,7 @@ func (d *driver) runDisputeReturn() {
 	cancelled := t.step("Trace the ruling through reconciliation and ledger", func() {
 		configured := d.env("reconciliation")[lateWindowEnv]
 		hold, _ := t.awaitUnpaidCancellation(configured)
-		auth := t.returnAuthorization(dispute, ruling, configured)
+		auth := t.returnAuthorization(dispute, ruling, configured).GetAuthorizationId()
 		d.evidence("authorization_id", auth)
 		require(hold["status"] == "CANCELLED" && units(hold, "held_usdt_micro") == 0, "seller escrow was not cancelled in full")
 		lines := d.facts("ledger", "cancellation_posting", `SELECT a.source_event_id,l.seq,acct.code,l.direction,l.units
@@ -129,7 +129,7 @@ func (d *driver) runDisputeReturn() {
 	})
 }
 
-func (t tradeRun) returnAuthorization(dispute, ruling, configured string) string {
+func (t tradeRun) returnAuthorization(dispute, ruling, configured string) *recon.TradeCancellationAuthorized {
 	d := t.d
 	rows := d.rows("reconciliation", "dispute cancellation authorization", `SELECT authorization_id,encode(payload,'hex') AS payload,
 		convert_from(evidence_material,'UTF8')::jsonb#>>'{Review,Evidence,Cancellation,First,ID}' AS first_id,
@@ -149,7 +149,7 @@ func (t tradeRun) returnAuthorization(dispute, ruling, configured string) string
 	observations := d.facts("reconciliation", "authorized_observations", cancellationObservations+" AND id IN ($2,$3) ORDER BY verified_at,id", t.order, first, second)
 	timing := checkReturnObservations(observations, first, second, configured)
 	d.evidence("authorized_observation_window", object{"window": timing.window.String(), "source": timing.source, "first_id": first, "second_id": second})
-	return id
+	return &event
 }
 
 func checkReturnObservations(rows []object, first, second, configured string) latePaymentTiming {

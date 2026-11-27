@@ -147,7 +147,7 @@ func TestRiskApprovalRequester(t *testing.T) {
 						t.Error("unexpected approval")
 						return
 					}
-					signatures = append(signatures, object{"request_id": aid, "approver_id": people[c.Value], "assertion": body["assertion"]})
+					signatures = append(signatures, object{"request_id": aid, "approver_id": people[c.Value], "assertion": object{"credential_id": obj(body["assertion"])["credential_id"]}})
 					if len(signatures) == 2 {
 						header["status"] = "approved"
 					}

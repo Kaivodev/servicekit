@@ -180,6 +180,12 @@ func (b *browser) portalAPI(method, path, key string, body object, grant string,
 		}
 		panic(failure{reason: fmt.Sprintf("%s %s → HTTP %d, backend code %d (%s)", method, label, code, env.Code, env.Message), method: method, path: path, httpStatus: code, businessCode: env.Code, message: env.Message})
 	}
+	if strings.HasSuffix(path, "/assertions") {
+		checkRenderedApprovals(env.Data)
+		if approval, ok := env.Data["approval"].(object); ok {
+			checkRenderedApprovals(approval)
+		}
+	}
 	return env.Data
 }
 func (b *browser) post(path string, body object) object { return b.api("POST", path, "", body) }
