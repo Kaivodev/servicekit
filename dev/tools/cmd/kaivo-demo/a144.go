@@ -27,7 +27,7 @@ func (d *driver) checkA144Environment(scenario string) {
 		_, err := os.Stat(filepath.Join(d.root, "stack.env"))
 		require(os.IsNotExist(err), scenario+" 仅支持本机进程栈，请检查状态目录是否属于 Compose")
 		require(d.gatewayMode() && d.env("reconciliation")["AIPAY_RECONCILIATION_UPSTREAM_GATEWAY_ADDRESS"] != "", scenario+" 需要交易与核验网关")
-		if scenario == a144NotFound || scenario == kLedgerCancelEvent || isA145Scenario(scenario) && scenario != a145NeverSent {
+		if scenario == a144NotFound || scenario == kLedgerCancelEvent || scenario == disputeReturn || isA145Scenario(scenario) && scenario != a145NeverSent {
 			require(d.env("payment")["AIPAY_ENVIRONMENT"] == "development", scenario+" requires AIPAY_ENVIRONMENT=development for payment dev commands")
 		}
 		var cfg struct {
@@ -45,7 +45,7 @@ func (d *driver) checkA144Environment(scenario string) {
 		var next object
 		decode(d.sim("GET", "/__test/accounts/"+simulatorAccount(epayChannel)+"/next-create", nil), &next)
 		switch scenario {
-		case a144NotSent, a145NeverSent, a145LatePayment, a145Refusals, kQueryTransient, kLedgerCancelEvent:
+		case a144NotSent, a145NeverSent, a145LatePayment, a145Refusals, kQueryTransient, kLedgerCancelEvent, disputeReturn:
 			require(len(next) == 0, "the EPay simulator already has a pending create fault")
 		}
 	})

@@ -126,7 +126,7 @@ func scenarioOrder(scenario string, gateway bool) (amount, channel string) {
 	case livePhase:
 		return "1.11", epayChannel
 	case "main", "duplicates", "dispute", "seller-offline", "bot-notices", "statement", "archived-work", "cancel", a144NotSent, a144NotFound,
-		a145NeverSent, a145StaleBinding, a145UnpaidBeforeT, a145LatePayment, a145Refusals, kQueryTransient, kLedgerCancelEvent:
+		a145NeverSent, a145StaleBinding, a145UnpaidBeforeT, a145LatePayment, a145Refusals, kQueryTransient, kLedgerCancelEvent, disputeReturn:
 		if gateway {
 			return "2.00", epayChannel
 		}
@@ -372,10 +372,10 @@ const cancellationObservations = `SELECT id,verified_at,convert_from(record_json
 	convert_from(record_json,'UTF8')::jsonb->>'Kind' AS kind,
 	to_jsonb(e)->>'late_payment_window_seconds' AS late_payment_window_seconds
 	FROM reconciliation_verification_evidence AS e
-	WHERE order_id=$1 AND eligible AND operation='query_payment' ORDER BY verified_at,id`
+	WHERE order_id=$1 AND eligible AND operation='query_payment'`
 
 func (t tradeRun) observations() []object {
-	return t.d.rows("reconciliation", "reconciliation_verification_evidence", cancellationObservations, t.order)
+	return t.d.rows("reconciliation", "reconciliation_verification_evidence", cancellationObservations+" ORDER BY verified_at,id", t.order)
 }
 
 func (t tradeRun) awaitFirstUnpaid(configured string, limit time.Duration) (latePaymentTiming, []object) {
@@ -392,14 +392,19 @@ func (t tradeRun) awaitFirstUnpaid(configured string, limit time.Duration) (late
 		}
 		return false
 	})
-	observed, err := time.Parse(time.RFC3339Nano, str(first, "verified_at"))
-	check(err)
-	timing, err := lateWindowTiming(observed, first["late_payment_window_seconds"], configured)
-	check(err)
+	timing := unpaidObservationTiming(first, configured)
 	d.evidence("first_observation", rows)
 	d.evidence("late_payment_window", object{"window": timing.window.String(), "source": timing.source,
 		"margin": timing.margin.String(), "deadline": timing.deadline})
 	return timing, rows
+}
+
+func unpaidObservationTiming(first object, configured string) latePaymentTiming {
+	observed, err := time.Parse(time.RFC3339Nano, str(first, "verified_at"))
+	check(err)
+	timing, err := lateWindowTiming(observed, first["late_payment_window_seconds"], configured)
+	check(err)
+	return timing
 }
 
 func (t tradeRun) awaitUnpaidCancellation(configured string) (object, time.Duration) {
@@ -438,7 +443,7 @@ func checkUnpaidSeparation(rows []object, window time.Duration) {
 			last = v
 		}
 	}
-	require(count >= 2 && last.Sub(first) >= window-time.Second, "missing two separated closed/unpaid observations")
+	require(count >= 2 && last.Sub(first) >= window, "missing two separated closed/unpaid observations")
 }
 
 func (t tradeRun) inferredCloseEvidence() {
@@ -474,7 +479,7 @@ func (d *driver) cancel(late bool) {
 	})
 	if !late {
 		if d.scope == kLedgerCancelEvent {
-			t.archiveCancellationWork()
+			t.archiveCancellationWork(true)
 		}
 		t.step("二次未付核验并归还", func() {
 			_, window := t.awaitUnpaidCancellation(configured)
@@ -482,7 +487,8 @@ func (d *driver) cancel(late bool) {
 				t.checkCancellationProjection()
 			}
 			rows := t.observations()
-			checkUnpaidSeparation(rows, window)
+			// Keep the existing one-second tolerance for the merchant close scenario.
+			checkUnpaidSeparation(rows, window-time.Second)
 			d.evidence("independent_observations", rows)
 			if t.channel == epayChannel {
 				t.inferredCloseEvidence()
@@ -599,6 +605,8 @@ var scenarios = map[string]func(*driver){
 	ledgerCarryover:      (*driver).runLedgerCarryover,
 	kQueryTransient:      (*driver).runKQueryTransient,
 	kLedgerCancelEvent:   func(d *driver) { d.cancel(false) },
+	disputeReturn:        (*driver).runDisputeReturn,
+	disputeReturnPaid:    func(d *driver) { d.disputeRefund(false, true) },
 
 	a145NeverSent:     (*driver).runA145NeverSent,
 	a145StaleBinding:  (*driver).runA145StaleBinding,
@@ -628,8 +636,8 @@ var scenarios = map[string]func(*driver){
 	"refund-before-release":         func(d *driver) { d.refund(false) },
 	"refund-after-release":          func(d *driver) { d.refund(true) },
 	"dispute":                       (*driver).dispute,
-	"dispute-refund-before-release": func(d *driver) { d.disputeRefund(false) },
-	"dispute-refund-after-release":  func(d *driver) { d.disputeRefund(true) },
+	"dispute-refund-before-release": func(d *driver) { d.disputeRefund(false, false) },
+	"dispute-refund-after-release":  func(d *driver) { d.disputeRefund(true, false) },
 }
 
 func (d *driver) releasedTrade(copies int) {

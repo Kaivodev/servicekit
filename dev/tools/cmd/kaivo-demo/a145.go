@@ -185,6 +185,13 @@ func refusedWrite(path string, code int, write func()) bool {
 	return refused
 }
 
+func requireRefusedWrite(path string, code int, message string, write func()) failure {
+	f, refused := portalRefusal(path, write, code)
+	require(refused, "portal accepted the write to "+path)
+	require(f.httpStatus == 200 && f.message == message, fmt.Sprintf("expected HTTP 200 and %s on %s, got HTTP %d and %q", message, path, f.httpStatus, f.message))
+	return f
+}
+
 func portalRefusal(path string, write func(), codes ...int) (failure, bool) {
 	return portalMethodRefusal("POST", path, write, codes...)
 }

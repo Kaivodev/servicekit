@@ -60,7 +60,9 @@ func TestArchivedCancellationEvidence(t *testing.T) {
 	event := object{"action": "order.ledger_cancelled"}
 	archive := object{"action": "order.dev_work_archived", "actor_id": "payment/dev"}
 	work := object{"archived_at": "archived", "completed_at": nil}
-	checkArchivedCancellation([]object{archive, event}, work)
+	if got := checkArchivedCancellation([]object{event, archive}, work); got["action"] != event["action"] {
+		t.Fatal("expected the cancellation audit from the archived order")
+	}
 	for _, rows := range [][]object{
 		{archive}, {event}, {archive, event, event}, {archive, archive, event},
 		{archive, event, {"action": "order.ledger_verified"}},

@@ -195,7 +195,7 @@ export AIPAY_DEMO_TARGET=k8s
 demo() { "$STATE/bin/kaivo-demo" "$STATE" "$SERVICEKIT" "$@"; }
 demo setup -o "$STATE/setup.md"
 for scenario in main cancel refund-before-release refund-after-release dispute \
-  dispute-refund-before-release dispute-refund-after-release manual-refund manual-refund-failure late-payment; do
+  dispute-refund-before-release dispute-return-paid dispute-refund-after-release manual-refund manual-refund-failure late-payment; do
   demo run "$scenario" -o "$STATE/$scenario.md"
 done
 ```
@@ -296,6 +296,8 @@ stack demo run a145-late-payment
 stack demo run a145-refusals
 stack demo run k-query-transient
 stack demo run k-ledger-cancel-event
+stack demo run dispute-return
+stack demo run dispute-return-paid
 stack demo run ledger-adjustment
 stack demo run ledger-approvals-inbox
 stack demo run settle-refunds
@@ -330,6 +332,8 @@ stack demo run refund-insufficient
 - `a145-refusals` uses one order to check early submission (409), requester self-approval (403), approval after payment (409), and a fresh submission on the paid order (409). Risk uses its own WebAuthn credential enrolled at platform login. Its IAM role lacks approval permission, so the platform can return 403 before payment receives the assertion. The driver checks signature records, the merchant receipt, release balances, and the absence of a cancellation request.
 - `k-query-transient` pauses the simulator for 60 seconds after a 2.00 EPay create. It checks the failed query audit, pending payment and intact instruction, then repeats the merchant create during the pause and pays through the original cashier after recovery. It verifies the merchant receipt and release balances. Both K scenarios require the native stack, trade and verification gateways, the simulator test control token, and payment at schema version 24 or later.
 - `k-ledger-cancel-event` closes an unpaid 2.00 EPay order and uses `payment dev archive-work` before reconciliation authorizes cancellation. It requires one ledger cancellation event audit, no work-path verification, an archived unfinished work row, and the returned escrow. An authorization already visible at archive time makes the run inconclusive. This scenario also requires `AIPAY_ENVIRONMENT=development` for payment.
+- `dispute-return` opens an unpaid 2.00 EPay V2 dispute, records both parties' evidence and archives the order work. Release to the recipient must return HTTP 200 with business code 409 and `DISPUTE_RULING_OUTCOME_NOT_ALLOWED`, create zero ruling requests and leave the ledger version unchanged. After simulator backdating and two approvals for return to the seller, the driver matches two closed-unpaid observations a full window apart to one ruling-linked cancellation authorization. It checks the return of Q without fees, the payment audit and resolved dispute views, V2 query status 0, successful close and zero notifications. Requires payment migration 000025, the native trade and verification gateways, simulator test control and `AIPAY_ENVIRONMENT=development` on payment. **Pending native run**.
+- `dispute-return-paid` pays a 1.00 form-md5 order and disputes it before release. A return to the seller must produce HTTP 200 with business code 409 and `DISPUTE_RULING_OUTCOME_NOT_ALLOWED`, zero ruling requests, an unchanged ledger version and a DISPUTED order. Two approvers then sign the refund ruling. Two reviewers check the seller's evidence. After the objection window, the driver verifies independent refund authorization, one REFUNDED posting, seller available +Q, and unchanged merchant and fee balances. Requires payment migration 000025. **Pending native run**.
 - `ledger-adjustment` posts a seller credit, downloads its evidence and reverses it. It checks rejected submissions, approval separation and rollback of an underfunded debit. Run it after seller and registry setup on the native development stack, with other balance-changing scenarios idle.
 - `ledger-approvals-inbox` checks all three approval sources, enters ledger read-only mode, verifies four pending ledger request kinds, then exits and executes them. The USD policy advances one version at the same threshold. It requires the native development stack and the staff and approver registry setup.
 - main、duplicates、dispute、seller-offline、bot-notices、statement、archived-work、cancel 下单 2.00 元。本轮退款和 late-payment 场景每单 1.00 元，使用 form-md5 收银。商户 V2、争议裁决及平台运营发起的退款共用卖方举证、双人复核、独立授权与账本核销流程。每笔原单的实际通道记录在报告中。

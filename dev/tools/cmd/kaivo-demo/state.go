@@ -327,7 +327,7 @@ func driverAt(root, repo, scope, dir string) *driver {
 	// Automatic-refund checkpoints contain different orders, approvals and balance
 	// baselines. Retain them and the shared setup while starting a manual sample.
 	switch scope {
-	case "refund-before-release", "refund-after-release", "dispute-refund-before-release", "dispute-refund-after-release", "refund-insufficient":
+	case "refund-before-release", "refund-after-release", "dispute-refund-before-release", "dispute-refund-after-release", "refund-insufficient", disputeReturnPaid:
 		d.scope += "/manual"
 		d.history.RefundFlow = "manual"
 	}

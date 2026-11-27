@@ -71,7 +71,7 @@ func TestCancellationObservationWindowProjection(t *testing.T) {
 
 func TestClosedUnpaidObservations(t *testing.T) {
 	first := object{"outcome": "closed_unpaid", "verified_at": "2026-01-02T03:04:05Z"}
-	second := object{"outcome": "closed_unpaid", "verified_at": "2026-01-02T03:05:04Z"}
+	second := object{"outcome": "closed_unpaid", "verified_at": "2026-01-02T03:05:05Z"}
 	paid := object{"outcome": "paid"}
 	rows := []object{first, second}
 	checkUnpaidSeparation(rows, time.Minute)

@@ -93,14 +93,16 @@ func (d *driver) runKQueryTransient() {
 	t.release()
 }
 
-func (t tradeRun) archiveCancellationWork() {
+func (t tradeRun) archiveCancellationWork(waitForRequest bool) {
 	d := t.d
 	d.step("Archive the order work before cancellation authorization", func() {
-		waitFor("payment to request cancellation verification", 30*time.Second, func() bool {
-			rows := d.facts("payment", "cancellation_request", `SELECT id,cancellation_version FROM payment_orders
-				WHERE id=$1 AND cancellation_version>0`, t.order)
-			return len(rows) == 1
-		})
+		if waitForRequest {
+			waitFor("payment to request cancellation verification", 30*time.Second, func() bool {
+				rows := d.facts("payment", "cancellation_request", `SELECT id,cancellation_version FROM payment_orders
+					WHERE id=$1 AND cancellation_version>0`, t.order)
+				return len(rows) == 1
+			})
+		}
 		// Authorization can also win the race while the owner is retrying a lease.
 		// Capture that evidence even if archive-work finds an already finished order.
 		defer func() {
@@ -125,26 +127,33 @@ func (t tradeRun) archiveCancellationWork() {
 	})
 }
 
-func (t tradeRun) checkCancellationProjection() {
+func (t tradeRun) checkCancellationProjection() object {
 	d := t.d
 	t.awaitOrderStatus("cancelled")
-	audits := d.facts("payment", "cancellation_audits", `SELECT id,action,actor_id,occurred_at FROM payment_audit_logs
+	audits := d.facts("payment", "cancellation_audits", `SELECT id,action,actor_id,occurred_at,
+		changes#>>'{metadata,dispute_id}' AS dispute_id, changes#>>'{metadata,ruling_id}' AS ruling_id,
+		changes#>>'{metadata,authorization_id}' AS authorization_id FROM payment_audit_logs
 		WHERE target_type='order' AND target_id=$1 AND action IN ('order.ledger_cancelled','order.ledger_verified','order.dev_work_archived')
 		ORDER BY occurred_at,id`, t.order)
 	work := oneFact(d.facts("payment", "archived_order_work", `SELECT object_id,archived_at,completed_at FROM payment_work
 		WHERE kind='order' AND object_id=$1`, t.order), "order work")
-	checkArchivedCancellation(audits, work)
+	return checkArchivedCancellation(audits, work)
 }
 
-func checkArchivedCancellation(audits []object, work object) {
+func checkArchivedCancellation(audits []object, work object) object {
 	counts := map[string]int{}
+	var cancellation object
 	for _, row := range audits {
 		action := str(row, "action")
 		counts[action]++
-		if action == "order.dev_work_archived" {
+		switch action {
+		case "order.ledger_cancelled":
+			cancellation = row
+		case "order.dev_work_archived":
 			require(row["actor_id"] == "payment/dev", "unexpected actor on the order work archive")
 		}
 	}
 	require(counts["order.ledger_cancelled"] == 1 && counts["order.ledger_verified"] == 0, "expected a single cancellation from the ledger event and no work-path verification")
 	require(counts["order.dev_work_archived"] == 1 && work["archived_at"] != nil && work["completed_at"] == nil, "expected one archive audit and unfinished archived order work")
+	return cancellation
 }

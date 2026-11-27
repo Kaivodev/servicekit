@@ -35,7 +35,7 @@ func oneFact(rows []object, what string) object {
 	return rows[0]
 }
 
-func (d *driver) disputeRefund(after bool) {
+func (d *driver) disputeRefund(after, refuseReturn bool) {
 	t := d.refundTrade("争议退款", "v1")
 	t.paid(1)
 	var beforeRefund object
@@ -57,6 +57,9 @@ func (d *driver) disputeRefund(after bool) {
 	held := t.checkRefundBarrier(after, dispute)
 	if !after {
 		beforeRefund = held
+	}
+	if refuseReturn {
+		t.refuseDisputeRuling(dispute, returnToSeller)
 	}
 	ruling := t.approveRefundRuling(dispute)
 	refund := t.checkRefundHandoff(after, dispute, ruling)

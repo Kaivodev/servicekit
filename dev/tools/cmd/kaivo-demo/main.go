@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"syscall"
 )
 
@@ -109,9 +110,16 @@ func executeContext(ctx context.Context, args []string) (err error) {
 	}
 	switch action {
 	case "run":
-		d.history.Checks, d.history.SourceNotes = round11Plan(target)
-		if target == "dispute-refund-before-release" || target == "dispute-refund-after-release" {
+		switch target {
+		case disputeReturn:
+			d.history.Checks, d.history.SourceNotes = disputeReturnPlan()
+		case "dispute-refund-before-release", "dispute-refund-after-release", disputeReturnPaid:
 			d.history.Checks, d.history.SourceNotes = disputeRefundPlan(target == "dispute-refund-after-release")
+			if target == disputeReturnPaid {
+				d.history.Checks = slices.Insert(d.history.Checks, 1, "Refuse the return on the disputed paid order with HTTP 200, business code 409 and "+rulingOutcomeDenied+". Check zero ruling requests and the unchanged ledger control version.")
+			}
+		default:
+			d.history.Checks, d.history.SourceNotes = round11Plan(target)
 		}
 		d.report()
 		d.stepGroup(target, func() {
@@ -121,7 +129,7 @@ func executeContext(ctx context.Context, args []string) (err error) {
 				require(os.IsNotExist(err), target+" requires the native process stack")
 				require(d.env("ledger")["AIPAY_ENVIRONMENT"] == "development", target+" requires AIPAY_ENVIRONMENT=development for ledger")
 			}
-			if target == a144NotSent || target == a144NotFound || isA145Scenario(target) || target == kQueryTransient || target == kLedgerCancelEvent {
+			if target == a144NotSent || target == a144NotFound || isA145Scenario(target) || target == kQueryTransient || target == kLedgerCancelEvent || target == disputeReturn {
 				d.checkA144Environment(target)
 			}
 			if localCapability(target) {

@@ -14,6 +14,7 @@ import (
 func TestDisputeRefundRegistrationAndReport(t *testing.T) {
 	for _, tc := range []struct{ name, ext, branch string }{
 		{"dispute-refund-before-release", ".md", "PRE_RELEASE"},
+		{disputeReturnPaid, ".md", "PRE_RELEASE"},
 		{"dispute-refund-after-release", ".json", "user_risk_held"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -28,6 +29,9 @@ func TestDisputeRefundRegistrationAndReport(t *testing.T) {
 				t.Fatalf("unexpected run result %v", err)
 			}
 			data := string(file(out))
+			if tc.name == disputeReturnPaid && !strings.Contains(data, rulingOutcomeDenied) {
+				t.Error("paid return report is missing the refusal reason")
+			}
 			for _, want := range []string{tc.name, tc.branch, "payment/internal/channeladmin/disputes_postgres.go", "reconciliation_manual_refund_resolutions", "failed"} {
 				if !strings.Contains(data, want) {
 					t.Errorf("report missing %q", want)
