@@ -345,7 +345,7 @@ stack demo run refund-insufficient
 - 第 11 轮四个场景已于 2026-11-24 在本机进程栈通过，结果见[验证机记录](#2026-11-24-第-11-轮演示验收)。卖方场景会切换该金额对应的通道，通知场景会绑定演示商户群。归档场景按 payment 的真实退避等待，可用 `AIPAY_DEMO_ARCHIVE_WAIT=0s` 立即检查并留待续跑。对账场景优先使用已有文件，新栈可能要等到下一次 UTC+8 零点。详见[步骤与证据](demo.md#第-11-轮运行条件)。
 - 2026-11-22 的争议退款记录验证的是旧自动退款流程。当前人工退款场景的栈验收待运行。放币后场景也通过平台登记争议，登记失败会把现场状态写入报告。重跑同名场景沿用原单和已签材料。
 - `demo run 场景 -o 文件` 在每步结束时更新报告，失败时保留已有证据和错误。`.json` 输出 JSON，其他文件名输出 Markdown。默认的两份场景报告仍位于 `demo/reports/`。
-- `demo setup iam` 由管理员 1 邀请风控人员（`platform-risk`），管理员 2 批准，风控人员接受邀请后注册自己的 WebAuthn 凭据。风控人员提交 20 秒风控策略和争议裁决；运营登记争议，提交通道、方式、定价、插件和核验账户申请。每份审批材料都按提交人的 IAM 用户 ID 核对，再由两名已登记的审批人分别签署。
+- `demo setup iam` 由管理员 1 邀请风控人员（`platform-risk`），管理员 2 批准，风控人员接受邀请后注册自己的 WebAuthn 凭据。风控人员提交风控策略和争议裁决。新策略的持有时间为本机 20 秒、Kubernetes 120 秒，已有通道沿用已批准的策略。运营登记争议，提交通道、方式、定价、插件和核验账户申请。每份审批材料都按提交人的 IAM 用户 ID 核对，再由两名已登记的审批人分别签署。
 - `demo setup seller` 以独立卖方私聊 `/start`、`/balance` 取得账户 ID，再按账户与 Telegram 用户在 IAM 只读事务中查询 `iam_telegram_bindings.user_id`。驱动把六项声明写入 `demo/declarations/seller.json`，用 `iam sellers activate` 登记，管理员 1 随后向同一账户和邮箱发邀请。卖方接受邀请并绑定 TOTP。报告将 `verification_ref` 和 `declared_by` 标为演示值。新栈的 `prepare` 和已有本机栈的 `demo-config` 都从 IAM 迁移属主连接生成私有的 `env/iam-sellers.env`，仅供卖方仪式读取。
 - 已在 IAM 登记的演示卖方可指定 `AIPAY_DEMO_SELLER_ACCOUNT_ID` 和 `AIPAY_DEMO_SELLER_EMAIL`。驱动用 `iam sellers list` 核对账户、邮箱并取得登记的用户 ID。已有网页资料的卖方可用私有文件 `AIPAY_DEMO_SELLER_PASSWORD_FILE` 和已绑定时的 `AIPAY_DEMO_SELLER_TOTP_FILE` 提供自己的因子。payment 的 `inputs/payment/seller-reviews.json` 仍需由审核方按 payment README 提供该卖方经核验的摘要、审核人和有效期。
 - 浏览器客户端直连回环 HTTP。平台、卖方、商户浏览器分别固定原始 Host 和 HTTPS Origin。每人单独保存 `__Host-` Cookie，每次门户写入前获取对应 CSRF，发送 Origin、X-CSRF-Token 和 Idempotency-Key。商户绑定页使用 HTML 中的 CSRF、enrollment ID 和 completion token。上游收银另走真实 HTTPS，验证本栈 CA。

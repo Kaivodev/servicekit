@@ -60,7 +60,7 @@ func (b accountBalances) merchantHolds() []string {
 func (d *driver) waitForIdleBalances() accountBalances {
 	var b accountBalances
 	var holds []string
-	if !pollUntil(2*time.Minute, func() bool {
+	idle := func() bool {
 		// Every bot poll is a new Telegram update kept in the driver state, so
 		// poll the seller portal and ask the bot only once the seller side is idle.
 		if holds = sellerHolds(d.sellerBalance()); len(holds) > 0 {
@@ -69,10 +69,26 @@ func (d *driver) waitForIdleBalances() accountBalances {
 		b = d.readAccountBalances("idle/" + id())
 		holds = b.nonzeroHolds()
 		return len(holds) == 0
-	}) {
+	}
+	started := time.Now()
+	limit := 2 * time.Minute
+	if pollUntil(limit, idle) {
+		return b
+	}
+	// A previous paid order may still be waiting for its scheduled release.
+	pending, err := d.queryRows(d.ctx, "ledger", "pending risk release", `SELECT risk_release_at FROM ledger_trade_reservations
+		WHERE (seller_account_id=$1 OR account_id=$2) AND status='RESERVED' AND paid_verified_at IS NOT NULL
+		ORDER BY risk_release_at DESC LIMIT 1`, d.required("seller-account"), d.required("merchant-account"))
+	if err != nil {
+		d.trace("could not read the pending risk release deadline")
+	} else if len(pending) > 0 {
+		limit = d.releaseWaitLimit(pending[0], started, limit)
+	}
+	// Poll once more even if the order was released during the deadline lookup.
+	if !pollUntil(time.Until(started.Add(limit)), idle) {
 		d.evidence("nonzero_holds", holds)
 		d.recordSellerHolds()
-		stop("等待余额归零超时（2 分钟）：%s", strings.Join(holds, "，"))
+		stop("timed out after %s waiting for idle balances: %s", limit, strings.Join(holds, ", "))
 	}
 	return b
 }

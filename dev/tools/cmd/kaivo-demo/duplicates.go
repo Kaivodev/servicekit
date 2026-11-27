@@ -138,7 +138,8 @@ func (d *driver) staleAuthorization() {
 	t.paid(1)
 	t.step("签发后推进冻结版本", func() {
 		var old object
-		waitFor("signed release still awaiting ledger", 2*time.Minute, func() bool {
+		limit := d.releaseWaitLimit(d.ledgerTrade(t.order), time.Now(), 2*time.Minute)
+		waitFor("signed release still awaiting ledger", limit, func() bool {
 			rs := d.rows("reconciliation", "reconciliation_authorizations/outbox", "SELECT a.authorization_id,a.control_version,o.sequence FROM reconciliation_authorizations a JOIN reconciliation_outbox o ON o.event_id=a.authorization_id WHERE a.order_id=$1 AND a.event_type='TradeReleaseAuthorized' AND o.sequence IS NOT NULL", t.order)
 			if len(rs) != 1 {
 				return false

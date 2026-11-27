@@ -111,7 +111,7 @@ func (t tradeRun) coverageAuthorizations() []object {
 func (t tradeRun) coverageDenied(expired object) {
 	d := t.d
 	t.step("风控到期仍拒绝放币", func() {
-		deadline := coverageTime(d.ledgerTrade(t.order), "risk_release_at")
+		deadline := riskReleaseAt(d.ledgerTrade(t.order))
 		// Jobs revisit pending OrderPaid each tick (1s by default). Also require a
 		// post-deadline paid review so a stopped or lagging worker cannot pass.
 		d.sleep(time.Until(deadline.Add(5 * time.Second)))

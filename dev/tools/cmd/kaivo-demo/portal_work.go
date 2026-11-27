@@ -105,7 +105,7 @@ func (d *driver) sellerOffline() {
 	}
 	off := onlineCommand(account, ch, d.key("offline"), "暂停演示通道接单", version, false)
 	// Obtain the TOTP grant before paying so waiting for a new TOTP time step
-	// cannot consume the trade's twenty-second risk window.
+	// cannot consume the trade's risk hold.
 	var grant string
 	if d.data["step/"+d.scope+"/卖方下线"] == nil {
 		d.liveStep("下线命令近期认证", func() { grant = seller.grant(off) })

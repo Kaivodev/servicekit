@@ -103,15 +103,31 @@ func expectFailure(t *testing.T, f func()) {
 }
 
 func TestRiskApprovalRequester(t *testing.T) {
-	for _, requester := range []string{"risk", "operations"} {
-		t.Run(requester, func(t *testing.T) {
+	for _, tc := range []struct {
+		name, requester string
+		env             demoEnvironment
+		holdSeconds     int64
+		resume          bool
+	}{
+		{"native", "risk", nativeEnvironment{}, 20, false},
+		{"kubernetes", "risk", &kubeEnvironment{}, 120, false},
+		{"kubernetes with saved policy", "risk", &kubeEnvironment{}, 20, true},
+		{"wrong requester", "operations", nativeEnvironment{}, 20, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			d := newDriver(t.TempDir(), "", "setup")
+			d.demoEnvironment = tc.env
 			d.active = &result{Evidence: object{}}
 			d.put("write/setup/risk/body", object{"change": object{"hold_duration_seconds": 0}})
-			change := object{"risk_policy_version": id(), "channel_account_id": id(), "hold_duration_seconds": 20,
+			channel := id()
+			const effectiveAt = "2026-11-19T00:01:00Z"
+			change := object{"risk_policy_version": d.key("risk"), "channel_account_id": channel, "hold_duration_seconds": tc.holdSeconds,
 				"exceptional_extension_seconds": 60, "dispute_handling_timeout_seconds": 120,
-				"effective_at": "2026-11-19T00:01:00Z", "expected_control_version": 0}
-			aid, user := id(), d.key("iam/"+requester)
+				"effective_at": effectiveAt, "expected_control_version": 0}
+			if tc.resume {
+				d.put("write/setup/risk/risk/body", object{"change": change})
+			}
+			aid, user := id(), d.key("iam/"+tc.requester)
 			material := normalized(object{"kind": "risk_policy", "risk_policy": change, "approval_request_id": aid,
 				"requested_by": user, "requested_at": "2026-11-19T00:00:00Z", "expires_at": "2026-11-19T01:00:00Z"})
 			raw := materialBytes(appendField(nil, "aipay.payment.admin.v1"), (&pay.PaymentApprovalMaterial{}).ProtoReflect().Descriptor(), material)
@@ -165,9 +181,9 @@ func TestRiskApprovalRequester(t *testing.T) {
 				d.put("session-until/"+n, time.Now().Add(time.Minute))
 			}
 			submit := func() {
-				d.browser("risk").approve("risk", "payment", "/risk-policies/requests", "/risk-policies", object{"change": change})
+				d.approveChannelRisk(md5Channel, channel, effectiveAt)
 			}
-			if requester == "operations" {
+			if tc.requester == "operations" {
 				expectFailure(t, submit)
 				if len(signatures) != 0 {
 					t.Fatal("signed another user's request")
@@ -177,6 +193,37 @@ func TestRiskApprovalRequester(t *testing.T) {
 				if len(signatures) != 2 || d.active.Evidence["requested_by"] != user {
 					t.Fatal("missing approvals or requester evidence")
 				}
+				if got := d.active.Evidence["hold_duration_seconds"]; got != tc.holdSeconds {
+					t.Fatalf("approved hold = %v, want %d seconds", got, tc.holdSeconds)
+				}
+			}
+		})
+	}
+}
+
+func TestReleaseWaitLimit(t *testing.T) {
+	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	trade := func(remaining time.Duration) object {
+		return object{"risk_release_at": now.Add(remaining).Format(time.RFC3339Nano)}
+	}
+	for _, tc := range []struct {
+		name          string
+		env           demoEnvironment
+		trade         object
+		minimum, want time.Duration
+	}{
+		{"native fallback", nativeEnvironment{}, nil, 0, 80 * time.Second},
+		{"native keeps previous limit", nativeEnvironment{}, nil, 2 * time.Minute, 2 * time.Minute},
+		{"kubernetes fallback", &kubeEnvironment{}, object{"risk_release_at": nil}, 2 * time.Minute, 3 * time.Minute},
+		{"partly elapsed hold", &kubeEnvironment{}, trade(90 * time.Second), 2 * time.Minute, 150 * time.Second},
+		{"previous kubernetes policy", &kubeEnvironment{}, trade(20 * time.Second), 2 * time.Minute, 2 * time.Minute},
+		{"extended hold", nativeEnvironment{}, trade(4 * time.Minute), 2 * time.Minute, 5 * time.Minute},
+		{"elapsed hold", &kubeEnvironment{}, trade(-time.Minute), 2 * time.Minute, 2 * time.Minute},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := &driver{demoEnvironment: tc.env}
+			if got := d.releaseWaitLimit(tc.trade, now, tc.minimum); got != tc.want {
+				t.Errorf("release wait limit = %s, want %s", got, tc.want)
 			}
 		})
 	}

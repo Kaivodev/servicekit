@@ -290,9 +290,27 @@ func (t tradeRun) terminal(status string) object {
 }
 func (t tradeRun) terminalWithin(status string, limit time.Duration) object {
 	d := t.d
+	if status == "RELEASED" {
+		limit = d.releaseWaitLimit(d.ledgerTrade(t.order), time.Now(), limit)
+	}
 	waitFor(status, limit, func() bool { return d.ledgerTrade(t.order)["status"] == status })
 	return d.chainEvidence(t.order)
 }
+
+func riskReleaseAt(trade object) time.Time {
+	at, err := time.Parse(time.RFC3339Nano, str(trade, "risk_release_at"))
+	check(err)
+	return at
+}
+
+func (d *driver) releaseWaitLimit(trade object, now time.Time, minimum time.Duration) time.Duration {
+	remaining := d.riskHold()
+	if trade["risk_release_at"] != nil {
+		remaining = riskReleaseAt(trade).Sub(now)
+	}
+	return max(minimum, remaining+time.Minute)
+}
+
 func (t tradeRun) finish(released bool) object {
 	d := t.d
 	k := d.scope + "/" + t.name
@@ -323,16 +341,13 @@ func checkBalanceDelta(before, after object, seller, merchant, fees int64) {
 }
 func (t tradeRun) release() object {
 	step := t.step("风控到期与独立放币", func() {
-		t.terminal("RELEASED")
-		h := t.d.ledgerTrade(t.order)
+		h := t.terminal("RELEASED")
 		require(h["risk_release_at"] != nil && num(h, "released_seq") > num(h, "reserve_seq"), "missing release journal")
 		auth := t.d.rows("reconciliation", "reconciliation_authorizations/outbox", "SELECT a.authorization_id,a.control_version,a.issued_at,o.sequence FROM reconciliation_authorizations a JOIN reconciliation_outbox o ON o.event_id=a.authorization_id WHERE a.order_id=$1 AND a.event_type='TradeReleaseAuthorized'", t.order)
 		require(len(auth) == 1, "expected one independent release authorization")
 		issued, e := time.Parse(time.RFC3339Nano, str(auth[0], "issued_at"))
 		check(e)
-		deadline, e := time.Parse(time.RFC3339Nano, str(h, "risk_release_at"))
-		check(e)
-		require(!issued.Before(deadline), "release authorization predates risk deadline")
+		require(!issued.Before(riskReleaseAt(h)), "release authorization predates risk deadline")
 		calls := t.d.rows("reconciliation", "reconciliation_verification_evidence", "SELECT id,verified_at FROM reconciliation_verification_evidence WHERE order_id=$1 AND eligible AND operation='query_payment' AND convert_from(record_json,'UTF8')::jsonb->>'Outcome'='paid'", t.order)
 		require(len(calls) > 0, "missing independent paid verification")
 		t.d.evidence("reconciliation_release", auth)

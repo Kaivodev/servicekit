@@ -52,6 +52,24 @@ func unpaidTimeoutSeconds(raw string) int64 {
 	return int64((ttl + time.Hour + time.Second - 1) / time.Second)
 }
 
+func (d *driver) riskHold() time.Duration {
+	if d.native() {
+		return 20 * time.Second
+	}
+	return 120 * time.Second
+}
+
+func (d *driver) approveChannelRisk(variant, channel, effectiveAt string) {
+	label := channelKey(variant, "risk")
+	approved := d.browser("risk").approve(label, "payment", "/risk-policies/requests", "/risk-policies", object{"change": object{
+		"risk_policy_version": d.key(label), "channel_account_id": channel, "hold_duration_seconds": int64(d.riskHold() / time.Second),
+		"exceptional_extension_seconds": 60, "dispute_handling_timeout_seconds": 120, "effective_at": effectiveAt, "expected_control_version": 0,
+	}})
+	policy := obj(approved["risk_policy"])
+	d.evidence("hold_duration_seconds", num(policy, "hold_duration_seconds"))
+	d.put(channelKey(variant, "effective/risk"), str(policy, "effective_at"))
+}
+
 type channelSpec struct {
 	name, minAmount, maxAmount string
 	priority                   int
@@ -210,8 +228,7 @@ func (d *driver) setupChannel(variant string, gateway bool) {
 		})
 	}
 	step("风控", func() {
-		approved := d.browser("risk").approve(key("risk"), "payment", "/risk-policies/requests", "/risk-policies", object{"change": object{"risk_policy_version": d.key(key("risk")), "channel_account_id": ch, "hold_duration_seconds": 20, "exceptional_extension_seconds": 60, "dispute_handling_timeout_seconds": 120, "effective_at": effect(), "expected_control_version": 0}})
-		d.put(key("effective/risk"), str(obj(approved["risk_policy"]), "effective_at"))
+		d.approveChannelRisk(variant, ch, effect())
 	})
 	if epay && !live {
 		d.liveStep(key("EPay 通道凭据核对"), func() {
