@@ -366,7 +366,9 @@ func (d *driver) runA145NeverSent() {
 	t.step("Check dispatch fencing after the listener resumes", func() {
 		var after time.Time
 		require(d.read("resume-after/"+t.number, &after), "missing listener resume time")
-		if delay := time.Until(after); delay > 0 {
+		// The simulator answers the pause before closing its listener, so it
+		// reopens slightly after the recorded time. Leave a margin.
+		if delay := time.Until(after) + 5*time.Second; delay > 0 {
 			d.sleep(delay)
 		}
 		var next object
