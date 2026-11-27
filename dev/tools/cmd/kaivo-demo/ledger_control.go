@@ -23,16 +23,22 @@ const (
 
 func isLedgerScenario(s string) bool { return s == ledgerReadOnlyExit || s == ledgerCarryover }
 
-func (b *browser) submitLedgerCommand(c portalCommand) object {
+// A fresh login already satisfies IAM's recent-authentication window, so a
+// sensitive submit may succeed without a 428. Bind a reauthentication to the
+// locally computed command digest first: IAM accepts the grant only when the
+// backend computes the identical digest for the request. A 428 that still
+// arrives must carry that same digest.
+func (b *browser) submitLedgerCommand(c portalCommand) object { return b.submitLedgerWith(c, b.grant) }
+
+func (b *browser) submitLedgerWith(c portalCommand, grant func(portalCommand) string) object {
 	challenged := false
-	reply := b.portalAPI("POST", c.path, c.key, c.body, "", func(digest []byte) string {
+	reply := b.portalAPI("POST", c.path, c.key, c.body, grant(c), func(digest []byte) string {
 		require(bytes.Equal(digest, c.digest[:]), "reauthentication digest differs from the local command")
 		challenged = true
 		b.d.trace("Verified 428 command digest " + hex.EncodeToString(digest))
-		return b.grant(c)
+		return grant(c)
 	})
-	require(challenged, "command succeeded without the required 428 reauthentication challenge")
-	b.d.evidence("reauthentication", object{"business_code": 428, "command_sha256": hex.EncodeToString(c.digest[:])})
+	b.d.evidence("reauthentication", object{"bound_command_sha256": hex.EncodeToString(c.digest[:]), "challenged_428": challenged})
 	return reply
 }
 

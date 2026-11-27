@@ -118,31 +118,49 @@ func TestLedgerCommandDigests(t *testing.T) {
 	}
 }
 
-func TestLedgerRequiresVerified428BeforeGrant(t *testing.T) {
+func TestLedgerSubmitBindsLocalDigest(t *testing.T) {
 	d := newDriver(t.TempDir(), "", ledgerCarryover)
+	d.active = &result{Evidence: object{}}
 	b := d.browser("finance")
 	c := carryoverCommand(ledgerTestID, "2026-11", "unmatched_receipts:USDT:BSC", -5, "Carry drill")
 	for _, tc := range []struct {
 		code int
 		want string
 	}{
-		{200, "without the required 428"}, {428, "differs from the local command"},
+		{200, ""}, {428, "differs from the local command"},
 	} {
 		t.Run(fmt.Sprint(tc.code), func(t *testing.T) {
+			var granted []string
+			grant := func(got portalCommand) string {
+				if got.digest != c.digest || got.path != c.path || got.permission != "ledger.carryover.submit" {
+					t.Error("grant bound to a different command")
+				}
+				granted = append(granted, "bound")
+				return "bound"
+			}
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch r.URL.Path {
 				case b.prefix + "/auth/csrf":
 					w.Write(encoded(object{"code": 200, "data": object{"token": "csrf"}}))
 				case b.prefix + c.path:
+					if r.Header.Get("X-Reauthentication-ID") != "bound" {
+						t.Error("submit without the bound reauthentication")
+					}
 					w.Header().Set("X-Command-SHA256", b64.EncodeToString(make([]byte, 32)))
-					w.Write(encoded(object{"code": tc.code}))
+					w.Write(encoded(object{"code": tc.code, "data": object{"accepted": true}}))
 				default:
-					t.Error("unexpected reauthentication", r.URL.Path)
+					t.Error("unexpected request", r.URL.Path)
 				}
 			}))
 			defer server.Close()
 			b.addr = strings.TrimPrefix(server.URL, "http://")
-			if got := failureText(func() { b.submitLedgerCommand(c) }); !strings.Contains(got, tc.want) {
+			if tc.want == "" {
+				if reply := b.submitLedgerWith(c, grant); reply["accepted"] != true || len(granted) != 1 {
+					t.Fatal("bound submit failed", reply, granted)
+				}
+				return
+			}
+			if got := failureText(func() { b.submitLedgerWith(c, grant) }); !strings.Contains(got, tc.want) {
 				t.Fatal("unexpected result", got)
 			}
 		})
