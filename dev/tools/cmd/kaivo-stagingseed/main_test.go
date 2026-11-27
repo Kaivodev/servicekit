@@ -250,9 +250,19 @@ func TestBootstrapAndReplay(t *testing.T) {
 		"GET /api/v1/platform/ledger/carryovers":                               "ledger.carryover.read",
 		"POST /api/v1/platform/ledger/carryovers/requests":                     "ledger.carryover.submit",
 		"POST /api/v1/platform/ledger/carryovers/approvals/:id/assertions":     "ledger.carryover.approve",
+		"GET /api/v1/platform/approvals/ledger":                                "ledger.approval.read",
+		"GET /api/v1/platform/approvals/ledger/:id":                            "ledger.approval.read",
+		"GET /api/v1/platform/ledger/adjustments":                              "ledger.adjustment.read",
+		"GET /api/v1/platform/ledger/adjustments/:id":                          "ledger.adjustment.read",
+		"GET /api/v1/platform/ledger/adjustments/:id/evidence/:file_no":        "ledger.adjustment.read",
+		"POST /api/v1/platform/ledger/adjustments/requests":                    "ledger.adjustment.submit",
+		"POST /api/v1/platform/ledger/adjustments/approvals/:id/assertions":    "ledger.adjustment.approve",
 	}
-	checkRoutes := func(rows []map[string]any) {
+	checkRoutes := func(rows []map[string]any, total int) {
 		t.Helper()
+		if len(rows) != total {
+			t.Errorf("got %d route bindings, want %d", len(rows), total)
+		}
 		counts := map[string]int{}
 		for _, row := range rows {
 			key := row["method"].(string) + " " + row["path"].(string)
@@ -274,8 +284,8 @@ func TestBootstrapAndReplay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	checkRoutes(decoded[[]map[string]any](t, string(portal)))
-	checkRoutes(decoded[[]map[string]any](t, raw(t, c, iamInputs, "routes.json")))
+	checkRoutes(decoded[[]map[string]any](t, string(portal)), 175)
+	checkRoutes(decoded[[]map[string]any](t, raw(t, c, iamInputs, "routes.json")), 187)
 	calls, err := os.ReadFile(os.Getenv("SEED_TEST_CALLS"))
 	if err != nil || !slices.Equal(strings.Fields(string(calls)), []string{business, ledger, recon, sim}) {
 		t.Fatal("wrong kubectl namespaces")

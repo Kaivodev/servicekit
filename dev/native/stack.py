@@ -262,7 +262,7 @@ def main():
     sub.add_parser("ledger-reader").add_argument("mode", choices=("on", "off"))
     demo = sub.add_parser("demo")
     demo.add_argument("command", choices=("serve", "setup", "run"))
-    demo.add_argument("target", nargs="?")
+    demo.add_argument("target", nargs="?", help="setup phase or scenario, including ledger-read-only-exit, ledger-carryover, ledger-adjustment and ledger-approvals-inbox")
     demo.add_argument("-o", dest="report", metavar="FILE")
     args = parser.parse_args()
     if args.action == "demo":

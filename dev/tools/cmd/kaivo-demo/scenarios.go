@@ -569,10 +569,12 @@ func (d *driver) dispute() {
 }
 
 var scenarios = map[string]func(*driver){
-	ledgerReadOnlyExit: (*driver).runLedgerReadOnlyExit,
-	ledgerCarryover:    (*driver).runLedgerCarryover,
-	kQueryTransient:    (*driver).runKQueryTransient,
-	kLedgerCancelEvent: func(d *driver) { d.cancel(false) },
+	ledgerAdjustment:     (*driver).runLedgerAdjustment,
+	ledgerApprovalsInbox: (*driver).runLedgerApprovalsInbox,
+	ledgerReadOnlyExit:   (*driver).runLedgerReadOnlyExit,
+	ledgerCarryover:      (*driver).runLedgerCarryover,
+	kQueryTransient:      (*driver).runKQueryTransient,
+	kLedgerCancelEvent:   func(d *driver) { d.cancel(false) },
 
 	a145NeverSent:     (*driver).runA145NeverSent,
 	a145StaleBinding:  (*driver).runA145StaleBinding,
@@ -628,7 +630,12 @@ func (d *driver) run(s string) {
 	if isLedgerScenario(s) {
 		d.liveStep("Ledger staff sessions", func() {
 			staff := []string{"finance", "approver1", "approver3"}
-			if s == ledgerReadOnlyExit {
+			switch s {
+			case ledgerAdjustment:
+				staff = []string{"finance", "approver1", "approver2", "approver3", "seller"}
+			case ledgerApprovalsInbox:
+				staff = []string{"finance", "risk", "approver1", "approver2"}
+			case ledgerReadOnlyExit:
 				staff = []string{"risk", "approver1", "approver2", "approver3"}
 			}
 			for _, n := range staff {

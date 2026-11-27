@@ -36,7 +36,7 @@ func executeContext(ctx context.Context, args []string) (err error) {
 		require(output != "", "-o requires a report filename")
 		args = args[:len(args)-2]
 	}
-	require(len(args) == 3 || len(args) == 4, "usage: kaivo-demo STATE SERVICEKIT serve|setup [phase]|run SCENARIO [-o FILE]")
+	require(len(args) == 3 || len(args) == 4, "usage: kaivo-demo STATE SERVICEKIT serve|setup [phase]|run SCENARIO [-o FILE]\nNative ledger scenarios: ledger-read-only-exit, ledger-carryover, ledger-adjustment, ledger-approvals-inbox")
 	root, e := filepath.Abs(args[0])
 	check(e)
 	repo, e := filepath.Abs(args[1])

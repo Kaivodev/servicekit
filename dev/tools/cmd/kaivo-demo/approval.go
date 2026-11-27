@@ -51,7 +51,8 @@ func materialBytes(b []byte, desc pr.MessageDescriptor, m object) []byte {
 			}
 			b = binary.BigEndian.AppendUint32(b, uint32(f.Number()))
 		} else if f.HasOptionalKeyword() {
-			if (k == "expected_plugin_control_version" || k == "credentials_sha256") && v == nil {
+			if v == nil && (k == "expected_plugin_control_version" || k == "credentials_sha256" ||
+				f.FullName() == "aipay.payment.v1.ChannelAccountConfiguration.payment_instruction_ttl_seconds") {
 				continue
 			}
 			if v == nil {

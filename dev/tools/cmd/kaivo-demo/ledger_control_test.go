@@ -36,6 +36,10 @@ func TestLedgerChallenge(t *testing.T) {
 			object{"read_only_reason": "dev_drill:drill", "read_only_since": "1970-01-01T00:00:00.654321Z", "note": "Exit drill", "head_seq": json.Number("3"),
 				"head_hash": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f", "last_checkpoint_id": json.Number("2")},
 			object{"read_only_reason": "changed", "read_only_since": "1970-01-01T00:00:00.654322Z", "note": "Edited", "head_seq": json.Number("4"), "head_hash": strings.Repeat("ff", 32), "last_checkpoint_id": json.Number("3")}},
+		{"usd_rate_policy", "0000001f61697061792e6c65646765722e7573645f726174655f706f6c6963792e7631" + header + "000000010000000100000001000000000000c350000124f80000000c506f6c696379206472696c6c",
+			"d9e0b243564f64d56aa186012b64b3f6c10ad5dd4c036f7f549defd39687a655",
+			normalized(object{"version": uint64(4294967297), "expected_version": uint64(4294967296), "threshold_ppm": 50000, "ceiling_ppm": 75000, "reason": "Policy drill"}),
+			normalized(object{"version": 2, "expected_version": 1, "threshold_ppm": uint64(1)<<32 + 50000, "ceiling_ppm": 75001, "reason": "Edited policy"})},
 		{"carryover", "0000001961697061792e6c65646765722e63617272796f7665722e7631" + header +
 			"00000007323032362d31310000001b756e6d6174636865645f72656365697074733a555344543a425343fffffffffffffffb0000000b4361727279206472696c6c",
 			"09aebb65db7dd732af8167254fbbf1bfdfca0522a57b2a586a3a1e78a0f996a0",
@@ -122,46 +126,68 @@ func TestLedgerSubmitBindsLocalDigest(t *testing.T) {
 	d := newDriver(t.TempDir(), "", ledgerCarryover)
 	d.active = &result{Evidence: object{}}
 	b := d.browser("finance")
-	c := carryoverCommand(ledgerTestID, "2026-11", "unmatched_receipts:USDT:BSC", -5, "Carry drill")
+	carry := carryoverCommand(ledgerTestID, "2026-11", "unmatched_receipts:USDT:BSC", -5, "Carry drill")
+	adjust := usdtAdjustment("Test posting", fundsLoss, "platform_capital:USDT", 1).command(ledgerTestID)
+	policy := ratePolicyCommand(ledgerTestID, 0, 50_000, "Keep threshold")
 	for _, tc := range []struct {
-		code int
-		want string
+		name                string
+		cmd                 portalCommand
+		challenge, mismatch bool
 	}{
-		{200, ""}, {428, "differs from the local command"},
+		{"recent login", carry, false, false},
+		{"wrong carryover digest", carry, true, true},
+		{"matching adjustment digest", adjust, true, false},
+		{"wrong adjustment digest", adjust, true, true},
+		{"matching policy digest", policy, true, false},
+		{"wrong policy digest", policy, true, true},
 	} {
-		t.Run(fmt.Sprint(tc.code), func(t *testing.T) {
-			var granted []string
+		t.Run(tc.name, func(t *testing.T) {
+			c := tc.cmd
+			grants := 0
 			grant := func(got portalCommand) string {
-				if got.digest != c.digest || got.path != c.path || got.permission != "ledger.carryover.submit" {
-					t.Error("grant bound to a different command")
+				if got.digest != c.digest || got.path != c.path || got.permission != c.permission {
+					t.Fatal("grant bound to a different command")
 				}
-				granted = append(granted, "bound")
-				return "bound"
+				grants++
+				return fmt.Sprintf("bound-%d", grants)
 			}
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch r.URL.Path {
 				case b.prefix + "/auth/csrf":
 					w.Write(encoded(object{"code": 200, "data": object{"token": "csrf"}}))
 				case b.prefix + c.path:
-					if r.Header.Get("X-Reauthentication-ID") != "bound" {
+					binding := r.Header.Get("X-Reauthentication-ID")
+					if binding == "bound-1" && tc.challenge {
+						digest := c.digest
+						if tc.mismatch {
+							digest[0] ^= 1
+						}
+						w.Header().Set("X-Command-SHA256", b64.EncodeToString(digest[:]))
+						w.Write(encoded(object{"code": 428}))
+						return
+					}
+					if binding != "bound-1" && binding != "bound-2" {
 						t.Error("submit without the bound reauthentication")
 					}
-					w.Header().Set("X-Command-SHA256", b64.EncodeToString(make([]byte, 32)))
-					w.Write(encoded(object{"code": tc.code, "data": object{"accepted": true}}))
+					w.Write(encoded(object{"code": 200, "data": object{"accepted": true}}))
 				default:
 					t.Error("unexpected request", r.URL.Path)
 				}
 			}))
 			defer server.Close()
 			b.addr = strings.TrimPrefix(server.URL, "http://")
-			if tc.want == "" {
-				if reply := b.submitLedgerWith(c, grant); reply["accepted"] != true || len(granted) != 1 {
-					t.Fatal("bound submit failed", reply, granted)
+			if tc.mismatch {
+				if got := failureText(func() { b.submitLedgerWith(c, grant) }); !strings.Contains(got, "differs from the local command") || grants != 1 {
+					t.Fatal("unexpected digest mismatch result", got, grants)
 				}
 				return
 			}
-			if got := failureText(func() { b.submitLedgerWith(c, grant) }); !strings.Contains(got, tc.want) {
-				t.Fatal("unexpected result", got)
+			want := 1
+			if tc.challenge {
+				want = 2
+			}
+			if reply := b.submitLedgerWith(c, grant); reply["accepted"] != true || grants != want {
+				t.Fatal("bound submit failed", reply, grants)
 			}
 		})
 	}
@@ -191,7 +217,7 @@ func TestLedgerDevOwnerAllowlist(t *testing.T) {
 }
 
 func TestLedgerScenarioRegistrationAndEnvironment(t *testing.T) {
-	for _, name := range []string{"ledger-read-only-exit", "ledger-carryover"} {
+	for _, name := range []string{"ledger-read-only-exit", "ledger-carryover", "ledger-adjustment", "ledger-approvals-inbox"} {
 		t.Run(name, func(t *testing.T) {
 			if scenarios[name] == nil {
 				t.Fatal("missing scenario")
@@ -329,12 +355,18 @@ func TestLedgerStaffPreambleAndCompletion(t *testing.T) {
 	}{
 		{ledgerReadOnlyExit, []string{"risk", "approver1", "approver2", "approver3"}},
 		{ledgerCarryover, []string{"finance", "approver1", "approver3"}},
+		{ledgerAdjustment, []string{"finance", "approver1", "approver2", "approver3", "seller"}},
+		{ledgerApprovalsInbox, []string{"finance", "risk", "approver1", "approver2"}},
 	} {
 		t.Run(tc.scenario, func(t *testing.T) {
 			root := t.TempDir()
 			d := newDriver(root, "", tc.scenario)
 			for _, n := range tc.staff {
-				d.put("cookies/"+n, map[string]string{"__Host-kaivo_platform_session": n})
+				cookie := "__Host-kaivo_platform_session"
+				if n == "seller" {
+					cookie = "__Host-kaivo_seller_session"
+				}
+				d.put("cookies/"+n, map[string]string{cookie: n})
 				d.put("session-until/"+n, time.Now().Add(time.Hour))
 			}
 			run := scenarios[tc.scenario]

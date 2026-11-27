@@ -296,6 +296,8 @@ stack demo run a145-late-payment
 stack demo run a145-refusals
 stack demo run k-query-transient
 stack demo run k-ledger-cancel-event
+stack demo run ledger-adjustment
+stack demo run ledger-approvals-inbox
 stack demo run settle-refunds
 stack demo run refund-before-release
 stack demo run refund-after-release
@@ -328,6 +330,8 @@ stack demo run refund-insufficient
 - `a145-refusals` uses one order to check early submission (409), requester self-approval (403), approval after payment (409), and a fresh submission on the paid order (409). Risk uses its own WebAuthn credential enrolled at platform login. Its IAM role lacks approval permission, so the platform can return 403 before payment receives the assertion. The driver checks signature records, the merchant receipt, release balances, and the absence of a cancellation request.
 - `k-query-transient` pauses the simulator for 60 seconds after a 2.00 EPay create. It checks the failed query audit, pending payment and intact instruction, then repeats the merchant create during the pause and pays through the original cashier after recovery. It verifies the merchant receipt and release balances. Both K scenarios require the native stack, trade and verification gateways, the simulator test control token, and payment at schema version 24 or later.
 - `k-ledger-cancel-event` closes an unpaid 2.00 EPay order and uses `payment dev archive-work` before reconciliation authorizes cancellation. It requires one ledger cancellation event audit, no work-path verification, an archived unfinished work row, and the returned escrow. An authorization already visible at archive time makes the run inconclusive. This scenario also requires `AIPAY_ENVIRONMENT=development` for payment.
+- `ledger-adjustment` posts a seller credit, downloads its evidence and reverses it. It checks rejected submissions, approval separation and rollback of an underfunded debit. Run it after seller and registry setup on the native development stack, with other balance-changing scenarios idle.
+- `ledger-approvals-inbox` checks all three approval sources, enters ledger read-only mode, verifies four pending ledger request kinds, then exits and executes them. The USD policy advances one version at the same threshold. It requires the native development stack and the staff and approver registry setup.
 - main、duplicates、dispute、seller-offline、bot-notices、statement、archived-work、cancel 下单 2.00 元。本轮退款和 late-payment 场景每单 1.00 元，使用 form-md5 收银。商户 V2、争议裁决及平台运营发起的退款共用卖方举证、双人复核、独立授权与账本核销流程。每笔原单的实际通道记录在报告中。
 - `manual-refund` 验证放币后驳回首版凭证、审批第二版，以及卖方监听对平台复核路由返回 404。`manual-refund-failure` 验证放币前失败授权恢复原担保后正常放币。`late-payment` 等待平台取消后才付款，经主动查单和凭证双签结案。`refund-insufficient` 单独运行，报告会记录所需 N 与商户可用余额。
 - EPay 两实例的 `unpaid_timeout_seconds` 等于 payment 的付款指令有效期加 1 小时，向上取整秒。默认 10 分钟对应 T=4200 秒。cancel 在关单前只回拨原单查单应答的建单时间 T+120 秒，未付单须经两次间隔至少 5 秒的独立观测才归还担保。迟付单在首次观测后仍可收银付款。

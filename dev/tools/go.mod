@@ -3,7 +3,7 @@ module github.com/Kaivodev/servicekit/dev/tools
 go 1.27.0
 
 require (
-	github.com/Kaivodev/protobuf v0.22.0
+	github.com/Kaivodev/protobuf v0.25.0
 	github.com/Kaivodev/servicekit v0.5.0
 	github.com/fxamacker/cbor/v2 v2.9.4
 	github.com/go-webauthn/webauthn v0.18.2

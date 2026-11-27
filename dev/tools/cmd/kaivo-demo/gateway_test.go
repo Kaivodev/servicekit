@@ -77,8 +77,15 @@ func TestGatewayApprovalDigestPresence(t *testing.T) {
 				return
 			}
 			want := append(legacy, 1, 0, 0, 0, 32)
-			if !bytes.Equal(materialBytes(nil, desc, m), append(want, digest...)) {
+			withCredentials := append(want, digest...)
+			if !bytes.Equal(materialBytes(nil, desc, m), withCredentials) {
 				t.Fatal("credentials_sha256 must follow the complete historical encoding")
+			}
+			if desc.Name() == "ChannelAccountConfiguration" {
+				m["payment_instruction_ttl_seconds"] = 300
+				if !bytes.Equal(materialBytes(nil, desc, m), append(withCredentials, 1, 0, 0, 1, 44)) {
+					t.Fatal("instruction TTL must follow the credential digest as a present uint32")
+				}
 			}
 		})
 	}

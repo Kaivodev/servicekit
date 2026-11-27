@@ -185,17 +185,21 @@ func refusedWrite(path string, code int, write func()) bool {
 	return refused
 }
 
-func portalRefusal(path string, write func(), codes ...int) (result failure, refused bool) {
+func portalRefusal(path string, write func(), codes ...int) (failure, bool) {
+	return portalMethodRefusal("POST", path, write, codes...)
+}
+
+func portalMethodRefusal(method, path string, call func(), codes ...int) (result failure, refused bool) {
 	defer func() {
 		if v := recover(); v != nil {
 			f, ok := v.(failure)
-			if !ok || f.method != "POST" || f.path != path || !slices.Contains(codes, f.businessCode) || (f.httpStatus != 200 && f.httpStatus != f.businessCode) {
+			if !ok || f.method != method || f.path != path || !slices.Contains(codes, f.businessCode) || (f.httpStatus != 200 && f.httpStatus != f.businessCode) {
 				panic(v)
 			}
 			result, refused = f, true
 		}
 	}()
-	write()
+	call()
 	return failure{}, false
 }
 

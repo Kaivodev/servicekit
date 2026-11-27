@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-func (d *driver) submitLedgerExit(b *browser, c portalCommand) ledgerProposal {
+func (d *driver) submitLedgerExit(b *browser, label, episodeReason string, c portalCommand) ledgerProposal {
 	reply := b.submitLedgerCommand(c)
 	requestID := str(obj(reply["approval_request"]), "id")
 	// Submission may cut a due checkpoint. Read the immutable snapshot for this
@@ -15,9 +15,9 @@ func (d *driver) submitLedgerExit(b *browser, c portalCommand) ledgerProposal {
 	require(len(rows) == 1, "missing ledger exit snapshot")
 	expected := rows[0]
 	expected["note"] = c.body["note"]
-	expected["read_only_reason"] = "dev_drill:drill"
+	expected["read_only_reason"] = episodeReason
 	expected["read_only_since"] = d.required(d.scope + "/since")
-	return d.recordLedgerProposal(b.name, "read_only_exit", 2, reply, expected)
+	return d.recordLedgerProposal(label, b.name, "read_only_exit", 2, reply, expected)
 }
 
 func (d *driver) runLedgerReadOnlyExit() {
@@ -46,7 +46,7 @@ func (d *driver) runLedgerReadOnlyExit() {
 
 	c := exitCommand(d.key(d.scope+"/risk"), "Reconciled the journal and verified the drill")
 	d.step("Submit and replay the risk exit request", func() {
-		p := d.submitLedgerExit(risk, c)
+		p := d.submitLedgerExit(risk, risk.name, "dev_drill:drill", c)
 		replay := risk.apiGrant("POST", c.path, c.key, c.body, risk.grant(c))
 		replayedID := str(obj(replay["approval_request"]), "id")
 		require(replayedID == p.ID, "exit replay returned a different request")
@@ -56,7 +56,7 @@ func (d *driver) runLedgerReadOnlyExit() {
 	})
 	p := d.ledgerProposal("risk")
 	d.step("Reject self-approval of an exit", func() {
-		own := d.submitLedgerExit(third, exitCommand(d.key(d.scope+"/approver3"), "Independently reviewed the drill"))
+		own := d.submitLedgerExit(third, third.name, "dev_drill:drill", exitCommand(d.key(d.scope+"/approver3"), "Independently reviewed the drill"))
 		require(own.ID != p.ID, "expected distinct exit requests")
 		d.expectLedgerRefusal("self_approval", own.path(exitPath), "APPROVAL_SELF_APPROVAL", func() {
 			own.approve(third, exitPath, "self")
@@ -111,7 +111,7 @@ func (d *driver) runLedgerCarryover() {
 	}
 	submit := func(b *browser, reason string) ledgerProposal {
 		c := carryoverCommand(d.key(d.scope+"/"+b.name), period, account, -5, reason)
-		return d.recordLedgerProposal(b.name, "carryover", 1, b.submitLedgerCommand(c), maps.Clone(c.body))
+		return d.recordLedgerProposal(b.name, b.name, "carryover", 1, b.submitLedgerCommand(c), maps.Clone(c.body))
 	}
 	d.step("Read the current carryover period", func() {
 		page := view()

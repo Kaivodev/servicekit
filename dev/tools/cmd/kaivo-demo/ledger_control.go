@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"math"
 	"strconv"
 	"time"
 
@@ -14,14 +15,18 @@ import (
 )
 
 const (
-	ledgerReadOnlyExit = "ledger-read-only-exit"
-	ledgerCarryover    = "ledger-carryover"
-	exitPath           = "/ledger/read-only-exit"
-	carryoverPath      = "/ledger/carryovers"
-	ledgerControlRPC   = "/aipay.ledger.v1.LedgerControlService/"
+	ledgerAdjustment     = "ledger-adjustment"
+	ledgerApprovalsInbox = "ledger-approvals-inbox"
+	ledgerReadOnlyExit   = "ledger-read-only-exit"
+	ledgerCarryover      = "ledger-carryover"
+	exitPath             = "/ledger/read-only-exit"
+	carryoverPath        = "/ledger/carryovers"
+	ledgerControlRPC     = "/aipay.ledger.v1.LedgerControlService/"
 )
 
-func isLedgerScenario(s string) bool { return s == ledgerReadOnlyExit || s == ledgerCarryover }
+func isLedgerScenario(s string) bool {
+	return s == ledgerReadOnlyExit || s == ledgerCarryover || s == ledgerAdjustment || s == ledgerApprovalsInbox
+}
 
 // A fresh login already satisfies IAM's recent-authentication window, so a
 // sensitive submit may succeed without a 428. Bind a reauthentication to the
@@ -71,9 +76,15 @@ func ledgerUint(m object, field string) uint64 {
 	return u
 }
 
+func ledgerUint32(m object, field string) uint32 {
+	n := ledgerUint(m, field)
+	require(n <= math.MaxUint32, "ledger number exceeds uint32 for "+field)
+	return uint32(n)
+}
+
 // The request header supplies the owner-assigned ID and lifetime. Expected fields
 // come from the logged-in user, submitted command and independent episode snapshot.
-func ledgerChallenge(kind string, request, expected object) []byte {
+func ledgerRequestBytes(kind string, request, expected object) []byte {
 	require(request["kind"] == kind && request["requested_by"] == str(expected, "requested_by"), "unexpected ledger approval kind or requester")
 	require(request["id"] == str(expected, "approval_request_id") && sameInstant(request["requested_at"], expected["requested_at"]) &&
 		sameInstant(request["expires_at"], expected["expires_at"]), "ledger approval header mismatch")
@@ -87,6 +98,14 @@ func ledgerChallenge(kind string, request, expected object) []byte {
 	b = binary.BigEndian.AppendUint64(b, uint64(start.UnixNano()))
 	b = binary.BigEndian.AppendUint64(b, uint64(end.UnixNano()))
 	switch kind {
+	case "adjustment":
+		b = appendAdjustmentFields(b, expected)
+	case "usd_rate_policy":
+		b = binary.BigEndian.AppendUint64(b, ledgerUint(expected, "version"))
+		b = binary.BigEndian.AppendUint64(b, ledgerUint(expected, "expected_version"))
+		b = binary.BigEndian.AppendUint32(b, ledgerUint32(expected, "threshold_ppm"))
+		b = binary.BigEndian.AppendUint32(b, ledgerUint32(expected, "ceiling_ppm"))
+		b = appendField(b, str(expected, "reason"))
 	case "read_only_exit":
 		b = appendField(b, str(expected, "read_only_reason"))
 		b = binary.BigEndian.AppendUint64(b, uint64(ledgerTime(expected, "read_only_since").UnixNano()))
@@ -105,35 +124,40 @@ func ledgerChallenge(kind string, request, expected object) []byte {
 	default:
 		stop("unknown ledger approval kind")
 	}
-	digest := approval.Digest(b)
 	require(bytes.Equal(b, raw(str(request, "request_bytes"))), "ledger approval request bytes differ from expected fields")
+	return b
+}
+
+func ledgerChallenge(kind string, request, expected object) []byte {
+	digest := approval.Digest(ledgerRequestBytes(kind, request, expected))
 	require(str(request, "request_digest") == hex.EncodeToString(digest[:]), "ledger approval digest mismatch")
 	return digest[:]
 }
 
 type ledgerProposal struct {
-	ID     string
-	Digest []byte
+	ID       string
+	Digest   []byte
+	Expected object
 }
 
-func (d *driver) recordLedgerProposal(actor, kind string, count int64, reply, expected object) ledgerProposal {
+func (d *driver) recordLedgerProposal(label, actor, kind string, count int64, reply, expected object) ledgerProposal {
 	r := obj(reply["approval_request"])
 	require(num(r, "required_approvals") == count && r["status"] == "pending", "unexpected ledger approval policy or state")
 	expected["requested_by"] = d.required("user/" + actor)
 	expected["approval_request_id"] = str(r, "id")
 	expected["requested_at"], expected["expires_at"] = r["requested_at"], r["expires_at"]
 	require(matchesProposal(obj(reply["material"]), expected), "decoded ledger material differs from expected fields")
-	p := ledgerProposal{str(r, "id"), ledgerChallenge(kind, r, expected)}
-	d.put(d.scope+"/proposal/"+actor, p)
+	p := ledgerProposal{ID: str(r, "id"), Digest: ledgerChallenge(kind, r, expected), Expected: expected}
+	d.put(d.scope+"/proposal/"+label, p)
 	d.evidence("verified_material", expected)
 	d.evidence("request_digest", r["request_digest"])
 	d.evidence("required_approvals", count)
 	return p
 }
 
-func (d *driver) ledgerProposal(actor string) ledgerProposal {
+func (d *driver) ledgerProposal(label string) ledgerProposal {
 	var p ledgerProposal
-	require(d.read(d.scope+"/proposal/"+actor, &p) && p.ID != "" && len(p.Digest) == sha256.Size, "missing verified ledger proposal")
+	require(d.read(d.scope+"/proposal/"+label, &p) && p.ID != "" && len(p.Digest) == sha256.Size, "missing verified ledger proposal")
 	return p
 }
 
