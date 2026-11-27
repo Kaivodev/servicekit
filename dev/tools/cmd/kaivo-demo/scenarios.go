@@ -286,8 +286,11 @@ func (t tradeRun) observePaid(copies int) {
 	})
 }
 func (t tradeRun) terminal(status string) object {
+	return t.terminalWithin(status, 2*time.Minute)
+}
+func (t tradeRun) terminalWithin(status string, limit time.Duration) object {
 	d := t.d
-	waitFor(status, 2*time.Minute, func() bool { return d.ledgerTrade(t.order)["status"] == status })
+	waitFor(status, limit, func() bool { return d.ledgerTrade(t.order)["status"] == status })
 	return d.chainEvidence(t.order)
 }
 func (t tradeRun) finish(released bool) object {
@@ -365,30 +368,77 @@ func (t tradeRun) backdateUnpaid() {
 	t.d.evidence("模拟器场景", fields)
 }
 
-// Pay only inside the late-payment window after the first independent
-// closed/unpaid observation, before any second one.
-func (t tradeRun) awaitFirstUnpaid(obs string) {
+const cancellationObservations = `SELECT id,verified_at,convert_from(record_json,'UTF8')::jsonb->>'Outcome' AS outcome,
+	convert_from(record_json,'UTF8')::jsonb->>'Kind' AS kind,
+	to_jsonb(e)->>'late_payment_window_seconds' AS late_payment_window_seconds
+	FROM reconciliation_verification_evidence AS e
+	WHERE order_id=$1 AND eligible AND operation='query_payment' ORDER BY verified_at,id`
+
+func (t tradeRun) observations() []object {
+	return t.d.rows("reconciliation", "reconciliation_verification_evidence", cancellationObservations, t.order)
+}
+
+func (t tradeRun) awaitFirstUnpaid(configured string, limit time.Duration) (latePaymentTiming, []object) {
 	d := t.d
-	waitFor("first independent closed/unpaid", time.Minute, func() bool {
-		rs := d.rows("reconciliation", "reconciliation_verification_evidence", obs, t.order)
-		count := 0
-		var first object
-		for _, r := range rs {
+	var rows []object
+	var first object
+	waitFor("first independent closed/unpaid", limit, func() bool {
+		rows = t.observations()
+		for _, r := range rows {
 			if r["outcome"] == "closed_unpaid" {
-				count++
 				first = r
+				return true
 			}
-		}
-		require(count < 2, "second unpaid observation already occurred")
-		if count == 1 {
-			observed, e := time.Parse(time.RFC3339Nano, str(first, "verified_at"))
-			check(e)
-			require(time.Now().Before(observed.Add(5*time.Second)), "late-payment window already closed")
-			d.evidence("first_observation", rs)
-			return true
 		}
 		return false
 	})
+	observed, err := time.Parse(time.RFC3339Nano, str(first, "verified_at"))
+	check(err)
+	timing, err := lateWindowTiming(observed, first["late_payment_window_seconds"], configured)
+	check(err)
+	d.evidence("first_observation", rows)
+	d.evidence("late_payment_window", object{"window": timing.window.String(), "source": timing.source,
+		"margin": timing.margin.String(), "deadline": timing.deadline})
+	return timing, rows
+}
+
+func (t tradeRun) awaitUnpaidCancellation(configured string) (object, time.Duration) {
+	timing, _ := t.awaitFirstUnpaid(configured, 2*time.Minute)
+	return t.terminalWithin("CANCELLED", max(2*time.Minute, timing.observationTimeout())), timing.window
+}
+
+// Payment may start the release review first, so either kind of paid evidence counts.
+func paidAfterFirst(rows []object) bool {
+	unpaid := false
+	for _, r := range rows {
+		switch r["outcome"] {
+		case "closed_unpaid":
+			require(!unpaid, "second unpaid observation already occurred")
+			unpaid = true
+		case "paid":
+			if unpaid {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func checkUnpaidSeparation(rows []object, window time.Duration) {
+	var first, last time.Time
+	count := 0
+	for _, r := range rows {
+		if r["outcome"] == "closed_unpaid" {
+			v, err := time.Parse(time.RFC3339Nano, str(r, "verified_at"))
+			check(err)
+			if count == 0 {
+				first = v
+			}
+			count++
+			last = v
+		}
+	}
+	require(count >= 2 && last.Sub(first) >= window-time.Second, "missing two separated closed/unpaid observations")
 }
 
 func (t tradeRun) inferredCloseEvidence() {
@@ -410,39 +460,29 @@ func (d *driver) cancel(late bool) {
 		name = "迟付"
 	}
 	t := d.trade(name, "v2")
+	configured := d.env("reconciliation")[lateWindowEnv]
 	t.step("关单", func() {
 		if t.channel == epayChannel {
 			t.backdateUnpaid()
 		} else if late {
 			t.setScenario(object{"late_payment": true})
 		}
+		if late {
+			d.rows("reconciliation", "database forward warm-up", "SELECT 1 AS ok")
+		}
 		d.epay("v2", "/api/pay/close", url.Values{"out_trade_no": {t.number}})
 	})
-	const obs = `SELECT id,verified_at,convert_from(record_json,'UTF8')::jsonb->>'Outcome' AS outcome,
-		convert_from(record_json,'UTF8')::jsonb->>'Kind' AS kind FROM reconciliation_verification_evidence
-		WHERE order_id=$1 AND eligible AND operation='query_payment' ORDER BY verified_at`
 	if !late {
 		if d.scope == kLedgerCancelEvent {
 			t.archiveCancellationWork()
 		}
 		t.step("二次未付核验并归还", func() {
-			t.terminal("CANCELLED")
+			_, window := t.awaitUnpaidCancellation(configured)
 			if d.scope == kLedgerCancelEvent {
 				t.checkCancellationProjection()
 			}
-			rows := d.rows("reconciliation", "reconciliation_verification_evidence", obs, t.order)
-			var first, last time.Time
-			for _, r := range rows {
-				if r["outcome"] == "closed_unpaid" {
-					v, e := time.Parse(time.RFC3339Nano, str(r, "verified_at"))
-					check(e)
-					if first.IsZero() {
-						first = v
-					}
-					last = v
-				}
-			}
-			require(!first.IsZero() && last.Sub(first) >= 5*time.Second, "missing two separated closed/unpaid observations")
+			rows := t.observations()
+			checkUnpaidSeparation(rows, window)
 			d.evidence("independent_observations", rows)
 			if t.channel == epayChannel {
 				t.inferredCloseEvidence()
@@ -452,32 +492,16 @@ func (d *driver) cancel(late bool) {
 		return
 	}
 	t.step("两次观察之间迟付", func() {
-		// Any eligible paid observation after the first closed/unpaid one shows the
-		// late payment. Payment may find it first and start the release review, so
-		// reconciliation can record it under either kind. A resumed step accepts it.
-		paidAfterFirst := func(rs []object) bool {
-			unpaid := false
-			for _, r := range rs {
-				if r["outcome"] == "closed_unpaid" {
-					unpaid = true
-				} else if unpaid && r["outcome"] == "paid" {
-					return true
-				}
-			}
-			return false
-		}
-		if !paidAfterFirst(d.rows("reconciliation", "reconciliation_verification_evidence", obs, t.order)) {
-			t.awaitFirstUnpaid(obs)
+		timing, rows := t.awaitFirstUnpaid(configured, time.Minute)
+		if !paidAfterFirst(rows) {
+			check(timing.checkDeadline(time.Now()))
 			d.cashier(t.link, true)
+			waitFor("independent paid observation after late payment", timing.observationTimeout(), func() bool {
+				rows = t.observations()
+				return paidAfterFirst(rows)
+			})
 		}
-		waitFor("independent paid observation after late payment", time.Minute, func() bool {
-			rs := d.rows("reconciliation", "reconciliation_verification_evidence", obs, t.order)
-			if paidAfterFirst(rs) {
-				d.evidence("independent_observations", rs)
-				return true
-			}
-			return false
-		})
+		d.evidence("independent_observations", rows)
 		d.chainEvidence(t.order)
 		if t.channel == epayChannel {
 			t.inferredCloseEvidence()

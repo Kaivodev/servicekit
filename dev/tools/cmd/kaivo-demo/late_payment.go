@@ -1,9 +1,53 @@
 package main
 
 import (
+	"errors"
+	"fmt"
+	"math"
 	"net/url"
+	"strconv"
 	"time"
 )
+
+const lateWindowEnv = "AIPAY_RECONCILIATION_LATE_PAYMENT_WINDOW"
+
+type latePaymentTiming struct {
+	observed, deadline time.Time
+	window, margin     time.Duration
+	source             string
+}
+
+func lateWindowTiming(observed time.Time, pinned any, configured string) (latePaymentTiming, error) {
+	window, source := 30*time.Minute, "default"
+	switch {
+	case pinned != nil:
+		seconds, err := strconv.ParseInt(fmt.Sprint(pinned), 10, 64)
+		if err != nil || seconds < 1 || seconds > 3600 {
+			return latePaymentTiming{}, errors.New("pinned late_payment_window_seconds must be an integer from 1 to 3600")
+		}
+		window, source = time.Duration(seconds)*time.Second, "pinned"
+	case configured != "":
+		duration, err := time.ParseDuration(configured)
+		if err != nil || duration <= 0 {
+			return latePaymentTiming{}, errors.New(lateWindowEnv + " must be a positive Go duration")
+		}
+		window, source = duration, "configured"
+	}
+	margin := min(10*time.Second, window/2)
+	return latePaymentTiming{observed: observed, deadline: observed.Add(window - margin), window: window, margin: margin, source: source}, nil
+}
+
+func (t latePaymentTiming) checkDeadline(now time.Time) error {
+	if !now.Before(t.deadline) {
+		return fmt.Errorf("late-payment window already closed (observed %s, window %s, margin %s, deadline %s)",
+			t.observed.Format(time.RFC3339Nano), t.window, t.margin, t.deadline.Format(time.RFC3339Nano))
+	}
+	return nil
+}
+
+func (t latePaymentTiming) observationTimeout() time.Duration {
+	return min(t.window, time.Duration(math.MaxInt64)-time.Minute) + time.Minute
+}
 
 func (d *driver) latePayment() {
 	t := d.refundTrade("取消后迟付", "v2")
@@ -13,7 +57,7 @@ func (d *driver) latePayment() {
 		d.epay("v2", "/api/pay/close", url.Values{"out_trade_no": {t.number}})
 	})
 	cancelled := t.step("平台取消并归还原担保", func() {
-		hold := t.terminal("CANCELLED")
+		hold, _ := t.awaitUnpaidCancellation(d.env("reconciliation")[lateWindowEnv])
 		order := t.awaitOrderStatus("cancelled")
 		require(order["escrow_status"] == "cancelled" && units(hold, "held_usdt_micro") == 0, "escrow is still held")
 		d.evidence("cancelled_seq", hold["latest_seq"])

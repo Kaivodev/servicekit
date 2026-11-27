@@ -26,11 +26,27 @@ func (d *driver) queryRows(parent context.Context, owner, source, query string, 
 	defer cancel()
 	var c *pgx.Conn
 	var e error
+	var forwarded *dbForward
+	if k, ok := d.demoEnvironment.(*kubeEnvironment); ok {
+		forwarded = k.dbForwards[k.domain(owner)]
+	}
+	var previous *forward
 	// A forwarded connection may fail while a dead port-forward is being
 	// replaced; database() restarts it, so retry briefly before giving up.
-	for attempt := 0; attempt < 4; attempt++ {
+	for attempt := 1; attempt <= 4; attempt++ {
 		attemptCtx, attemptCancel := context.WithTimeout(ctx, 5*time.Second)
-		c, e = pgx.ConnectConfig(attemptCtx, d.database(owner))
+		cfg := d.database(owner)
+		if attempt > 1 {
+			msg := fmt.Sprintf("%s database connection attempt %d failed, retrying on attempt %d", owner, attempt-1, attempt)
+			if forwarded != nil && forwarded.current != previous {
+				msg += " with the database forward re-established"
+			}
+			d.trace(msg)
+		}
+		if forwarded != nil {
+			previous = forwarded.current
+		}
+		c, e = pgx.ConnectConfig(attemptCtx, cfg)
 		attemptCancel()
 		if e == nil || ctx.Err() != nil {
 			break
