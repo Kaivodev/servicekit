@@ -246,12 +246,12 @@ class Configuration(unittest.TestCase):
                 self.assertFalse(root.exists())
                 self.assertFalse(root.parent.exists())
 
-    def test_portal_env_files_match_original_defaults(self):
-        # Digests from 8231ab9 cover every filename and byte, including key order.
+    def test_default_prepared_env_files(self):
+        # The digests cover every filename and byte, including key order.
         # Fix the volatile env inputs and substitute the temporary state path.
         for compose, expected in (
-            (False, "ee6dc0f427794a689598eb81f2dcf8e3bfa192a4ea387a4207e51bb4f0f82fa6"),
-            (True, "3e42c3fadb3e303b1c81244e5f722889271d74b63394af1b60314997433e5524"),
+            (False, "1879ebc8f5d9aaece17a3b169c7a76250589314b115090dea3f493360850cd3d"),
+            (True, "2141843472fb960879be8397933fc28d21bdd7676110d62d24849b8e00d52b48"),
         ):
             with self.subTest(compose=compose), tempfile.TemporaryDirectory() as tmp, \
                  patch.dict(os.environ, {}, clear=True), patch.object(cfg, "generate_inputs"), \
@@ -277,16 +277,21 @@ class Configuration(unittest.TestCase):
 
     def test_portal_origins(self):
         platform, seller = "AIPAY_DEV_PLATFORM_ORIGIN", "AIPAY_DEV_SELLER_ORIGIN"
-        defaults = ("https://admin.aipay.test", "https://seller.aipay.test")
+        cashier = "AIPAY_DEV_CASHIER_ORIGIN"
+        defaults = ("https://admin.aipay.test", "https://seller.aipay.test", "https://pay.aipay.test")
         custom = "https://" + "a" * 63 + ".web-9.demo"
         self.assertEqual(cfg.dev_portal_origins({}), defaults)
-        self.assertEqual(cfg.dev_portal_origins({platform: "", seller: ""}), defaults)
-        self.assertEqual(cfg.dev_portal_origins({platform: custom}), (custom, defaults[1]))
-        self.assertEqual(cfg.dev_portal_origins({seller: custom}), (defaults[0], custom))
+        self.assertEqual(cfg.dev_portal_origins({platform: "", seller: "", cashier: ""}), defaults)
+        self.assertEqual(cfg.dev_portal_origins({platform: custom}), (custom, defaults[1], defaults[2]))
+        self.assertEqual(cfg.dev_portal_origins({seller: custom}), (defaults[0], custom, defaults[2]))
+        self.assertEqual(cfg.dev_portal_origins({cashier: custom}), (*defaults[:2], custom))
+        for other in (platform, seller):
+            with self.assertRaisesRegex(ValueError, cashier):
+                cfg.dev_portal_origins({other: custom, cashier: custom})
         with self.assertRaisesRegex(ValueError, f"{platform}.*{seller}"):
             cfg.dev_portal_origins({platform: defaults[1]})
 
-        for key in (platform, seller):
+        for key in (platform, seller, cashier):
             for value in ("http://a.b", "HTTPS://a.b", "https://A.b", "https://local", "https://a.b:443",
                           "https://a.b/", "https://a.b?", "https://a.b#", "https://u@a.b", "https://a.b.",
                           "https://*.b", "https://-a.b", "https://a.b-", "https://a..b", "https://a_b.c",
@@ -322,6 +327,8 @@ class Configuration(unittest.TestCase):
                 platform, seller = ("https://admin.demo.test", "https://portal.demo.test") if cert_days == "30" else (
                     "https://admin.aipay.test", "https://seller.aipay.test")
                 os.environ.update(AIPAY_DEV_PLATFORM_ORIGIN=platform, AIPAY_DEV_SELLER_ORIGIN=seller)
+                cashier = "https://pay.demo.test" if cert_days == "30" else ""
+                os.environ["AIPAY_DEV_CASHIER_ORIGIN"] = cashier
                 if cert_days is None:
                     os.environ.pop("AIPAY_DEV_CERT_DAYS", None)
                 else:
@@ -367,6 +374,8 @@ class Configuration(unittest.TestCase):
                 self.assertTrue(all(env["AIPAY_LOG_OUTPUT"] == "file" for env in envs.values()))
                 self.assertEqual(envs["backend"]["AIPAY_PLATFORM_ORIGIN"], platform)
                 self.assertEqual(envs["backend"]["AIPAY_SELLER_ORIGIN"], seller)
+                self.assertEqual(envs["backend"]["AIPAY_CASHIER_ORIGIN"], cashier or "https://pay.aipay.test")
+                self.assertNotIn("AIPAY_EPAY_JSON_URL_INSTRUCTION", envs["backend"])
                 for prefix in ("IAM_WEBAUTHN", "LEDGER_APPROVAL", "PAYMENT_APPROVAL",
                                "RECONCILIATION_ADMIN", "RECONCILIATION_WEBAUTHN"):
                     env = envs[prefix.split("_")[0].lower()]

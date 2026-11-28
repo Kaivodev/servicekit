@@ -6,7 +6,6 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
-
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/pem"
@@ -35,13 +34,17 @@ func (d *driver) epay(version, path string, v url.Values) object {
 	return r
 }
 
-func (d *driver) signedEPay(version, path string, v url.Values) (int, object) {
+func (d *driver) merchantV1Key() string {
+	var keys struct{ Key string }
+	decode(file(filepath.Join(d.dir, "merchant-key.json")), &keys)
+	return keys.Key
+}
+
+func (d *driver) signEPay(version string, v url.Values) {
 	v.Set("pid", d.required("pid/"+version))
 	if version == "v1" {
-		var keys struct{ Key string }
-		decode(file(filepath.Join(d.dir, "merchant-key.json")), &keys)
 		v.Set("sign_type", "MD5")
-		v.Set("sign", v1Sign(v, keys.Key))
+		v.Set("sign", v1Sign(v, d.merchantV1Key()))
 	} else {
 		v.Set("timestamp", strconv.FormatInt(time.Now().Unix(), 10))
 		v.Set("sign_type", "RSA")
@@ -52,6 +55,10 @@ func (d *driver) signedEPay(version, path string, v url.Values) (int, object) {
 		check(e)
 		v.Set("sign", base64.StdEncoding.EncodeToString(sig))
 	}
+}
+
+func (d *driver) signedEPay(version, path string, v url.Values) (int, object) {
+	d.signEPay(version, v)
 	code, body := d.browser("merchant").http("POST", path, path, "application/x-www-form-urlencoded", form(v), nil)
 	var r object
 	decode(body, &r)
@@ -63,18 +70,23 @@ func (d *driver) signedEPay(version, path string, v url.Values) (int, object) {
 		for k, v := range r {
 			f.Set(k, fmt.Sprint(v))
 		}
-		plain, ok := canonical(f)
-		require(ok && f.Get("sign_type") == "RSA", "invalid V2 response parameters")
-		h := sha256.Sum256([]byte(plain))
-		block, _ := pem.Decode(d.input("handoff/platform-public.pem"))
-		require(block != nil, "missing platform SPKI")
-		key, e := x509.ParsePKIXPublicKey(block.Bytes)
-		check(e)
-		pk, ok := key.(*rsa.PublicKey)
-		require(ok && rsa.VerifyPKCS1v15(pk, crypto.SHA256, h[:], standard(str(r, "sign"))) == nil, "invalid platform signature")
+		d.verifyPlatformSignature(f)
 	}
 	return code, r
 }
+
+func (d *driver) verifyPlatformSignature(f url.Values) {
+	plain, ok := canonical(f)
+	require(ok && f.Get("sign_type") == "RSA", "invalid V2 response parameters")
+	h := sha256.Sum256([]byte(plain))
+	block, _ := pem.Decode(d.input("handoff/platform-public.pem"))
+	require(block != nil, "missing platform SPKI")
+	key, e := x509.ParsePKIXPublicKey(block.Bytes)
+	check(e)
+	pk, ok := key.(*rsa.PublicKey)
+	require(ok && rsa.VerifyPKCS1v15(pk, crypto.SHA256, h[:], standard(f.Get("sign"))) == nil, "invalid platform signature")
+}
+
 func (d *driver) sim(method, path string, data object) []byte {
 	var cfg object
 	decode(d.input("inputs/upstream-sim/config.json"), &cfg)
@@ -95,9 +107,8 @@ func (d *driver) sim(method, path string, data object) []byte {
 	check(e)
 	return b
 }
-func (d *driver) cashier(link string, pay bool) {
-	u, e := url.Parse(link)
-	require(e == nil && u.Scheme+"://"+u.Host == d.addresses().cashier && u.User == nil && u.RawQuery == "" && u.Fragment == "" && regexp.MustCompile(`^/cashier/[A-Za-z0-9_-]+$`).MatchString(u.EscapedPath()), "unexpected cashier link")
+func (d *driver) cashier(link string, pay bool) string {
+	link = d.resolveCashier(link)
 	c, forwardAddress := d.cashierClient()
 	if c != localHTTP {
 		defer c.CloseIdleConnections()
@@ -119,6 +130,7 @@ func (d *driver) cashier(link string, pay bool) {
 		d.trace(fmt.Sprintf("%s /cashier/{token} → HTTP %d", method, res.StatusCode))
 		require(res.StatusCode == 200, "cashier rejected request")
 	}
+	return link
 }
 
 type tradeRun struct {
@@ -131,7 +143,7 @@ func scenarioOrder(scenario string, gateway bool) (amount, channel string) {
 	switch scenario {
 	case livePhase:
 		return "1.11", epayChannel
-	case "main", "duplicates", "dispute", "seller-offline", "bot-notices", "statement", "archived-work", "cancel", a144NotSent, a144NotFound,
+	case cashierSubmit, "main", "duplicates", "dispute", "seller-offline", "bot-notices", "statement", "archived-work", "cancel", a144NotSent, a144NotFound,
 		a145NeverSent, a145StaleBinding, a145UnpaidBeforeT, a145LatePayment, a145Refusals, kQueryTransient, kLedgerCancelEvent, disputeReturn, disputePaidRelease, disputePaidRace:
 		if gateway {
 			return "2.00", epayChannel
@@ -150,19 +162,23 @@ func (t tradeRun) step(label string, f func()) *result {
 	t.d.step(t.name+" "+label, f)
 	return t.d.active
 }
+
+const merchantReturnURL = "https://merchant.aipay.test/return"
+
 func (d *driver) createParams(number, amount string) url.Values {
-	return url.Values{"out_trade_no": {number}, "type": {"alipay"}, "name": {"阶段二担保"}, "money": {amount}, "notify_url": {d.addresses().notify + "/notify"}, "return_url": {"https://merchant.aipay.test/return"}, "clientip": {"127.0.0.1"}, "method": {"web"}}
+	return url.Values{"out_trade_no": {number}, "type": {"alipay"}, "name": {"阶段二担保"}, "money": {amount}, "notify_url": {d.addresses().notify + "/notify"}, "return_url": {merchantReturnURL}, "clientip": {"127.0.0.1"}, "method": {"web"}}
 }
 
 // Resolve the immutable binding on the created order before using any upstream
 // endpoint. On resume this also recovers pre-UG-7 embedded order amounts.
-func (t tradeRun) readOrderRoute() (order, code, money string) {
+func (t tradeRun) readOrderRoute() (order, code, money, tradeNo string) {
 	d := t.d
-	rows := d.rows("payment", "payment_orders", `SELECT id::text AS order_id,channel_code,channel_account_id,
+	rows := d.rows("payment", "payment_orders", `SELECT id::text AS order_id,trade_no,channel_code,channel_account_id,
 		(data#>>'{snapshot,trade,quote,fiat_amount}')::bigint AS amount_minor FROM payment_orders
 		WHERE account_id=$1 AND application_id=$2 AND out_trade_no=$3`, d.required("merchant-account"), d.required("app/"+t.proto), t.number)
 	require(len(rows) == 1, "order for merchant number not found")
-	return t.checkOrderRoute(rows[0])
+	order, code, money = t.checkOrderRoute(rows[0])
+	return order, code, money, str(rows[0], "trade_no")
 }
 
 func (t tradeRun) checkOrderRoute(row object) (order, code, money string) {
@@ -201,6 +217,19 @@ func (t tradeRun) baseline() {
 	})
 }
 
+func (d *driver) createEPayLink(proto string, params url.Values) (link, tradeNo string) {
+	if proto == "v2" {
+		reply := d.epay(proto, "/api/pay/create", params)
+		return str(reply, "pay_info"), str(reply, "trade_no")
+	}
+	reply := d.epay(proto, "/mapi.php", params)
+	field := "payurl"
+	if reply[field] == nil || reply[field] == "" {
+		field = "qrcode"
+	}
+	return str(reply, field), str(reply, "trade_no")
+}
+
 func (d *driver) trade(name, proto string) tradeRun {
 	amount, _ := scenarioOrder(d.history.Scenario, d.gatewayMode())
 	t := tradeRun{d: d, name: name, proto: proto, number: d.key(d.scope + "/" + name)}
@@ -208,28 +237,26 @@ func (d *driver) trade(name, proto string) tradeRun {
 	t.baseline()
 	t.step("下单与冻结", func() {
 		v := d.createParams(t.number, amount)
-		path := "/mapi.php"
-		link := "payurl"
-		if proto == "v2" {
-			path = "/api/pay/create"
-			link = "pay_info"
+		var link, replyTradeNo string
+		if d.scope == cashierSubmit {
+			link = d.submitEPay(proto, v)
+			d.put("submit-link/"+k, link)
+		} else {
+			link, replyTradeNo = d.createEPayLink(proto, v)
 		}
-		r := d.epay(proto, path, v)
-		order, code, money := t.readOrderRoute()
+		order, code, money, tradeNo := t.readOrderRoute()
+		require(replyTradeNo == "" || replyTradeNo == tradeNo, "merchant create returned a different platform trade number")
 		d.put("channel/"+k, code)
 		d.put("amount/"+k, money)
-		if proto == "v1" && r[link] == nil {
-			link = "qrcode"
-		}
-		d.put("trade-no/"+k, str(r, "trade_no"))
-		d.put("cashier/"+k, str(r, link))
-		d.evidence("trade_no", str(r, "trade_no"))
-		d.cashier(str(r, link), false)
+		d.put("trade-no/"+k, tradeNo)
+		d.evidence("trade_no", tradeNo)
+		// Keep the simulator instruction usable after an order leaves the ready state.
+		d.put("cashier/"+k, d.cashier(link, false))
 		// /orders pages oldest first, so a long-lived demo merchant cannot find a
 		// new order there. Resolve the ID by merchant number, then check the bot view.
 		app := d.required("app/" + proto)
 		view := d.bot(k+"/order", "/order "+app+" "+order)
-		require(regexp.MustCompile("^"+regexp.QuoteMeta(order)+" · 应用 "+regexp.QuoteMeta(app)+" · 业务 "+regexp.QuoteMeta(d.required("business"))+" · 商户单号 "+regexp.QuoteMeta(t.number)+" · 平台单号 "+regexp.QuoteMeta(str(r, "trade_no"))+" · ").MatchString(view), "bot order view differs from the created order")
+		require(regexp.MustCompile("^"+regexp.QuoteMeta(order)+" · 应用 "+regexp.QuoteMeta(app)+" · 业务 "+regexp.QuoteMeta(d.required("business"))+" · 商户单号 "+regexp.QuoteMeta(t.number)+" · 平台单号 "+regexp.QuoteMeta(tradeNo)+" · ").MatchString(view), "bot order view differs from the created order")
 		d.put("order/"+k, order)
 		hold := d.ledgerTrade(order)
 		require(hold != nil && str(hold, "status") == "RESERVED" && str(hold, "seller_account_id") == d.required("seller-account") && str(hold, "account_id") == d.required("merchant-account"), "not the expected frozen order")
@@ -242,7 +269,7 @@ func (d *driver) trade(name, proto string) tradeRun {
 	t.order = d.required("order/" + k)
 	if !d.read("channel/"+k, &t.channel) || !d.read("amount/"+k, &t.amount) {
 		t.step("订单通道", func() {
-			order, code, money := t.readOrderRoute()
+			order, code, money, _ := t.readOrderRoute()
 			require(order == t.order, "saved order differs from payment order")
 			d.put("channel/"+k, code)
 			d.put("amount/"+k, money)
@@ -370,7 +397,7 @@ func (t tradeRun) notify() {
 			var rs []receipt
 			decode(t.d.fixtureRecord("notifications.json"), &rs)
 			for _, r := range rs {
-				if r.MerchantOrder == t.number && r.Trade == t.d.required("trade-no/"+t.d.scope+"/"+t.name) && r.Money == t.amount && r.PID == t.d.required("pid/v1") {
+				if r.MerchantOrder == t.number && r.Trade == t.d.required("trade-no/"+t.d.scope+"/"+t.name) && r.Money == t.amount && r.PID == t.d.required("pid/"+t.proto) {
 					t.d.evidence("merchant_receipt", r)
 					return true
 				}
@@ -640,6 +667,7 @@ var scenarios = map[string]func(*driver){
 	a144NotSent:       (*driver).runA144NotSent,
 	a144NotFound:      (*driver).runA144NotFound,
 	livePhase:         (*driver).runLiveEPay,
+	cashierSubmit:     (*driver).runCashierSubmit,
 	"coverage":        (*driver).coverage,
 	"seller-offline":  (*driver).sellerOffline,
 	"bot-notices":     (*driver).botNotices,

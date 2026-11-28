@@ -240,9 +240,12 @@ def dev_portal_origins(environ=os.environ):
 
     platform = origin("AIPAY_DEV_PLATFORM_ORIGIN", "https://admin.aipay.test")
     seller = origin("AIPAY_DEV_SELLER_ORIGIN", "https://seller.aipay.test")
+    cashier = origin("AIPAY_DEV_CASHIER_ORIGIN", "https://pay.aipay.test")
+    if cashier in (platform, seller):
+        raise ValueError("AIPAY_DEV_CASHIER_ORIGIN must have a different host from the platform and seller origins")
     if platform == seller:
         raise ValueError("AIPAY_DEV_PLATFORM_ORIGIN and AIPAY_DEV_SELLER_ORIGIN must have different hosts")
-    return platform, seller
+    return platform, seller, cashier
 
 
 def generate_inputs(root, sim_listen, cert_days=None):
@@ -543,7 +546,7 @@ def upgrade_demo(root, compose=False):
 def prepare(root, admin, cache, queue, compose=False):
     """Callers supply only the fixed stack directory, and set umask 077."""
     cert_days = dev_cert_days()
-    platform_origin, seller_origin = dev_portal_origins()
+    platform_origin, seller_origin, cashier_origin = dev_portal_origins()
     rp_id = platform_origin.removeprefix("https://")
     root.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     root.mkdir(mode=0o700)  # Exclusive and outside all repositories.
@@ -651,7 +654,7 @@ def prepare(root, admin, cache, queue, compose=False):
                               IAM_GRPC_ADDR=address("iam", compose), PAYMENT_GRPC_ADDR=address("payment", compose),
                               RECONCILIATION_GRPC_ADDR=address("reconciliation", compose), HTTP_MAX_BODY_BYTES="23068672",
                               TELEGRAM_MONITOR_INTERVAL="2s", TELEGRAM_KEY_MESSAGE_TTL="10s",
-                              LEDGER_GRPC_ADDR=address("ledger", compose), PLATFORM_ORIGIN=platform_origin, SELLER_ORIGIN=seller_origin,
+                              LEDGER_GRPC_ADDR=address("ledger", compose), PLATFORM_ORIGIN=platform_origin, SELLER_ORIGIN=seller_origin, CASHIER_ORIGIN=cashier_origin,
                               PORTAL_COOKIE_KEY=secrets.token_urlsafe(32), EPAY_V2_LOCAL_RSA_FILE=inputs / "epay.der",
                               TOTP_ENROLLMENT_ORIGIN="https://merchant.aipay.test", TELEGRAM_ENABLED="true",
                               TELEGRAM_WEBHOOK_URL="https://merchant.aipay.test/telegram/webhook", TELEGRAM_BOT_TOKEN_FILE=inputs / "bot-token",

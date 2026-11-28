@@ -9,7 +9,6 @@ import (
 	"net"
 	"net/url"
 	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"syscall"
@@ -227,10 +226,15 @@ func (c liveCredentials) paymentLink(link string) string {
 	return link
 }
 
-// The terminal gets the original validated bytes. Checkpoints and reports keep
-// only the origin and escaped path, even for an empty query or fragment.
+// Reports keep the origin and escaped path. A buyer cashier fragment is marked explicitly.
 func paymentLinkEvidence(link string) string {
+	if origin, _, ok := cashierLinkParts(link); ok {
+		return origin + "/c#<redacted>"
+	}
 	if i := strings.IndexAny(link, "?#"); i >= 0 {
+		if strings.HasSuffix(link[:i], "/c") && link[i:] == "#<redacted>" {
+			return link
+		}
 		return link[:i]
 	}
 	return link
@@ -240,13 +244,15 @@ func paymentLinkEvidence(link string) string {
 // can copy a previous step into state or publish it in another report.
 func (d *driver) trimSavedLiveLinks() {
 	trim := func(r *result) bool {
-		link, _ := r.Evidence["pay_info"].(string)
-		safe := paymentLinkEvidence(link)
-		if safe == link {
-			return false
+		changed := false
+		for _, field := range []string{"pay_info", "payurl", "qrcode"} {
+			link, _ := r.Evidence[field].(string)
+			if safe := paymentLinkEvidence(link); safe != link {
+				r.Evidence[field] = safe
+				changed = true
+			}
 		}
-		r.Evidence["pay_info"] = safe
-		return true
+		return changed
 	}
 	key := "step/" + livePhase + "/测试上游 商户下单"
 	var r result
@@ -263,11 +269,7 @@ func (d *driver) trimSavedLiveLinks() {
 func (d *driver) createLiveEPayOrder(number, ip string, creds liveCredentials) string {
 	params := d.createParams(number, "1.11")
 	params.Set("clientip", ip)
-	params.Set("pid", d.required("pid/v1"))
-	var merchant struct{ Key string }
-	decode(file(filepath.Join(d.dir, "merchant-key.json")), &merchant)
-	params.Set("sign_type", "MD5")
-	params.Set("sign", v1Sign(params, merchant.Key))
+	d.signEPay("v1", params)
 
 	const path = "/mapi.php"
 	status, body := d.browser("merchant").http("POST", path, path, "application/x-www-form-urlencoded", form(params), nil)
@@ -309,10 +311,13 @@ func (d *driver) runLiveEPay() {
 			check(err)
 			require(len(rows) == 1, "original epay-live order not found")
 			if value, _ := rows[0]["link"].(string); value != "" {
-				fmt.Println(livePaymentPrompt, creds.paymentLink(value))
+				upstream := creds.paymentLink(value)
+				_, wrapped := d.buyerToken(upstream)
+				require(!wrapped, "expected the original upstream payment instruction")
+				fmt.Println(livePaymentPrompt, upstream)
 			}
 		}
-		if link != "" {
+		if _, wrapped := d.buyerToken(link); link != "" && !wrapped {
 			fmt.Println(livePaymentPrompt, link)
 			prompt = nil
 		}

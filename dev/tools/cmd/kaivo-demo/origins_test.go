@@ -11,22 +11,23 @@ import (
 
 func TestPortalOrigins(t *testing.T) {
 	const platform, seller = "AIPAY_PLATFORM_ORIGIN", "AIPAY_SELLER_ORIGIN"
-	defaults := portalOrigins{"https://admin.aipay.test", "https://seller.aipay.test"}
+	defaults := portalOrigins{platform: "https://admin.aipay.test", seller: "https://seller.aipay.test"}
 	custom := "https://" + strings.Repeat("a", 63) + ".web-9.demo"
 	for _, tc := range []struct {
 		env  map[string]string
 		want portalOrigins
 	}{
+		{map[string]string{"AIPAY_CASHIER_ORIGIN": custom}, portalOrigins{defaults.platform, defaults.seller, custom}},
 		{nil, defaults}, {map[string]string{platform: "", seller: ""}, defaults},
-		{map[string]string{platform: custom}, portalOrigins{custom, defaults.seller}},
-		{map[string]string{seller: custom}, portalOrigins{defaults.platform, custom}},
+		{map[string]string{platform: custom}, portalOrigins{platform: custom, seller: defaults.seller}},
+		{map[string]string{seller: custom}, portalOrigins{platform: defaults.platform, seller: custom}},
 	} {
 		if readPortalOrigins(tc.env) != tc.want {
 			t.Fatal("unexpected portal origins")
 		}
 	}
 	expectFailure(t, func() { readPortalOrigins(map[string]string{platform: defaults.seller}) })
-	for _, key := range []string{platform, seller} {
+	for _, key := range []string{platform, seller, "AIPAY_CASHIER_ORIGIN"} {
 		for _, value := range []string{"HTTP://a.b", "http://a.b", "https://A.b", "https://local", "https://a.b:443",
 			"https://a.b/", "https://a.b?", "https://a.b#", "https://u@a.b", "https://a.b.", "https://*.b", "https://a-.b",
 			"https://a.-b", "https://a..b", "https://a_b.c", "https://a.b\n", "https://é.test", "https://127.0.0.1",

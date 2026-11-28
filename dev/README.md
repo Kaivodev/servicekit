@@ -32,7 +32,11 @@ python3 dev/native/stack.py down
 
 ### Portal origins and partner invitations
 
-Set `AIPAY_DEV_PLATFORM_ORIGIN` and `AIPAY_DEV_SELLER_ORIGIN` before native or Compose `prepare`. Their respective defaults are `https://admin.aipay.test` and `https://seller.aipay.test`. An unset or empty variable uses its own default. Use two distinct lowercase HTTPS hostnames with at least two DNS labels and no port or trailing slash. The platform hostname is the WebAuthn RP ID. An existing stack keeps its prepared origins.
+Set `AIPAY_DEV_PLATFORM_ORIGIN`, `AIPAY_DEV_SELLER_ORIGIN` and `AIPAY_DEV_CASHIER_ORIGIN` before native or Compose `prepare`. Their respective defaults are `https://admin.aipay.test`, `https://seller.aipay.test` and `https://pay.aipay.test`. An unset or empty variable uses its own default. Use three distinct lowercase HTTPS hostnames with at least two DNS labels and no port or trailing slash. The platform hostname is the WebAuthn RP ID. An existing stack keeps its prepared origins.
+
+The driver reads `AIPAY_CASHIER_ORIGIN` from the prepared backend environment. Prepare leaves `AIPAY_EPAY_JSON_URL_INSTRUCTION` unset, so JSON creates use the upstream instruction by default. Existing scenarios also accept buyer cashier links when the backend wraps URL instructions. Older backends continue to use simulator links.
+
+With a cashier-enabled backend and gateway setup, run `python3 -B dev/native/stack.py demo run cashier-submit`. It submits and pays one 2.00 order per EPay version, verifies each signed merchant return, and checks escrow release and final balances. [Scenario details](demo.md#buyer-cashier)
 
 After native `demo setup`, use `stack.py demo invite platform EMAIL ROLE [ROLE...]` for platform staff. The IAM platform role names accepted by the command are `administrator`, `approver`, `finance`, `risk`, `operations`, `sre`, `support`, `technical_support`, `collection_operator` and `payment_access_reviewer`. Platform invitations work in either Telegram mode.
 
@@ -79,7 +83,7 @@ python3 -B dev/native/stack.py demo run epay-live
 
 | 场景 | 选路与付款 | 状态 |
 |---|---|---|
-| `epay-live` | 同一卖方的测试上游只接 111 分，优先级 0 排在两条优先级 1 的模拟器通道前。驱动核对实际通道账户后，将完整付款链接打印到 stdout，付款人可直接打开含 PID 的链接。报告和检查点仅记录 `scheme://host/path`。 | 待验证机 |
+| `epay-live` | The live channel accepts 111 minor units at priority 0. After checking the bound account, the driver prints the original upstream instruction for the payer. Reports strip upstream query strings and fragments and record buyer cashier links as `<origin>/c#<redacted>`. | Pending native run |
 
 联调使用已有商户 V1 应用向 `/mapi.php` 下单。V1 应答无需 RSA 签名，可以交付带 `?pid=…&sign=…` 的完整付款链接。backend 的 V2 应答签名不接受字段值中的原始 `&`，已作为 backend 问题另报。
 

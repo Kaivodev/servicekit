@@ -20,6 +20,10 @@ func (p listenerPause) requireActive() {
 	require(time.Now().Before(p.ResumeAt), "inconclusive: the listener pause ended before the in-pause checks finished")
 }
 
+func (d *driver) requireSameCashier(original, repeated string) {
+	require(d.resolveCashier(original) == d.resolveCashier(repeated), "repeating the merchant create returned a different simulator instruction")
+}
+
 func (d *driver) runKQueryTransient() {
 	t := d.a145Order()
 	t.baseline()
@@ -30,7 +34,7 @@ func (d *driver) runKQueryTransient() {
 		reply := create()
 		link := str(reply, "payurl")
 		d.cashier(link, false)
-		order, _, _ := t.readOrderRoute()
+		order, _, _, _ := t.readOrderRoute()
 		d.put("cashier/"+t.number, link)
 		d.put("trade-no/"+d.scope+"/"+t.name, str(reply, "trade_no"))
 		d.evidence("order_id", order)
@@ -78,7 +82,7 @@ func (d *driver) runKQueryTransient() {
 	t.step("Repeat the merchant create during the pause", func() {
 		pause.requireActive()
 		reply := create()
-		require(str(reply, "payurl") == t.link, "repeating the merchant create returned a different cashier link")
+		d.requireSameCashier(t.link, str(reply, "payurl"))
 		pause.requireActive()
 		d.evidence("matching_payurl_at", time.Now().UTC())
 	})

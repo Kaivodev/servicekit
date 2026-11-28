@@ -60,7 +60,7 @@ python3 -B dev/native/stack.py demo run epay-live
 
 两条模拟器通道优先级为 1。测试上游只接 111 分，优先级为 0，payment 先选它。联调通过商户 V1 的 `/mapi.php` 下单，因为 backend 的 V2 应答签名不接受字段值中的原始 `&`，已作为 backend 问题另报。
 
-V1 返回 HTTP 200 且 `code == 1` 时，驱动优先取 `payurl`，缺省时取 `qrcode`。核对原单的通道账户 ID 后，驱动将完整链接打印到 stdout，供付款人在浏览器支付 1.11 元。链接可以带上游 PID 和签名等多个参数。原文或任一层 URL 解码后含 KEY 的链接会被拒绝。报告和检查点只保留 `scheme://host/path`。
+After a successful V1 create, the driver takes `payurl`, falling back to `qrcode`. It checks the bound channel account and prints the validated upstream link for the payer. If the backend returns a buyer cashier link, the driver reads the original upstream instruction from the payment order, as it does on resume. Links containing the operator KEY, including after URL decoding, are rejected. Reports and checkpoints retain the upstream origin and path, or `<origin>/c#<redacted>` for a buyer cashier link.
 
 真实上游的回调到不了本机，payment 对未付订单的主动查单间隔最长 10 分钟。付款后可能还要等约 10 分钟才能确认，驱动每 15 秒检查一次账本付款时间。`AIPAY_DEMO_EPAY_LIVE_CLIENT_IP` 默认 `127.0.0.1`，可设为有效 IP。`AIPAY_DEMO_EPAY_LIVE_WAIT` 默认 `30m`，超时报告“未付款”。重跑同一命令可继续等待原单。
 
@@ -82,6 +82,12 @@ V1 返回 HTTP 200 且 `code == 1` 时，驱动优先取 `payurl`，缺省时取
 | 商户 | 私聊 /start、/totp → 浏览器 GET/POST 绑定页 → /balance、/business_create、/app_create。V1 配回环 CIDR，/key_generate 首次交付并观察相同消息 ID 的 deleteMessage。另建 V2 应用并上传商户公钥，用于关单和退款 | 待验证机 |
 | 收款资格 | /access_apply、逐提示 /access_next、/access_submit。审核员在平台读取 revision 及材料哈希后提交 reviews，商户按 /access 返回的版本 /access_enable | 待验证机 |
 
+## Buyer cashier
+
+Run `python3 -B dev/native/stack.py demo run cashier-submit` after gateway setup with a cashier-enabled backend. The scenario uses the same EPay simulator account as `main`. It signs a V1 GET to `/submit.php` and a V2 form POST to `/api/pay/submit`. Each creates a separate 2.00 order and must return HTTP 303 to the prepared buyer cashier origin.
+
+The driver polls the backend public listener for up to 60 seconds, then pays at the simulator link obtained from `/go` or the desktop QR instruction. It checks that the unpaid view withholds a ready return, an invalid token gets envelope code 400, and a cross-origin action redirects to the tokenless cashier page. After payment it checks the merchant notification and the signed `/return` query against the order. V1 uses the merchant MD5 key and V2 uses the platform RSA public key. Each order must reach `RELEASED` with the expected balance changes before the scenario completes.
+
 ## 资金场景清单
 
 Both K scenarios require the native stack with trade and verification gateways, payment at schema version 24 or later, and the simulator test control token. Set `AIPAY_ENVIRONMENT=development` on payment for `k-ledger-cancel-event` so its owner can run `dev archive-work`.
@@ -92,6 +98,7 @@ Both K scenarios require the native stack with trade and verification gateways, 
 
 | 场景 | 真实操作与验收条件 | 当前状态 |
 |---|---|---|
+| cashier-submit | V1 and V2 buyer cashier submits, signed returns and escrow release via the EPay simulator. | Pending native run |
 | epay-live | 浏览器支付 1.11 元，核对网关建单和查单记录、独立 paid 观测、放币授权及余额，最后停用测试通道。 | 待验证机 |
 | main | V1 /mapi.php 下单。卖方门户冻结 Q 后显示模拟收银页，HTTPS POST 付款，模拟器向 backend 回调。payment 主动查单产生 OrderPaid，商户验签并回 success。风险到期后 reconciliation 独立查单、签授权，ledger 放币。卖方减少 Q，商户增加 N，三项费用合计增加 F，Q=N+F | 2026-11-26 本机 mTLS 栈在 EPay 通过 |
 | cancel | V2 /api/pay/create、/api/pay/close。两笔独立订单，首次需两条间隔至少五秒的 closed/unpaid 才归还 Q。EPay 查 payment 跳过关单审计、超时推定完成码和取消核验请求。嵌入模式迟付单使用 late_payment。在首条核验后收银付款，要求其后观察到 paid 且没有取消授权。payment 可能先于独立复查查到付款并转入放币核验，所以这条 paid 记在取消或放币核验下都算，再等待放币，按该单基线核对卖方 −Q、商户 +N、三项费用 +F | 2026-11-26 本机 mTLS 栈在 EPay 通过（迟付步骤在断言修正后续跑，沿用原样本证据） |
@@ -102,7 +109,7 @@ Both K scenarios require the native stack with trade and verification gateways, 
 | a145-unpaid-before-t | Lose one create and shift the instruction TTL. Verify that both signatures precede the unpaid timeout, then trace the two not_found_unpaid observations to cancellation and the seller balance. | Pending native run |
 | a145-late-payment | Force-close a bound order using two closed_unpaid observations, then pay at its cashier. Match the late-payment row, platform view and audit to the approval. Close the seller evidence review and check that escrow is unchanged. | Pending native run |
 | a145-refusals | Check early submission, self-approval with the risk credential, approval after payment, and submission on the paid order. Verify the normal merchant notification and release with zero cancellation requests. | Pending native run |
-| k-query-transient | Create a 2.00 EPay order and pause the listener for 60 seconds. Check the query failure kind, AWAITING_PAYMENT and PENDING states, and the retained instruction. Repeat the create during the pause and match its payurl. After recovery, pay through that link and verify the merchant receipt and RELEASED balances. | Pending native run |
+| k-query-transient | Create a 2.00 EPay order and pause the listener for 60 seconds. Check the query failure kind, AWAITING_PAYMENT and PENDING states, and the retained instruction. Repeat the create during the pause and verify both links resolve to the same simulator instruction. After recovery, pay through that link and verify the merchant receipt and RELEASED balances. | Pending native run |
 | k-ledger-cancel-event | Close an unpaid 2.00 EPay order. Once payment requests verification, archive its work and check that reconciliation has issued no cancellation authorization yet. Verify one `order.ledger_cancelled`, zero `order.ledger_verified`, one `order.dev_work_archived`, unfinished archived work, and the returned escrow. | Pending native run |
 | dispute-return | On the native simulator gateways with payment migration 000025 and `AIPAY_ENVIRONMENT=development`, dispute an unpaid EPay V2 order and archive its work before authorization. Refuse release with business code 409 and `DISPUTE_RULING_OUTCOME_NOT_ALLOWED` over HTTP 200, zero ruling requests and an unchanged ledger version. Backdate the order and obtain two approvals for return. Match the ruling and two window-separated closed-unpaid observations to one cancellation authorization. Check CANCELLED, seller +Q, unchanged merchant and fee balances, one `order.ledger_cancelled` with both IDs, zero `order.ledger_verified`, and resolved platform and seller views. Verify V2 query status 0, a refused merchant close (code -1) that leaves the order cancelled, and zero notifications. | Pending native run |
 | dispute-return-paid | With payment migration 000025, pay a form-md5 order and register a pre-release dispute. Refuse return to the seller with HTTP 200, business code 409 and `DISPUTE_RULING_OUTCOME_NOT_ALLOWED`. Check zero ruling requests, the same ledger version and DISPUTED. Approve the refund with two signatures, review seller evidence with two reviewers and wait out the objection window. Match the independent refund authorization to the single REFUNDED posting and check seller +Q with unchanged merchant and fee balances. | Pending native run |

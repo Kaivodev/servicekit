@@ -5,7 +5,7 @@ import (
 	"strings"
 )
 
-type portalOrigins struct{ platform, seller string }
+type portalOrigins struct{ platform, seller, cashier string }
 
 // Browsers parse a numeric final label as IPv4, including short and hex forms.
 var numericHostSuffix = regexp.MustCompile(`^(?:[0-9]+|0x[0-9a-f]*)$`)
@@ -31,6 +31,11 @@ func readPortalOrigins(env map[string]string) portalOrigins {
 		seller:   origin("AIPAY_SELLER_ORIGIN", "https://seller.aipay.test"),
 	}
 	require(o.platform != o.seller, "AIPAY_PLATFORM_ORIGIN and AIPAY_SELLER_ORIGIN must have different hosts")
+	// Older prepared stacks have only the two portal origins.
+	if env["AIPAY_CASHIER_ORIGIN"] != "" {
+		o.cashier = origin("AIPAY_CASHIER_ORIGIN", "")
+		require(o.cashier != o.platform && o.cashier != o.seller, "AIPAY_CASHIER_ORIGIN must have a distinct host")
+	}
 	return o
 }
 
