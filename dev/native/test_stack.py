@@ -229,9 +229,29 @@ class Configuration(unittest.TestCase):
             with patch.object(stack, "request", return_value=None), self.assertRaisesRegex(ValueError, "gateways"):
                 stack.epay_on(root)
 
+    def test_dev_cert_days_boundaries(self):
+        for days in (1, 30):
+            with self.subTest(days=days), patch.dict(os.environ, AIPAY_DEV_CERT_DAYS=str(days)):
+                self.assertEqual(cfg.dev_cert_days(), days)
+
+    def test_prepare_rejects_invalid_cert_days_before_creating_state(self):
+        for value in ("0", "31", "07", "-1", "+7", "7d", " 7", "seven", "7\n", "\u0667"):
+            with self.subTest(value=value), tempfile.TemporaryDirectory() as tmp, \
+                 patch.dict(os.environ, AIPAY_DEV_CERT_DAYS=value), patch("subprocess.run") as run:
+                root = Path(tmp) / "new-parent" / "state"
+                with self.assertRaisesRegex(ValueError, "^AIPAY_DEV_CERT_DAYS must be a whole number of days from 1 to 30$"):
+                    cfg.prepare(root, "", "", "")
+                run.assert_not_called()
+                self.assertFalse(root.exists())
+                self.assertFalse(root.parent.exists())
+
     def test_profiles(self):
-        for compose in (False, True):
-            with self.subTest(compose=compose), tempfile.TemporaryDirectory() as tmp:
+        for compose, cert_days in ((False, None), (True, ""), (False, "30"), (True, "30")):
+            with self.subTest(compose=compose, cert_days=cert_days), tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ):
+                if cert_days is None:
+                    os.environ.pop("AIPAY_DEV_CERT_DAYS", None)
+                else:
+                    os.environ["AIPAY_DEV_CERT_DAYS"] = cert_days
                 root = Path(tmp) / "state"
                 files = {}
                 # Exercise actual OpenSSL RSA generation and every env/fixture builder.
@@ -252,6 +272,10 @@ class Configuration(unittest.TestCase):
                     with self.assertRaises(FileExistsError):
                         cfg.prepare(root, "", "", "")
                 self.assertEqual(len(cert_calls), 1)
+                if cert_days:
+                    self.assertEqual(cert_calls[0][-2:], ["--days", cert_days])
+                else:
+                    self.assertNotIn("--days", cert_calls[0])
                 if not compose:
                     tool = dict(line.split("=", 1) for line in files[root / "env/devcollection.env"].splitlines())
                     self.assertEqual(tool["AIPAY_RPC_ALLOWED_PEERS"], "ledger,reconciliation")

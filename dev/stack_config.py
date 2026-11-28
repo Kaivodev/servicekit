@@ -218,16 +218,27 @@ def new_epay_account():
     return dict(id="epay-demo", style="epay-v1", pid=1001, shared_secret=key)
 
 
-def generate_inputs(root, sim_listen):
+def dev_cert_days(environ=os.environ):
+    value = environ.get("AIPAY_DEV_CERT_DAYS", "")
+    if value == "":
+        return None
+    if not re.fullmatch(r"[1-9]|[12][0-9]|30", value):
+        raise ValueError("AIPAY_DEV_CERT_DAYS must be a whole number of days from 1 to 30")
+    return int(value)
+
+
+def generate_inputs(root, sim_listen, cert_days=None):
     for svc in SERVICES:
         for parent in ("inputs", "logs", "data"):
             (root / parent / svc).mkdir(parents=True, mode=0o700)
     for directory in ("env", "handoff", "data/iam/mail", "data/ledger/anchors", "data/payment/evidence"):
         (root / directory).mkdir(mode=0o700)
     ids = ",".join((*PEERS, *GATEWAYS, "backend", "notifier", "collection", "probe", "cashier"))
-    subprocess.run(["go", "run", "-mod=readonly", "./cmd/devcert", "--services", ids,
-                    "--signing-services", ",".join((*PEERS, "collection")),
-                    "--out", str(root / "certs")], env=os.environ | {"GOWORK": "off"}, cwd=LIBRARY, check=True)
+    args = ["go", "run", "-mod=readonly", "./cmd/devcert", "--services", ids,
+            "--signing-services", ",".join((*PEERS, "collection")), "--out", str(root / "certs")]
+    if cert_days is not None:
+        args.extend(["--days", str(cert_days)])
+    subprocess.run(args, env=os.environ | {"GOWORK": "off"}, cwd=LIBRARY, check=True)
     inputs = root / "inputs"
     write(inputs / "iam/sealer.key", secrets.token_bytes(32))
     # IAM, backend and payment use the same platform RSA key for EPay V2.
@@ -513,11 +524,12 @@ def upgrade_demo(root, compose=False):
 
 def prepare(root, admin, cache, queue, compose=False):
     """Callers supply only the fixed stack directory, and set umask 077."""
+    cert_days = dev_cert_days()
     root.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     root.mkdir(mode=0o700)  # Exclusive and outside all repositories.
     try:
         listen = "0.0.0.0" if compose else "127.0.0.1"
-        generate_inputs(root, listen + ":9080")
+        generate_inputs(root, listen + ":9080", cert_days)
         ensure_report_key(root)
         passwords = {"STACK_ID": "kaivo-development-" + str(uuid.uuid4())}
         if not queue:
