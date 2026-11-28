@@ -23,7 +23,7 @@ func isDisputePaidScenario(s string) bool {
 
 func disputePaidPlan(s string) ([]string, []string) {
 	steps := []string{"Create an unpaid EPay V2 order, open its simulator instruction and register a pre-release dispute with evidence from both parties."}
-	notes := []string{"Use the native simulator gateways with payment migration 000026 and reconciliation migration 000022. Approval assertions expose only credential_id."}
+	notes := []string{"Use the simulator gateways with payment migration 000026 and reconciliation migration 000022. Approval assertions expose only credential_id."}
 	switch s {
 	case disputePaidRelease:
 		steps = append(steps,

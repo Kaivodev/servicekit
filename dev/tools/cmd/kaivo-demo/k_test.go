@@ -93,7 +93,7 @@ func TestQueryPauseSurvivesDriverRestart(t *testing.T) {
 		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("{}"))}, nil
 	})}
 	resumed := newDriver(root, "", kQueryTransient)
-	resumed.checkA144Environment(kQueryTransient)
+	resumed.checkA144Environment(kQueryTransient, func() {})
 	if probes != 0 {
 		t.Fatal("probed the simulator during its saved pause")
 	}
@@ -105,7 +105,7 @@ func TestQueryPauseSurvivesDriverRestart(t *testing.T) {
 	saved.ResumeAt = now.Add(-2 * listenerResumeMargin)
 	expectFailure(t, saved.requireActive)
 	resumed.put(queryPauseKey, saved)
-	resumed.checkA144Environment(kQueryTransient)
+	resumed.checkA144Environment(kQueryTransient, func() {})
 	if probes != 1 {
 		t.Fatal("missing control probe after the listener recovered")
 	}

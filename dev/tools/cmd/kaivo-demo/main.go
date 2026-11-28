@@ -7,6 +7,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"slices"
+	"sync"
 	"syscall"
 )
 
@@ -101,13 +102,16 @@ func executeContext(ctx context.Context, args []string) (err error) {
 		defer kube.closeForwards()
 		d.history.Logs = "kubectl logs（各服务所在命名空间）"
 	}
-	start := func() {
+	startForwards := func() {
 		if kube != nil && len(kube.forwards) == 0 {
 			d.gatewayMode() // Reject a partial overlay before making setup or scenario changes.
 			kube.startForwards()
-			kube.syncMerchantKeys()
 		}
 	}
+	start := sync.OnceFunc(func() {
+		startForwards()
+		d.syncMerchantKeys()
+	})
 	switch action {
 	case "run":
 		switch target {
@@ -132,7 +136,7 @@ func executeContext(ctx context.Context, args []string) (err error) {
 				require(d.env("ledger")["AIPAY_ENVIRONMENT"] == "development", target+" requires AIPAY_ENVIRONMENT=development for ledger")
 			}
 			if target == a144NotSent || target == a144NotFound || isA145Scenario(target) || target == kQueryTransient || target == kLedgerCancelEvent || target == disputeReturn || isDisputePaidScenario(target) {
-				d.checkA144Environment(target)
+				d.checkA144Environment(target, startForwards)
 			}
 			if localCapability(target) {
 				d.requireNative(target + "（重复回执或 ledger 本机控制）")

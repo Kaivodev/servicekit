@@ -1,13 +1,98 @@
 package main
 
 import (
+	"io"
 	"maps"
+	"net/http"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestPaidDisputePreflight(t *testing.T) {
+	const config = `{"environment":"test","control_token":"test-token"}`
+	const configPath = "inputs/upstream-sim/config.json"
+	for _, target := range []string{"native", "k8s"} {
+		for _, scenario := range []string{disputePaidRelease, disputePaidRefund, disputePaidRace} {
+			t.Run(target+"/"+scenario, func(t *testing.T) {
+				root := t.TempDir()
+				d := newDriver(root, "", scenario)
+				compose := filepath.Join(root, "stack.env")
+				check(atomic(compose, nil))
+
+				forwarded, probes := false, 0
+				account := "epay-demo"
+				if scenario == disputePaidRefund {
+					account = "md5-demo"
+				}
+				next := "{}"
+				client := localHTTP
+				t.Cleanup(func() { localHTTP = client })
+				localHTTP = &http.Client{Transport: startWebhook(func(r *http.Request) (*http.Response, error) {
+					if target == "k8s" && !forwarded {
+						t.Fatal("probed the simulator before starting port-forwards")
+					}
+					wantURL := d.addresses().sim + "/__test/accounts/" + account + "/next-create"
+					if r.Method != http.MethodGet || r.URL.String() != wantURL || r.Header.Get("Authorization") != "Bearer test-token" {
+						t.Fatal("expected an authenticated probe of the scenario account")
+					}
+					probes++
+					return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(next))}, nil
+				})}
+				probe := func() { d.checkA144Environment(scenario, func() { forwarded = true }) }
+				refuses := func(reason string) {
+					t.Helper()
+					if got := failureText(probe); !strings.Contains(got, reason) {
+						t.Fatalf("expected %q, got %q", reason, got)
+					}
+				}
+				if target == "native" {
+					refuses("Compose")
+					check(os.Remove(compose))
+					check(atomic(filepath.Join(root, "env/payment.env"), []byte("AIPAY_UPSTREAM_GATEWAY_ADDRESS=trade")))
+					check(atomic(filepath.Join(root, "env/reconciliation.env"), []byte("AIPAY_RECONCILIATION_UPSTREAM_GATEWAY_ADDRESS=verify")))
+					check(atomic(filepath.Join(root, configPath), []byte(config)))
+					if scenario == disputePaidRace {
+						refuses("deposits enabled for ledger-matches pause")
+						check(atomic(filepath.Join(root, "deposits.enabled"), nil))
+					}
+				} else {
+					k := fakeKube(t)
+					d.demoEnvironment = k
+					if scenario == disputePaidRace {
+						refuses("requires the native ledger-matches pause control")
+						if forwarded {
+							t.Fatal("started forwarding for a native-only control")
+						}
+						return
+					}
+					k.configs["payment"] = map[string]string{"AIPAY_UPSTREAM_GATEWAY_ADDRESS": "trade"}
+					k.configs["reconciliation"] = map[string]string{}
+					refuses("reconciliation-config")
+					k.configs["reconciliation"]["AIPAY_RECONCILIATION_UPSTREAM_GATEWAY_ADDRESS"] = "verify"
+					for _, invalid := range []string{`{"environment":"development","control_token":"test-token"}`, `{"environment":"test"}`} {
+						k.materials[configPath] = []byte(invalid)
+						refuses("control token")
+					}
+					k.materials[configPath] = []byte(config)
+				}
+				if forwarded {
+					t.Fatal("started forwarding before checking prerequisites")
+				}
+
+				probe()
+				next = `{"create_fault":"lost"}`
+				refuses("pending create fault")
+				if probes != 2 {
+					t.Fatalf("expected a fresh probe for each preflight, got %d", probes)
+				}
+			})
+		}
+	}
+}
 
 func TestPaidDisputePlansBeforeSetup(t *testing.T) {
 	t.Setenv("AIPAY_DEMO_TARGET", "native")

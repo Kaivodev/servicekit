@@ -21,11 +21,17 @@ func isPaymentDevCommand(service string, args []string) bool {
 	return service == "payment" && len(args) >= 2 && args[0] == "dev" && (args[1] == "backdate-create" || args[1] == "archive-work")
 }
 
-func (d *driver) checkA144Environment(scenario string) {
+func (d *driver) checkA144Environment(scenario string, startForwards func()) {
 	d.liveStep("本机网关与模拟器控制接口", func() {
-		d.requireNative(scenario)
-		_, err := os.Stat(filepath.Join(d.root, "stack.env"))
-		require(os.IsNotExist(err), scenario+" 仅支持本机进程栈，请检查状态目录是否属于 Compose")
+		switch {
+		case d.native():
+			_, err := os.Stat(filepath.Join(d.root, "stack.env"))
+			require(os.IsNotExist(err), scenario+" 仅支持本机进程栈，请检查状态目录是否属于 Compose")
+		case scenario == disputePaidRace:
+			stop("%s requires the native ledger-matches pause control", scenario)
+		case scenario != disputePaidRelease && scenario != disputePaidRefund:
+			d.requireNative(scenario)
+		}
 		require(d.gatewayMode() && d.env("reconciliation")["AIPAY_RECONCILIATION_UPSTREAM_GATEWAY_ADDRESS"] != "", scenario+" 需要交易与核验网关")
 		if scenario == a144NotFound || scenario == kLedgerCancelEvent || scenario == disputeReturn || isA145Scenario(scenario) && scenario != a145NeverSent {
 			require(d.env("payment")["AIPAY_ENVIRONMENT"] == "development", scenario+" requires AIPAY_ENVIRONMENT=development for payment dev commands")
@@ -46,6 +52,7 @@ func (d *driver) checkA144Environment(scenario string) {
 			return
 		}
 		// Exercise the authenticated control path before any publication or fault.
+		startForwards()
 		var next object
 		_, channel := scenarioOrder(scenario, true)
 		decode(d.sim("GET", "/__test/accounts/"+simulatorAccount(channel)+"/next-create", nil), &next)
