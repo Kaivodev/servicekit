@@ -1,5 +1,6 @@
 """Offline orchestration tests. Generated development secrets stay in memory."""
 from datetime import datetime, timedelta, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -245,9 +246,82 @@ class Configuration(unittest.TestCase):
                 self.assertFalse(root.exists())
                 self.assertFalse(root.parent.exists())
 
+    def test_portal_env_files_match_original_defaults(self):
+        # Digests from 8231ab9 cover every filename and byte, including key order.
+        # Fix the volatile env inputs and substitute the temporary state path.
+        for compose, expected in (
+            (False, "ee6dc0f427794a689598eb81f2dcf8e3bfa192a4ea387a4207e51bb4f0f82fa6"),
+            (True, "3e42c3fadb3e303b1c81244e5f722889271d74b63394af1b60314997433e5524"),
+        ):
+            with self.subTest(compose=compose), tempfile.TemporaryDirectory() as tmp, \
+                 patch.dict(os.environ, {}, clear=True), patch.object(cfg, "generate_inputs"), \
+                 patch.object(cfg, "ensure_report_key"), patch("verify.verify"), \
+                 patch.object(cfg.uuid, "uuid4", return_value=uuid.UUID(int=1)), \
+                 patch.object(cfg.secrets, "token_hex", return_value="test-password"), \
+                 patch.object(cfg.secrets, "token_urlsafe", return_value="test-token"), \
+                 patch.object(cfg.secrets, "token_bytes", side_effect=bytes), patch.object(cfg, "datetime") as clock:
+                root = Path(tmp) / "state"
+                clock.now.return_value = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+                def directories(*args):
+                    for name in ("env", "inputs", "logs"):
+                        (root / name).mkdir()
+
+                cfg.generate_inputs.side_effect = directories
+                cfg.prepare(root, "postgresql://admin@localhost/postgres", "redis://localhost",
+                            "redis://queue:6379", compose)
+                digest = hashlib.sha256()
+                for path in sorted((root / "env").iterdir()):
+                    digest.update(path.name.encode() + b"\0" + path.read_bytes().replace(os.fsencode(root), b"STATE") + b"\0")
+                self.assertEqual(digest.hexdigest(), expected)
+
+    def test_portal_origins(self):
+        platform, seller = "AIPAY_DEV_PLATFORM_ORIGIN", "AIPAY_DEV_SELLER_ORIGIN"
+        defaults = ("https://admin.aipay.test", "https://seller.aipay.test")
+        custom = "https://" + "a" * 63 + ".web-9.demo"
+        self.assertEqual(cfg.dev_portal_origins({}), defaults)
+        self.assertEqual(cfg.dev_portal_origins({platform: "", seller: ""}), defaults)
+        self.assertEqual(cfg.dev_portal_origins({platform: custom}), (custom, defaults[1]))
+        self.assertEqual(cfg.dev_portal_origins({seller: custom}), (defaults[0], custom))
+        with self.assertRaisesRegex(ValueError, f"{platform}.*{seller}"):
+            cfg.dev_portal_origins({platform: defaults[1]})
+
+        for key in (platform, seller):
+            for value in ("http://a.b", "HTTPS://a.b", "https://A.b", "https://local", "https://a.b:443",
+                          "https://a.b/", "https://a.b?", "https://a.b#", "https://u@a.b", "https://a.b.",
+                          "https://*.b", "https://-a.b", "https://a.b-", "https://a..b", "https://a_b.c",
+                          "https://a.b\n", "https://é.test", "https://127.0.0.1", "https://127.1", "https://0x7f.0x1",
+                          "https://" + "a" * 64 + ".b", "https://" + ".".join(["a" * 63] * 4)):
+                with self.subTest(key=key, value=value), tempfile.TemporaryDirectory() as tmp, \
+                     patch.dict(os.environ, {key: value}):
+                    with self.assertRaisesRegex(ValueError, key):
+                        cfg.prepare(Path(tmp) / "parent" / "state", "", "", "")
+                    self.assertFalse((Path(tmp) / "parent").exists())
+
+    def test_demo_invite_cli(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.object(stack, "ROOT", Path(tmp)), patch("os.umask"):
+            (Path(tmp) / "prepared").touch()
+            for args in (["invite", "platform", "p@demo.test", "risk", "finance"],
+                         ["invite", "seller", "s@demo.test"], ["setup"], ["setup", "iam"],
+                         ["serve"], ["run", "main", "-o", "report.md"]):
+                with self.subTest(args=args), patch.object(sys, "argv", ["stack.py", "demo", *args]), \
+                     patch("os.execve", side_effect=SystemExit) as execute:
+                    with self.assertRaises(SystemExit):
+                        stack.main()
+                    self.assertEqual(execute.call_args.args[1][3:], args)
+            for args in (["invite", "seller", "s@demo.test", "extra"], ["invite", "platform", "p@demo.test"],
+                         ["invite", "platform", "p@demo.test", "risk", "-o", "out"], ["setup", "-o", "out"]):
+                with self.subTest(args=args), patch.object(sys, "argv", ["stack.py", "demo", *args]), \
+                     patch("sys.stderr"), self.assertRaises(SystemExit) as error:
+                    stack.main()
+                self.assertEqual(error.exception.code, 2)
+
     def test_profiles(self):
         for compose, cert_days in ((False, None), (True, ""), (False, "30"), (True, "30")):
             with self.subTest(compose=compose, cert_days=cert_days), tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ):
+                platform, seller = ("https://admin.demo.test", "https://portal.demo.test") if cert_days == "30" else (
+                    "https://admin.aipay.test", "https://seller.aipay.test")
+                os.environ.update(AIPAY_DEV_PLATFORM_ORIGIN=platform, AIPAY_DEV_SELLER_ORIGIN=seller)
                 if cert_days is None:
                     os.environ.pop("AIPAY_DEV_CERT_DAYS", None)
                 else:
@@ -291,6 +365,13 @@ class Configuration(unittest.TestCase):
                 envs = {name: dict(line.split("=", 1) for line in files[root / "env" / (name + ".env")].splitlines())
                         for name in cfg.SERVICES}
                 self.assertTrue(all(env["AIPAY_LOG_OUTPUT"] == "file" for env in envs.values()))
+                self.assertEqual(envs["backend"]["AIPAY_PLATFORM_ORIGIN"], platform)
+                self.assertEqual(envs["backend"]["AIPAY_SELLER_ORIGIN"], seller)
+                for prefix in ("IAM_WEBAUTHN", "LEDGER_APPROVAL", "PAYMENT_APPROVAL",
+                               "RECONCILIATION_ADMIN", "RECONCILIATION_WEBAUTHN"):
+                    env = envs[prefix.split("_")[0].lower()]
+                    self.assertEqual(env[f"AIPAY_{prefix}_RP_ID"], platform.removeprefix("https://"))
+                    self.assertEqual(env[f"AIPAY_{prefix}_ORIGINS"], platform)
                 self.assert_demo_settings(envs, root, compose)
                 issuer = files[root / "env/iam-sellers.env"]
                 owner = files[root / "env/iam-migrate.env"].removeprefix("AIPAY_DATABASE_URL=")

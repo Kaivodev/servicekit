@@ -26,6 +26,7 @@ func TestRound11ScenarioReports(t *testing.T) {
 	for _, name := range []string{"seller-offline", "archived-work", "bot-notices", "statement"} {
 		t.Run(name, func(t *testing.T) {
 			root := t.TempDir()
+			check(atomic(filepath.Join(root, "env/backend.env"), nil))
 			out := filepath.Join(root, "report.md")
 			err := execute([]string{root, "", "run", name, "-o", out})
 			if err == nil || !strings.Contains(err.Error(), "seller-account") {
@@ -67,6 +68,7 @@ func TestPortalReauthenticationHeaders(t *testing.T) {
 	for _, name := range []string{"seller", "sre"} {
 		t.Run(name, func(t *testing.T) {
 			d := newDriver(t.TempDir(), "", "grant-test")
+			d.origins = readPortalOrigins(map[string]string{"AIPAY_PLATFORM_ORIGIN": "https://admin.custom.test"})
 			d.put("user/"+name, "actor")
 			d.put("session-until/"+name, time.Now().Add(time.Minute))
 			d.put("seller-account", "account")
@@ -102,7 +104,7 @@ func TestPortalReauthenticationHeaders(t *testing.T) {
 					begun = true
 					reply = object{"challenge_id": "private-challenge", "challenge_purpose": "reauthentication"}
 				case "/auth/challenges/private-challenge":
-					reply = object{"options_json": b64.EncodeToString(encoded(object{"rpId": rp, "challenge": b64.EncodeToString([]byte("challenge"))}))}
+					reply = object{"options_json": b64.EncodeToString(encoded(object{"rpId": d.origins.rpID(), "challenge": b64.EncodeToString([]byte("challenge"))}))}
 				case "/auth/challenges/private-challenge/verify":
 					if !begun || (name == "sre" && body["assertion"] == nil) || (name == "seller" && body["method"] != "totp") {
 						t.Error("missing recent MFA")

@@ -260,21 +260,28 @@ def main():
         sub.add_parser(action)
     sub.add_parser("ledger-matches").add_argument("mode", choices=("pause", "resume"))
     sub.add_parser("ledger-reader").add_argument("mode", choices=("on", "off"))
-    demo = sub.add_parser("demo")
-    demo.add_argument("command", choices=("serve", "setup", "run"))
-    demo.add_argument("target", nargs="?", help="setup phase or scenario, including ledger-read-only-exit, ledger-carryover, ledger-adjustment and ledger-approvals-inbox")
-    demo.add_argument("-o", dest="report", metavar="FILE")
+    demo = sub.add_parser("demo").add_subparsers(dest="command", required=True)
+    demo.add_parser("serve")
+    demo.add_parser("setup").add_argument("target", nargs="?", help="setup phase")
+    run = demo.add_parser("run")
+    run.add_argument("target", help="demo scenario")
+    run.add_argument("-o", dest="report", metavar="FILE")
+    invite = demo.add_parser("invite").add_subparsers(dest="kind", required=True)
+    platform = invite.add_parser("platform")
+    platform.add_argument("email")
+    platform.add_argument("roles", nargs="+", metavar="ROLE")
+    invite.add_parser("seller").add_argument("email")
     args = parser.parse_args()
     if args.action == "demo":
         # A demo may invoke controller commands. Never take controller.lock here.
         if not (ROOT / "prepared").is_file():
             raise ValueError("run prepare first")
         cmd = [str(ROOT / "bin/kaivo-demo"), str(ROOT), str(LIBRARY), args.command]
-        if args.target:
+        if args.command == "invite":
+            cmd.extend([args.kind, args.email, *getattr(args, "roles", [])])
+        elif getattr(args, "target", None):
             cmd.append(args.target)
-        if args.report is not None:
-            if args.command != "run" or not args.target:
-                parser.error("-o requires demo run SCENARIO")
+        if args.command == "run" and args.report is not None:
             cmd.extend(["-o", args.report])
         os.execve(cmd[0], cmd, os.environ | {"GOWORK": "off"})
     if args.action == "prepare":

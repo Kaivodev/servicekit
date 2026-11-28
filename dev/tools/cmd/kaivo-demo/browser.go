@@ -29,9 +29,9 @@ func (d *driver) browser(name string) *browser {
 	if b := d.browsers[name]; b != nil {
 		return b
 	}
-	b := &browser{d: d, name: name, origin: adminOrigin, addr: d.addresses().admin, prefix: "/api/v1/platform", cookies: map[string]string{}}
+	b := &browser{d: d, name: name, origin: d.origins.platform, addr: d.addresses().admin, prefix: "/api/v1/platform", cookies: map[string]string{}}
 	if name == "seller" {
-		b.origin = "https://seller.aipay.test"
+		b.origin = d.origins.seller
 		b.addr = d.addresses().seller
 		b.prefix = "/api/v1/seller"
 	}
@@ -215,7 +215,7 @@ func (b *browser) portalAPI(method, path, key string, body object, grant string,
 	if postReleaseEntry && (code == 404 || code == 405 || code == 501) {
 		stop("已放币争议登记缺入口：POST %s 返回 HTTP %d", label, code)
 	}
-	if b.d.liveEPay {
+	if b.d.liveEPay || b.d.scope == "invite" {
 		// A malformed envelope or backend diagnostic may echo a submitted value.
 		require(decodeJSON(out, &env) == nil, "invalid portal response")
 	} else {
@@ -239,7 +239,7 @@ func (b *browser) portalAPI(method, path, key string, body object, grant string,
 			delete(b.d.data, "session-until/"+b.name)
 			b.d.save()
 		}
-		if b.d.liveEPay {
+		if b.d.liveEPay || b.d.scope == "invite" {
 			stop("%s %s → HTTP %d, backend code %d", method, label, code, env.Code)
 		}
 		panic(failure{reason: fmt.Sprintf("%s %s → HTTP %d, backend code %d (%s)", method, label, code, env.Code, env.Message), method: method, path: path, httpStatus: code, businessCode: env.Code, message: env.Message})
@@ -385,7 +385,7 @@ func (d *driver) login(name string) {
 			b.post("/me/mfa/totp/confirm", object{"enrollment_id": str(o, "enrollment_id"), "code": d.freshTOTP(name)})
 		} else {
 			o := b.post("/me/webauthn/enrollments", object{"name": "demo-" + name})
-			att := d.credential(name).register(options(str(o, "options_json")))
+			att := d.credential(name).register(d.origins, options(str(o, "options_json")))
 			b.post("/me/webauthn/enrollments/"+str(o, "registration_id")+"/confirm", att)
 		}
 		r = login()
@@ -425,7 +425,7 @@ func (b *browser) verifyMFA(r object) object {
 		answer = object{"method": "totp", "code": d.freshTOTP(name)}
 	} else {
 		opt := options(str(o, "options_json"))
-		require(str(opt, "rpId") == rp, "login RP mismatch")
+		require(str(opt, "rpId") == d.origins.rpID(), "login RP mismatch")
 		if allowed, ok := opt["allowCredentials"].([]any); ok && len(allowed) > 0 {
 			offered := false
 			for _, entry := range allowed {
@@ -445,17 +445,25 @@ type iamMail struct{ To, Subject, Body string }
 
 func matchesMail(b []byte, recipient, subject string) bool {
 	var m iamMail
-	decode(b, &m)
+	require(decodeJSON(b, &m) == nil, "invalid IAM security mail")
 	return m.To == recipient && m.Subject == subject
 }
-func (d *driver) mail(name, subject string) string {
+func (d *driver) mail(recipient, subject string) string {
+	return d.waitForMail(recipient, func() []byte { return d.mailBody(recipient, subject) })
+}
+
+func (d *driver) waitForMail(recipient string, read func() []byte) string {
 	var body []byte
-	d.waitFor("IAM mail for "+name, 90*time.Second, func() bool {
-		body = d.mailBody(d.email(name), subject)
+	d.waitFor("IAM mail for "+recipient, 90*time.Second, func() bool {
+		body = read()
 		return body != nil
 	})
+	return mailToken(body)
+}
+
+func mailToken(body []byte) string {
 	var m iamMail
-	decode(body, &m)
+	require(decodeJSON(body, &m) == nil, "invalid IAM security mail")
 	_, s, ok := strings.Cut(m.Body, "：")
 	require(ok && len(raw(s)) == 32, "unexpected IAM security mail")
 	return s

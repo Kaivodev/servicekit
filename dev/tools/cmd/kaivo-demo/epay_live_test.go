@@ -83,6 +83,7 @@ func TestLiveEntryPoints(t *testing.T) {
 	t.Setenv(liveFileEnv, "")
 	t.Setenv("AIPAY_DEMO_TARGET", "native")
 	root := t.TempDir()
+	check(atomic(filepath.Join(root, "env/backend.env"), nil))
 	d := newDriver(root, "", "setup")
 	for _, action := range []string{"setup", "run"} {
 		err := execute([]string{root, root, action, livePhase})
@@ -379,6 +380,7 @@ func TestLiveMerchantCreate(t *testing.T) {
 func TestLiveDisable(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("AIPAY_DEMO_TARGET", "native")
+	check(atomic(filepath.Join(root, "env/backend.env"), nil))
 	t.Setenv(liveFileEnv, "")
 	check(atomic(filepath.Join(root, "env/payment.env"), []byte("AIPAY_UPSTREAM_GATEWAY_ADDRESS=test\n")))
 	if err := execute([]string{root, root, "setup", liveOffPhase}); err == nil || !strings.Contains(err.Error(), "missing setup result uuid/channel/") {

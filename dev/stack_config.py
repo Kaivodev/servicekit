@@ -30,8 +30,6 @@ PEERS = {"iam": "backend,payment,settlement", "ledger": "backend,payment,reconci
          "payment": "backend,ledger,reconciliation,notifier", "reconciliation": "backend,ledger,settlement",
          "settlement": "backend"}
 GATEWAYS = {"upstream-gateway-trade": "payment", "upstream-gateway-verification": "reconciliation"}
-RP = "admin.aipay.test"
-ORIGIN = "https://" + RP
 LEDGER_RATE_FILE_LIMIT = 64 << 10  # ledger/internal/fx/devfile.go
 
 
@@ -225,6 +223,26 @@ def dev_cert_days(environ=os.environ):
     if not re.fullmatch(r"[1-9]|[12][0-9]|30", value):
         raise ValueError("AIPAY_DEV_CERT_DAYS must be a whole number of days from 1 to 30")
     return int(value)
+
+
+def dev_portal_origins(environ=os.environ):
+    label = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+
+    def origin(variable, default):
+        value = environ.get(variable) or default
+        host = value.removeprefix("https://")
+        if host == value or len(host) > 253 or not re.fullmatch(rf"{label}(?:\.{label})+", host):
+            raise ValueError(f"{variable} must be a canonical HTTPS origin with a lowercase DNS hostname")
+        # URL parsers treat a numeric final label as IPv4, including short and hex forms.
+        if re.fullmatch(r"[0-9]+|0x[0-9a-f]*", host.rsplit(".", 1)[1]):
+            raise ValueError(f"{variable} requires a DNS hostname")
+        return value
+
+    platform = origin("AIPAY_DEV_PLATFORM_ORIGIN", "https://admin.aipay.test")
+    seller = origin("AIPAY_DEV_SELLER_ORIGIN", "https://seller.aipay.test")
+    if platform == seller:
+        raise ValueError("AIPAY_DEV_PLATFORM_ORIGIN and AIPAY_DEV_SELLER_ORIGIN must have different hosts")
+    return platform, seller
 
 
 def generate_inputs(root, sim_listen, cert_days=None):
@@ -525,6 +543,8 @@ def upgrade_demo(root, compose=False):
 def prepare(root, admin, cache, queue, compose=False):
     """Callers supply only the fixed stack directory, and set umask 077."""
     cert_days = dev_cert_days()
+    platform_origin, seller_origin = dev_portal_origins()
+    rp_id = platform_origin.removeprefix("https://")
     root.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     root.mkdir(mode=0o700)  # Exclusive and outside all repositories.
     try:
@@ -587,13 +607,13 @@ def prepare(root, admin, cache, queue, compose=False):
                               IAM_EMAIL_DIRECTORY=data / "mail", IAM_ROUTES_FILE=inputs / "routes.json",
                               IAM_EPAY_SIGNER="local", IAM_EPAY_SIGNER_FILE=inputs / "epay.der", IAM_EPAY_SIGNER_KEY_ID="epay-dev",
                               IAM_EPAY_SIGNER_VALID_FROM=stamp(datetime.now(timezone.utc)), IAM_EPAY_SEALER="local",
-                              IAM_EPAY_SEALER_FILE=inputs / "sealer.key", IAM_WEBAUTHN_RP_ID=RP, IAM_WEBAUTHN_ORIGINS=ORIGIN)
+                              IAM_EPAY_SEALER_FILE=inputs / "sealer.key", IAM_WEBAUTHN_RP_ID=rp_id, IAM_WEBAUTHN_ORIGINS=platform_origin)
             elif svc == "ledger":
                 values.update(LEDGER_JOBS="on", LEDGER_CHECKPOINT_KEY_ID="ledger-dev", LEDGER_ANCHOR_DIR=data / "anchors",
                               LEDGER_DEV_USD_RATES_FILE=inputs / "usd-rates.json",
                               LEDGER_PAYMENT_EVENTS="on", LEDGER_PAYMENT_ADDR=address("payment", compose),
                               LEDGER_PAYMENT_SERVER_NAME="payment", LEDGER_PAYMENT_JWKS_FILE=public / "payment.jwks",
-                              LEDGER_APPROVAL_RP_ID=RP, LEDGER_APPROVAL_ORIGINS=ORIGIN, LEDGER_DEPOSITS="off",
+                              LEDGER_APPROVAL_RP_ID=rp_id, LEDGER_APPROVAL_ORIGINS=platform_origin, LEDGER_DEPOSITS="off",
                               LEDGER_COLLECTION_ADDR=("collection:9106" if compose else "127.0.0.1:9106"), LEDGER_COLLECTION_SERVER_NAME="collection",
                               LEDGER_COLLECTION_JWKS_FILE=public / "collection.jwks", LEDGER_RECONCILIATION_ADDR=address("reconciliation", compose),
                               LEDGER_RECONCILIATION_SERVER_NAME="reconciliation", LEDGER_RECONCILIATION_JWKS_FILE=public / "reconciliation.jwks")
@@ -601,7 +621,7 @@ def prepare(root, admin, cache, queue, compose=False):
                 values.update(RPC_MAX_MESSAGE_BYTES="16777216", IAM_RPC_ADDRESS=address("iam", compose),
                               IAM_EVENT_KEYS_FILE=public / "iam.jwks",
                               PAYMENT_DISPATCHER_ENABLED="true", PAYMENT_WORKER_ENABLED="true",
-                              PAYMENT_APPROVAL_RP_ID=RP, PAYMENT_APPROVAL_ORIGINS=ORIGIN, PAYMENT_DEV_RATE_FILE=inputs / "rate.json",
+                              PAYMENT_APPROVAL_RP_ID=rp_id, PAYMENT_APPROVAL_ORIGINS=platform_origin, PAYMENT_DEV_RATE_FILE=inputs / "rate.json",
                               PAYMENT_DEV_SELLER_REVIEWS_FILE=inputs / "seller-reviews.json", PAYMENT_DEV_RATE_MAX_AGE="10m", PLUGIN_ENABLED="true",
                               PLUGIN_TEST_ONLY_ALLOW_HTTP="true",
                               PLUGIN_CALLBACK_URL=f"http://{address('backend', compose)}/callback/{{channel_code}}",
@@ -621,8 +641,8 @@ def prepare(root, admin, cache, queue, compose=False):
                               RECONCILIATION_COVERAGE_DEVELOPMENT_FILE=inputs / "coverage.json",
                               RECONCILIATION_VERIFICATION="on", RECONCILIATION_LATE_PAYMENT_WINDOW="5s",
                               RECONCILIATION_ADMIN="on", RECONCILIATION_ADMIN_PAYMENT_ADDRESS=address("payment", compose),
-                              RECONCILIATION_ADMIN_RP_ID=RP, RECONCILIATION_ADMIN_ORIGINS=ORIGIN,
-                              RECONCILIATION_DISPUTE_REGISTRY="on", RECONCILIATION_WEBAUTHN_RP_ID=RP, RECONCILIATION_WEBAUTHN_ORIGINS=ORIGIN,
+                              RECONCILIATION_ADMIN_RP_ID=rp_id, RECONCILIATION_ADMIN_ORIGINS=platform_origin,
+                              RECONCILIATION_DISPUTE_REGISTRY="on", RECONCILIATION_WEBAUTHN_RP_ID=rp_id, RECONCILIATION_WEBAUTHN_ORIGINS=platform_origin,
                               RECONCILIATION_PLUGIN_CHANNELS='{"sim_form_md5_verify":"sim_form_md5","epay_v1_verify":"epay_v1"}', RECON_DEPOSITS="off",
                               RECON_COLLECTION_ADDR="collection:9106" if compose else "127.0.0.1:9106",
                               RECON_COLLECTION_SERVER_NAME="collection", RECON_COLLECTION_JWKS_FILE=public / "collection.jwks")
@@ -631,7 +651,7 @@ def prepare(root, admin, cache, queue, compose=False):
                               IAM_GRPC_ADDR=address("iam", compose), PAYMENT_GRPC_ADDR=address("payment", compose),
                               RECONCILIATION_GRPC_ADDR=address("reconciliation", compose), HTTP_MAX_BODY_BYTES="23068672",
                               TELEGRAM_MONITOR_INTERVAL="2s", TELEGRAM_KEY_MESSAGE_TTL="10s",
-                              LEDGER_GRPC_ADDR=address("ledger", compose), PLATFORM_ORIGIN=ORIGIN, SELLER_ORIGIN="https://seller.aipay.test",
+                              LEDGER_GRPC_ADDR=address("ledger", compose), PLATFORM_ORIGIN=platform_origin, SELLER_ORIGIN=seller_origin,
                               PORTAL_COOKIE_KEY=secrets.token_urlsafe(32), EPAY_V2_LOCAL_RSA_FILE=inputs / "epay.der",
                               TOTP_ENROLLMENT_ORIGIN="https://merchant.aipay.test", TELEGRAM_ENABLED="true",
                               TELEGRAM_WEBHOOK_URL="https://merchant.aipay.test/telegram/webhook", TELEGRAM_BOT_TOKEN_FILE=inputs / "bot-token",

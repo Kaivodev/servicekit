@@ -21,6 +21,34 @@ import (
 	wa "github.com/go-webauthn/webauthn/webauthn"
 )
 
+func newDriver(root, repo, scope string) *driver {
+	d := driverAt(root, repo, scope, filepath.Join(root, "demo"))
+	d.origins = readPortalOrigins(nil)
+	return d
+}
+
+func TestReportOutputArguments(t *testing.T) {
+	t.Setenv("AIPAY_DEMO_TARGET", "native")
+	for _, command := range [][]string{{"setup"}, {"setup", "seller"}, {"run", "main"}} {
+		t.Run(strings.Join(command, "-"), func(t *testing.T) {
+			root := t.TempDir()
+			out := filepath.Join(root, "custom-report.json")
+			args := append([]string{root, "."}, command...)
+			// The empty stack stops at the first prerequisite, after parsing and
+			// writing the report, without any service requests.
+			err := execute(append(args, "-o", out))
+			if err == nil || !strings.Contains(err.Error(), "backend.env") {
+				t.Fatalf("expected the backend configuration prerequisite, got %v", err)
+			}
+			var r report
+			decode(file(out), &r)
+			if len(r.Steps) != 1 || r.Steps[0].Status != "failed" {
+				t.Fatal("missing prerequisite failure in requested report")
+			}
+		})
+	}
+}
+
 type user []wa.Credential
 
 func (user) WebAuthnID() []byte                     { return []byte("test-user") }
@@ -29,6 +57,9 @@ func (user) WebAuthnDisplayName() string            { return "test user" }
 func (u user) WebAuthnCredentials() []wa.Credential { return u }
 func TestWebAuthn(t *testing.T) {
 	d := newDriver(t.TempDir(), "", "setup")
+	const rp, adminOrigin = "admin.demo.test", "https://admin.demo.test"
+	env := map[string]string{"AIPAY_PLATFORM_ORIGIN": adminOrigin}
+	d.origins = readPortalOrigins(env)
 	a := d.credential("alice")
 	b := d.credential("bob")
 	if bytes.Equal(a.cose(), b.cose()) || bytes.Equal(a.ID, b.ID) {
@@ -43,7 +74,7 @@ func TestWebAuthn(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	att := a.register(options(b64.EncodeToString(encoded(creation.Response))))
+	att := a.register(d.origins, options(b64.EncodeToString(encoded(creation.Response))))
 	outer := object{"id": att["credential_id"], "rawId": att["credential_id"], "type": "public-key", "response": object{"attestationObject": att["attestation_object"], "clientDataJSON": att["client_data_json"], "transports": []string{"internal"}}}
 	parsed, e := protocol.ParseCredentialCreationResponseBytes(encoded(outer))
 	if e != nil {
@@ -56,6 +87,7 @@ func TestWebAuthn(t *testing.T) {
 	u = append(u, *cred)
 	for counter := 1; counter <= 2; counter++ {
 		d = newDriver(d.root, "", "setup")
+		d.origins = readPortalOrigins(env)
 		opt, s, e := provider.BeginLogin(u)
 		if e != nil {
 			t.Fatal(e)
@@ -259,7 +291,7 @@ else:
 	path := filepath.Join(d.dir, "declarations/seller.json")
 	for i := 0; i < 2; i++ {
 		d = newDriver(root, "", "setup")
-		d.liveStep("卖方开通登记", func() { d.activateSeller(account, user, email) })
+		d.liveStep("卖方开通登记", func() { d.activateSeller("seller", account, user, email, setupSellerReason) })
 		if !bytes.Equal(file(path), encoded(want)) {
 			t.Fatal("persisted seller declaration changed")
 		}
@@ -413,7 +445,7 @@ func TestBrowserOriginCookieRotation(t *testing.T) {
 	d := newDriver(t.TempDir(), "", "setup")
 	b := d.browser("admin1")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Host != rp {
+		if r.Host != "admin.aipay.test" {
 			t.Error("unexpected host")
 		}
 		if r.Method == "GET" {
@@ -422,7 +454,7 @@ func TestBrowserOriginCookieRotation(t *testing.T) {
 			return
 		}
 		c, e := r.Cookie("__Host-csrf")
-		if e != nil || c.Value != "nonce" || r.Header.Get("Origin") != adminOrigin || r.Header.Get("X-CSRF-Token") != "bound" || r.Header.Get("Idempotency-Key") != "stable" {
+		if e != nil || c.Value != "nonce" || r.Header.Get("Origin") != "https://admin.aipay.test" || r.Header.Get("X-CSRF-Token") != "bound" || r.Header.Get("Idempotency-Key") != "stable" {
 			t.Error("browser context mismatch")
 		}
 		http.SetCookie(w, &http.Cookie{Name: "__Host-session", Value: "result", Path: "/", Secure: true, HttpOnly: true})

@@ -116,6 +116,7 @@ type driver struct {
 	ctx context.Context
 	demoEnvironment
 	root, repo, dir, scope string
+	origins                portalOrigins
 	output                 string
 	liveEPay               bool
 	data                   map[string]json.RawMessage
@@ -166,7 +167,11 @@ func (d *driver) traceForward(line string) {
 	d.trace(line)
 }
 
-func (d *driver) evidence(k string, v any) { d.active.Evidence[k] = v }
+func (d *driver) evidence(k string, v any) {
+	if d.active != nil {
+		d.active.Evidence[k] = v
+	}
+}
 func (d *driver) report() {
 	out := filepath.Join(d.dir, "reports", d.history.Scenario)
 	reportJSON := func(v any) []byte {
@@ -340,9 +345,6 @@ func pollUntil(pause func(time.Duration), limit time.Duration, f func() bool) bo
 		}
 		pause(400 * time.Millisecond)
 	}
-}
-func newDriver(root, repo, scope string) *driver {
-	return driverAt(root, repo, scope, filepath.Join(root, "demo"))
 }
 func driverAt(root, repo, scope, dir string) *driver {
 	d := &driver{ctx: context.Background(), root: root, repo: repo, dir: dir, scope: scope, data: map[string]json.RawMessage{}, browsers: map[string]*browser{}, history: report{Scenario: scope, Started: time.Now().UTC().Format(time.RFC3339), Logs: filepath.Join(root, "logs")}}

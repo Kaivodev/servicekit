@@ -33,7 +33,9 @@ func (d *driver) identities() {
 	for _, n := range []string{"admin1", "admin2"} {
 		d.step("IAM "+n, func() {
 			b := d.browser(n)
-			b.write("reset/"+n, "/auth/password/reset", func() object { return object{"token": d.mail(n, "重置密码"), "new_password": d.password(n)} })
+			b.write("reset/"+n, "/auth/password/reset", func() object {
+				return object{"token": d.mail(d.email(n), "重置密码"), "new_password": d.password(n)}
+			})
 			d.login(n)
 		})
 	}
@@ -57,33 +59,20 @@ func (d *driver) identities() {
 	}
 }
 func (d *driver) invite(n string, roles ...string) {
-	d.login("admin1")
-	path := "/invitations/platform-staff"
-	body := object{"email": d.email(n), "platform_roles": roles}
+	req := invitationRequest{Kind: "platform", Email: d.email(n), Roles: roles}
 	if n == "seller" {
-		path = "/invitations/sellers"
-		body = object{"email": d.email(n), "seller_account_id": d.required("seller-account")}
+		req.Kind, req.SellerAccountID, req.Roles = "seller", d.required("seller-account"), nil
 	}
-	inv := d.browser("admin1").write("invite/"+n, path, func() object { return body })
-	require(inv["email"] == d.email(n), "invitation recipient mismatch")
-	if n == "seller" {
-		require(inv["seller_account_id"] == d.required("seller-account"), "invitation seller account mismatch")
-	}
-	if slices.Contains(roles, "risk") || slices.Contains(roles, "finance") {
-		require(str(inv, "status") == "pending_approval", "protected invitation requires independent approval")
-	}
-	if str(inv, "status") == "pending_approval" {
-		d.login("admin2")
-		inviter, approver := d.required("user/admin1"), d.required("user/admin2")
-		require(inviter != approver && inv["invited_by"] == inviter, "protected invitation has unexpected inviter")
-		invID := str(inv, "id")
-		inv = d.browser("admin2").write("approve invite/"+n, "/invitations/"+invID+"/approvals", func() object { return object{"expected_version": num(inv, "version")} })
-		require(inv["id"] == invID && inv["approved_by"] == approver, "protected invitation approval mismatch")
-	}
-	require(str(inv, "status") == "pending", "invitation not pending")
+	d.issueInvitation(req, func(admin, path string, body object) object {
+		label := "invite/" + n
+		if admin == "admin2" {
+			label = "approve " + label
+		}
+		return d.browser(admin).write(label, path, func() object { return body })
+	})
 	b := d.browser(n)
 	res := b.write("accept/"+n, "/auth/invitations/accept", func() object {
-		t := d.mail(n, "账户邀请")
+		t := d.mail(d.email(n), invitationSubject)
 		view := b.post("/auth/invitations/inspect", object{"token": t})
 		require(str(view, "email") == d.email(n), "invitation email mismatch")
 		if view["existing_user"] == true {
@@ -106,6 +95,39 @@ func (d *driver) invite(n string, roles ...string) {
 	}
 	d.put("user/"+n, user)
 }
+
+const invitationSubject = "账户邀请"
+
+func (d *driver) issueInvitation(req invitationRequest, submit func(admin, path string, body object) object) (string, string) {
+	d.login("admin1")
+	path := "/invitations/platform-staff"
+	body := object{"email": req.Email, "platform_roles": req.Roles}
+	if req.Kind == "seller" {
+		path = "/invitations/sellers"
+		body = object{"email": req.Email, "seller_account_id": req.SellerAccountID}
+	}
+	inv := submit("admin1", path, body)
+	recipient := str(inv, "email")
+	require(strings.EqualFold(recipient, req.Email), "invitation recipient mismatch")
+	if req.Kind == "seller" {
+		require(inv["seller_account_id"] == req.SellerAccountID, "invitation seller account mismatch")
+	}
+	if slices.Contains(req.Roles, "risk") || slices.Contains(req.Roles, "finance") {
+		require(str(inv, "status") == "pending_approval", "protected invitation requires independent approval")
+	}
+	invID := str(inv, "id")
+	require(canonicalID(invID), "invalid invitation ID")
+	if str(inv, "status") == "pending_approval" {
+		d.login("admin2")
+		inviter, approver := d.required("user/admin1"), d.required("user/admin2")
+		require(inviter != approver && inv["invited_by"] == inviter, "protected invitation has unexpected inviter")
+		inv = submit("admin2", "/invitations/"+invID+"/approvals", object{"expected_version": num(inv, "version")})
+		require(inv["id"] == invID && inv["approved_by"] == approver, "protected invitation approval mismatch")
+	}
+	require(str(inv, "status") == "pending", "invitation not pending")
+	return invID, recipient
+}
+
 func (d *driver) registration() {
 	for _, n := range approvers {
 		d.step("审批登记 "+n, func() {
@@ -115,7 +137,7 @@ func (d *driver) registration() {
 			start, e := time.Parse(time.RFC3339, from)
 			check(e)
 			until := start.Add(7 * 24 * time.Hour).Format(time.RFC3339)
-			p := d.declaration("payment-"+n, object{"approver_id": person, "iam_user_id": user, "credential_id": key.ID, "rp_id": rp, "public_key_cose": key.cose(), "valid_from": from, "valid_until": until})
+			p := d.declaration("payment-"+n, object{"approver_id": person, "iam_user_id": user, "credential_id": key.ID, "rp_id": d.origins.rpID(), "public_key_cose": key.cose(), "valid_from": from, "valid_until": until})
 			var entries []object
 			decode(d.owner("payment", "AIPAY_PAYMENT_APPROVERS_DATABASE_URL", "approvers", "list"), &entries)
 			private, e := x509.ParseECPrivateKey(key.Key)
@@ -137,7 +159,7 @@ func (d *driver) registration() {
 				if registry == "dispute-approvers" {
 					kid = paymentKey
 				}
-				decl := object{"id": kid, "person_id": person, "iam_user_id": user, "credential_id": key.ID, "public_key": key.cose(), "rp_id": rp, "valid_from": from, "valid_until": until, "initial_sign_count": key.Count, "ceremony": "demo-" + n}
+				decl := object{"id": kid, "person_id": person, "iam_user_id": user, "credential_id": key.ID, "public_key": key.cose(), "rp_id": d.origins.rpID(), "valid_from": from, "valid_until": until, "initial_sign_count": key.Count, "ceremony": "demo-" + n}
 				d.registry(registry, kid, decl)
 			}
 			d.evidence("payment_key_id", paymentKey)
@@ -169,7 +191,7 @@ func (d *driver) registerLedgerApprover(n string) {
 	if kid == "" {
 		kid = d.key(n + "/ledger")
 		path := d.declaration("ledger-"+n, object{
-			"id": kid, "approver_id": person, "iam_user_id": user, "ceremony_ref": "demo-" + n, "rp_id": rp,
+			"id": kid, "approver_id": person, "iam_user_id": user, "ceremony_ref": "demo-" + n, "rp_id": d.origins.rpID(),
 			"credential_id": b64.EncodeToString(key.ID), "public_key_cose": b64.EncodeToString(cose),
 		})
 		d.owner("ledger", dbvar, "approvers", "register", path)
@@ -309,6 +331,7 @@ func (d *driver) seller() {
 }
 
 const sellersDatabase = "AIPAY_IAM_SELLERS_DATABASE_URL"
+const setupSellerReason = "演示卖方首次开通上游门户"
 
 func (d *driver) enrollSeller() {
 	const telegramID = merchantUser + 1
@@ -322,28 +345,18 @@ func (d *driver) enrollSeller() {
 	d.read("seller-account", &account)
 	// A saved bot reply distinguishes a demo registration from an explicitly
 	// supplied, already enrolled seller, including states from older drivers.
-	var balance message
-	fromBot := d.read("telegram/"+d.scope+"/seller-balance/reply", &balance)
-	if fromBot || account == "" {
-		if !fromBot {
-			start := d.deliver("seller-start", telegramID, telegramID, func() string { return "/start" })
-			require(strings.Contains(start.Text, "注册或登录已完成"), "seller registration refused")
-			balance = d.deliver("seller-balance", telegramID, telegramID, func() string { return "/balance" })
-		}
-		botAccount := capture("^账户 ("+uuidPattern+")\n", balance.Text)
-		require(balance.Chat == telegramID && (account == "" || account == botAccount), "seller balance identity mismatch")
+	if d.data["telegram/"+d.scope+"/seller-balance/reply"] != nil || account == "" {
+		botAccount := d.registerTelegramSeller("seller", telegramID)
+		require(account == "" || account == botAccount, "seller balance identity mismatch")
 		account = botAccount
-		rows := d.rows("iam", "iam_telegram_bindings",
-			"SELECT user_id FROM iam_telegram_bindings WHERE account_id=$1 AND telegram_user_id=$2", account, telegramID)
-		require(len(rows) == 1, "expected one IAM binding for seller account and Telegram user")
-		user := str(rows[0], "user_id")
+		user := d.sellerBinding(account, telegramID)
 		// Pin the declaration inputs before the CLI can commit and lose its response.
 		require(d.value("seller-owner", func() string { return user }) == user, "seller IAM binding changed")
 		d.put("seller-email", email)
 		d.put("seller-account", account)
 		d.evidence("seller_account_id", account)
 		d.evidence("user_id_source", "iam_telegram_bindings (account_id, telegram_user_id)")
-		d.activateSeller(account, user, email)
+		d.activateSeller("seller", account, user, email, setupSellerReason)
 		return
 	}
 
@@ -364,10 +377,28 @@ func (d *driver) enrollSeller() {
 	stop("no IAM seller registration matches the supplied account and email")
 }
 
-func (d *driver) activateSeller(account, user, email string) {
+func (d *driver) registerTelegramSeller(label string, telegramID int64) string {
+	var balance message
+	if !d.read("telegram/"+d.scope+"/"+label+"-balance/reply", &balance) {
+		start := d.deliver(label+"-start", telegramID, telegramID, func() string { return "/start" })
+		require(strings.Contains(start.Text, "注册或登录已完成"), "seller registration refused")
+		balance = d.deliver(label+"-balance", telegramID, telegramID, func() string { return "/balance" })
+	}
+	require(balance.Chat == telegramID, "seller balance identity mismatch")
+	return capture("^账户 ("+uuidPattern+")\n", balance.Text)
+}
+
+func (d *driver) sellerBinding(account string, telegramID int64) string {
+	rows := d.rows("iam", "iam_telegram_bindings",
+		"SELECT user_id FROM iam_telegram_bindings WHERE account_id=$1 AND telegram_user_id=$2", account, telegramID)
+	require(len(rows) == 1, "expected one IAM binding for seller account and Telegram user")
+	return str(rows[0], "user_id")
+}
+
+func (d *driver) activateSeller(label, account, user, email, reason string) {
 	decl := object{"account_id": account, "user_id": user, "email": email,
-		"verification_ref": "demo/telegram/" + account, "declared_by": "demo-operator", "reason": "演示卖方首次开通上游门户"}
-	path := d.declaration("seller", decl)
+		"verification_ref": "demo/telegram/" + account, "declared_by": "demo-operator", "reason": reason}
+	path := d.declaration(label, decl)
 	d.evidence("demo_verification_ref", decl["verification_ref"])
 	d.evidence("demo_declared_by", decl["declared_by"])
 	d.evidence("user_id", user)

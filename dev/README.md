@@ -30,6 +30,16 @@ python3 dev/native/stack.py down
 - ledger 启动时从 `AIPAY_LEDGER_DEV_USD_RATES_FILE` 载入 `inputs/ledger/usd-rates.json`，默认每 30 秒重读。文件是 JSON 数组，每个行情分钟追加一条 USDT/USD 观测，`observed_at` 取该分钟的 UTC 起点，`dev-a` 和 `dev-b` 分别报价 `1.0000` 和 `0.9999`。同一分钟重复刷新沿用原记录。追加后超过 64 KiB 时会报错并保留原文件，可归档已登记的旧观测后再刷新。
 - 商户通知若要实际投递，在 prepare 前提供 `AIPAY_NOTIFIER_EGRESS_PROXY` 和 `AIPAY_NOTIFIER_ALLOWED_HOSTS`，并提供匹配商户地址的回执端。原生演示使用本地 CONNECT 代理 3128 和精确主机 localhost。开发 bot 已配置本地测试 token 和 webhook secret，Bot API 测试端预留 9081。本机驱动提供这两个测试端，浏览器 Cookie 处理方式见下文。
 
+### Portal origins and partner invitations
+
+Set `AIPAY_DEV_PLATFORM_ORIGIN` and `AIPAY_DEV_SELLER_ORIGIN` before native or Compose `prepare`. Their respective defaults are `https://admin.aipay.test` and `https://seller.aipay.test`. An unset or empty variable uses its own default. Use two distinct lowercase HTTPS hostnames with at least two DNS labels and no port or trailing slash. The platform hostname is the WebAuthn RP ID. An existing stack keeps its prepared origins.
+
+After native `demo setup`, use `stack.py demo invite platform EMAIL ROLE [ROLE...]` for platform staff. The IAM platform role names accepted by the command are `administrator`, `approver`, `finance`, `risk`, `operations`, `sre`, `support`, `technical_support`, `collection_operator` and `payment_access_reviewer`. Platform invitations work in either Telegram mode.
+
+Use `stack.py demo invite seller EMAIL` for seller portal access. The setup seller’s email uses its existing account. Any other address opens a dedicated seller account and requires mock Telegram mode with the Bot API fixture running.
+
+Both commands print the path to `STATE/demo/invitations/<invitation id>.json`. The directory has mode `0700` and each file has mode `0600`. Give the invitee the token privately. They accept the invitation at the origin recorded in the file and enroll their authenticator there. Sellers use TOTP and platform staff use WebAuthn.
+
 ### 从 UG-4 之前的栈升级
 
 先停栈，备份数据库、队列与整份私有状态目录，再把旧状态目录移出 prepare 的目标路径。devcert 每次都会重签整套身份，新栈要配套使用新数据库、缓存、队列和演示断点。本机使用空的专用 PostgreSQL 实例重新 `prepare`、`build --workspace`、`migrate`。Compose 重新 `prepare`，用新的 Compose 项目名（例如在每条命令加 `-p aipay-ug4`）创建空卷。`--add-missing-credentials` 只维护历史五服务栈，`demo-config` 只用于已具备相应身份和数据库的栈。

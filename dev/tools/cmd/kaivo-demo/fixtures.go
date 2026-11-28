@@ -319,6 +319,7 @@ func connectMerchant(w http.ResponseWriter, r *http.Request, address string, rec
 }
 func (d *driver) serve() {
 	env := d.env("backend")
+	readPortalOrigins(env)
 	f := fixtures{dir: d.dir, token: strings.TrimSpace(string(file(env["AIPAY_TELEGRAM_BOT_TOKEN_FILE"]))), webhook: env["AIPAY_TELEGRAM_WEBHOOK_URL"]}
 	require(f.token != "" && f.webhook != "", "missing Bot API configuration")
 	errs := make(chan error, 3)

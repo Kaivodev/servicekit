@@ -169,6 +169,9 @@ func botRefused(s string) bool {
 func (d *driver) bot(key, cmd string) string {
 	return d.telegram(key, merchantUser, func() string { return cmd }).Text
 }
+
+const merchantActivationStep = "审核员审核与商户启用"
+
 func (d *driver) merchant() {
 	d.step("Telegram 注册", func() {
 		s := d.bot("start", "/start")
@@ -290,7 +293,7 @@ func (d *driver) merchant() {
 		s := d.bot("submit/"+strings.Fields(cmd)[1], cmd)
 		d.put("access", capture("^("+uuidPattern+") ·", s))
 	})
-	d.step("审核员审核与商户启用", func() {
+	d.step(merchantActivationStep, func() {
 		d.login("reviewer")
 		p := "/payment-accesses/" + d.required("access")
 		b := d.browser("reviewer")

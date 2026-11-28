@@ -82,6 +82,16 @@ func (d nativeEnvironment) cashierClient() (*http.Client, string) {
 	tr := &http.Transport{TLSClientConfig: &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12}}
 	return &http.Client{Transport: tr, Timeout: 8 * time.Second, CheckRedirect: localHTTP.CheckRedirect}, ""
 }
+func nativeDelivery(root, id, recipient, subject string) []byte {
+	b, err := os.ReadFile(filepath.Join(root, "data/iam/mail", id+".json"))
+	if os.IsNotExist(err) {
+		return nil
+	}
+	check(err)
+	require(matchesMail(b, recipient, subject), "unexpected IAM mail recipient or subject")
+	return b
+}
+
 func (d nativeEnvironment) mailBody(recipient, subject string) []byte {
 	paths, e := filepath.Glob(filepath.Join(d.root, "data/iam/mail", "*.json"))
 	check(e)

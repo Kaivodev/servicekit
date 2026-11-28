@@ -215,7 +215,7 @@ func TestKubeMailpit(t *testing.T) {
 	k.base = port - 3
 	d := newDriver(t.TempDir(), "", "setup")
 	d.demoEnvironment = k
-	if d.mail("admin1", "重置密码") != token {
+	if d.mail(d.email("admin1"), "重置密码") != token {
 		t.Fatal("IAM mail token")
 	}
 }

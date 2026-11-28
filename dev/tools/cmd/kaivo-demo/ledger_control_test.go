@@ -253,6 +253,7 @@ func TestLedgerStaffInvitations(t *testing.T) {
 				d.browser(name).cookies["__Host-kaivo_platform_session"] = name
 			}
 			d.put("write/setup/accept/"+tc.name+"/result", object{"user_id": tc.name})
+			invID := id()
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				var data object
 				switch strings.TrimPrefix(r.URL.Path, "/api/v1/platform") {
@@ -265,13 +266,13 @@ func TestLedgerStaffInvitations(t *testing.T) {
 					if err := json.NewDecoder(r.Body).Decode(&body); err != nil || !slices.Equal(body.Roles, tc.roles) {
 						t.Error("wrong invitation role list", body.Roles, err)
 					}
-					data = object{"email": d.email(tc.name), "invited_by": "admin1", "status": "pending_approval", "id": "invite", "version": 1}
-				case "/invitations/invite/approvals":
+					data = object{"email": d.email(tc.name), "invited_by": "admin1", "status": "pending_approval", "id": invID, "version": 1}
+				case "/invitations/" + invID + "/approvals":
 					cookie, err := r.Cookie("__Host-kaivo_platform_session")
 					if err != nil || cookie.Value != "admin2" {
 						t.Error("missing second administrator")
 					}
-					data = object{"id": "invite", "approved_by": "admin2", "status": "pending"}
+					data = object{"id": invID, "approved_by": "admin2", "status": "pending"}
 				default:
 					t.Error("unexpected invitation operation", r.URL.Path)
 				}
@@ -301,6 +302,7 @@ func (e ledgerOwnerFixture) owner(service, dbvar string, args ...string) []byte 
 func TestLedgerRegistrationRecognizesOnlyActiveKeyBindings(t *testing.T) {
 	d := newDriver(t.TempDir(), "", "setup")
 	d.active = &result{Evidence: object{}}
+	d.origins = readPortalOrigins(map[string]string{"AIPAY_PLATFORM_ORIGIN": "https://admin.demo.test"})
 	const n = "approver3"
 	d.put("user/"+n, ledgerTestUser)
 	person := d.key("person/" + n)
@@ -330,7 +332,7 @@ func TestLedgerRegistrationRecognizesOnlyActiveKeyBindings(t *testing.T) {
 			var decl object
 			decode(file(args[2]), &decl)
 			if decl["id"] != active["id"] || decl["approver_id"] != person || decl["iam_user_id"] != ledgerTestUser ||
-				decl["rp_id"] != rp || decl["ceremony_ref"] != "demo-approver3" ||
+				decl["rp_id"] != "admin.demo.test" || decl["ceremony_ref"] != "demo-approver3" ||
 				decl["credential_id"] != b64.EncodeToString(key.ID) || decl["public_key_cose"] != b64.EncodeToString(cose) {
 				t.Fatal("incorrect ledger key declaration")
 			}

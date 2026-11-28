@@ -38,7 +38,7 @@ func executeContext(ctx context.Context, args []string) (err error) {
 		require(output != "", "-o requires a report filename")
 		args = args[:len(args)-2]
 	}
-	require(len(args) == 3 || len(args) == 4, "usage: kaivo-demo STATE SERVICEKIT serve|setup [phase]|run SCENARIO [-o FILE]\nNative ledger scenarios: ledger-read-only-exit, ledger-carryover, ledger-adjustment, ledger-approvals-inbox")
+	require(len(args) >= 3 && (len(args) <= 4 || args[2] == "invite"), "usage: kaivo-demo STATE SERVICEKIT serve|setup [phase] [-o FILE]|run SCENARIO [-o FILE]|invite platform EMAIL ROLE...|invite seller EMAIL\nNative ledger scenarios: ledger-read-only-exit, ledger-carryover, ledger-adjustment, ledger-approvals-inbox")
 	root, e := filepath.Abs(args[0])
 	check(e)
 	repo, e := filepath.Abs(args[1])
@@ -46,6 +46,13 @@ func executeContext(ctx context.Context, args []string) (err error) {
 	action := args[2]
 	mode := setting("AIPAY_DEMO_TARGET", "native")
 	require(mode == "native" || mode == "k8s", "unknown AIPAY_DEMO_TARGET")
+	var invitation invitationRequest
+	if action == "invite" {
+		require(mode == "native", "demo invite requires the native target")
+		invitation = parseInvitation(args[3:])
+		_, err := os.Stat(filepath.Join(root, "stack.env"))
+		require(os.IsNotExist(err), "demo invite requires the native process stack")
+	}
 	target := ""
 	if len(args) == 4 {
 		target = args[3]
@@ -108,11 +115,17 @@ func executeContext(ctx context.Context, args []string) (err error) {
 			kube.startForwards()
 		}
 	}
+	loadOrigins := sync.OnceFunc(func() { d.origins = readPortalOrigins(d.env("backend")) })
 	start := sync.OnceFunc(func() {
 		startForwards()
+		loadOrigins()
 		d.syncMerchantKeys()
 	})
 	switch action {
+	case "invite":
+		loadOrigins()
+		fmt.Println(d.exportInvitation(invitation, d.invitationMailID))
+		return nil
 	case "run":
 		switch target {
 		case disputePaidRelease, disputePaidRefund, disputePaidRace:
@@ -170,7 +183,9 @@ func executeContext(ctx context.Context, args []string) (err error) {
 			if target == "" || target == p.name {
 				found = true
 				d.stepGroup(p.name, func() {
-					if p.name != "packages" {
+					if p.name == "packages" {
+						loadOrigins()
+					} else {
 						start()
 					}
 					p.run()

@@ -22,9 +22,6 @@ import (
 	"github.com/fxamacker/cbor/v2"
 )
 
-const rp = "admin.aipay.test"
-const adminOrigin = "https://" + rp
-
 type credential struct {
 	Key, ID []byte
 	Count   uint32
@@ -53,17 +50,17 @@ func (a credential) cose() []byte {
 	check(e)
 	return b
 }
-func clientData(kind string, challenge []byte) []byte {
+func (o portalOrigins) clientData(kind string, challenge []byte) []byte {
 	require(len(challenge) > 0, "empty WebAuthn challenge")
-	return encoded(object{"type": kind, "origin": adminOrigin, "challenge": b64.EncodeToString(challenge), "crossOrigin": false})
+	return encoded(object{"type": kind, "origin": o.platform, "challenge": b64.EncodeToString(challenge), "crossOrigin": false})
 }
-func (a credential) authData(flags byte) []byte {
-	h := sha256.Sum256([]byte(rp))
+func (a credential) authData(rpID string, flags byte) []byte {
+	h := sha256.Sum256([]byte(rpID))
 	return binary.BigEndian.AppendUint32(append(h[:], flags), a.Count)
 }
 func options(field string) object { var m object; decode(raw(field), &m); return m }
-func (a credential) register(o object) object {
-	require(str(obj(o["rp"]), "id") == rp, "registration RP mismatch")
+func (a credential) register(origins portalOrigins, o object) object {
+	require(str(obj(o["rp"]), "id") == origins.rpID(), "registration RP mismatch")
 	ok := false
 	params, _ := o["pubKeyCredParams"].([]any)
 	for _, v := range params {
@@ -73,21 +70,21 @@ func (a credential) register(o object) object {
 		}
 	}
 	require(ok, "ES256 not offered")
-	data := append(a.authData(0x45), make([]byte, 16)...)
+	data := append(a.authData(origins.rpID(), 0x45), make([]byte, 16)...)
 	data = binary.BigEndian.AppendUint16(data, uint16(len(a.ID)))
 	data = append(data, a.ID...)
 	data = append(data, a.cose()...)
 	att, e := cbor.Marshal(object{"fmt": "none", "attStmt": object{}, "authData": data})
 	check(e)
-	return object{"credential_id": b64.EncodeToString(a.ID), "attestation_object": b64.EncodeToString(att), "transports": []string{"internal"}, "client_data_json": b64.EncodeToString(clientData("webauthn.create", raw(str(o, "challenge"))))}
+	return object{"credential_id": b64.EncodeToString(a.ID), "attestation_object": b64.EncodeToString(att), "transports": []string{"internal"}, "client_data_json": b64.EncodeToString(origins.clientData("webauthn.create", raw(str(o, "challenge"))))}
 }
 func (d *driver) assert(name string, challenge []byte) object {
 	a := d.credential(name)
 	require(a.Count < math.MaxUint32, "authenticator counter exhausted")
 	a.Count++
 	d.put("authenticator/"+name, a)
-	data := a.authData(5)
-	client := clientData("webauthn.get", challenge)
+	data := a.authData(d.origins.rpID(), 5)
+	client := d.origins.clientData("webauthn.get", challenge)
 	h := sha256.Sum256(client)
 	digest := sha256.Sum256(append(bytes.Clone(data), h[:]...))
 	key, e := x509.ParseECPrivateKey(a.Key)
