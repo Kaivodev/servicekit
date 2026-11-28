@@ -113,6 +113,10 @@ func (c Call) Requirement() Requirement { return c.requirement }
 // never from request fields.
 func (c Call) Assertion() (*Assertion, bool) { return c.assertion, c.assertion != nil }
 
+// DenyUpstreamBot applies the merchant-side guard to the call's verified
+// assertion. It returns nil for calls without an assertion.
+func (c Call) DenyUpstreamBot() error { return DenyUpstreamBot(c.assertion) }
+
 // Scope returns the verified acting scope; absent for service calls.
 func (c Call) Scope() (Scope, bool) {
 	if c.assertion == nil {

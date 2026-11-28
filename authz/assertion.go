@@ -33,6 +33,7 @@ const (
 	// AMRMultiFactor in amr marks a completed multi-factor authentication
 	// (RFC 8176 "mfa").
 	AMRMultiFactor = "mfa"
+	amrTelegram    = "telegram"
 	maxTokenBytes  = 8192
 )
 
@@ -52,9 +53,18 @@ const (
 	WebEntryUpstreamPortal WebEntry = "upstream_portal"
 )
 
+// TelegramBot identifies the bot through which IAM authenticated the user.
+// Legacy Telegram assertions omit this claim and belong to the merchant bot.
+type TelegramBot string
+
+const (
+	TelegramBotMerchant TelegramBot = "merchant"
+	TelegramBotUpstream TelegramBot = "upstream"
+)
+
 // Claims is the JSON claim set. Times are NumericDate seconds; aud is always
-// written as an array and read as a string or an array. CommandSHA256, SessionID
-// and WebEntry are optional for compatibility; owners require them per method.
+// written as an array and read as a string or an array. CommandSHA256, SessionID,
+// WebEntry and TelegramBot are optional. Owners require them per method.
 type Claims struct {
 	Issuer        string   `json:"iss"`
 	Subject       string   `json:"sub"`
@@ -70,12 +80,14 @@ type Claims struct {
 	// Canonical lowercase UUIDv7. This identifies a session, not a bearer token.
 	SessionID string   `json:"session_id,omitempty"`
 	WebEntry  WebEntry `json:"web_entry,omitempty"`
-	AMR       []string `json:"amr"`
-	AuthTime  int64    `json:"auth_time,omitempty"`
-	IssuedAt  int64    `json:"iat"`
-	NotBefore int64    `json:"nbf,omitempty"`
-	ExpiresAt int64    `json:"exp"`
-	ID        string   `json:"jti"`
+	// TelegramBot requires the telegram authentication method and excludes WebEntry.
+	TelegramBot TelegramBot `json:"telegram_bot,omitempty"`
+	AMR         []string    `json:"amr"`
+	AuthTime    int64       `json:"auth_time,omitempty"`
+	IssuedAt    int64       `json:"iat"`
+	NotBefore   int64       `json:"nbf,omitempty"`
+	ExpiresAt   int64       `json:"exp"`
+	ID          string      `json:"jti"`
 }
 
 type Audience []string
@@ -124,6 +136,8 @@ func (c Claims) validate() error {
 		return errMalformed
 	case c.WebEntry != "" && c.WebEntry != WebEntryPlatformAdmin && c.WebEntry != WebEntryUpstreamPortal:
 		return errMalformed
+	case c.TelegramBot != "" && c.TelegramBot != TelegramBotMerchant && c.TelegramBot != TelegramBotUpstream:
+		return errMalformed
 	case len(c.Audience) == 0 || len(c.AMR) == 0:
 		return errMalformed
 	case c.IssuedAt <= 0 || c.ExpiresAt <= c.IssuedAt || time.Duration(c.ExpiresAt-c.IssuedAt)*time.Second > MaxLifetime:
@@ -142,6 +156,9 @@ func (c Claims) validate() error {
 			return errMalformed
 		}
 		seen[method] = true
+	}
+	if c.TelegramBot != "" && (c.WebEntry != "" || !seen[amrTelegram]) {
+		return errMalformed
 	}
 	return nil
 }
@@ -178,6 +195,34 @@ func (a *Assertion) SessionID() string { return a.claims.SessionID }
 // WebEntry returns the verified entry, or empty when absent. The owner checks
 // its required entry, authentication methods and scope; this grants no access.
 func (a *Assertion) WebEntry() WebEntry { return a.claims.WebEntry }
+
+// TelegramBot returns the verified bot claim, or an empty string when absent.
+func (a *Assertion) TelegramBot() TelegramBot { return a.claims.TelegramBot }
+
+// UpstreamBot reports whether IAM authenticated the user through the upstream bot.
+func (a *Assertion) UpstreamBot() bool {
+	return a.TelegramBot() == TelegramBotUpstream && slices.Contains(a.claims.AMR, amrTelegram)
+}
+
+// MerchantBot reports whether IAM authenticated the user through the merchant
+// bot, including legacy Telegram assertions that omit the bot claim.
+func (a *Assertion) MerchantBot() bool {
+	return (a.TelegramBot() == TelegramBotMerchant || a.TelegramBot() == "") && slices.Contains(a.claims.AMR, amrTelegram)
+}
+
+// ErrUpstreamBotAssertion is returned by DenyUpstreamBot. Owners map it to
+// PermissionDenied with a stable reason. It carries no assertion content.
+var ErrUpstreamBotAssertion = errors.New("upstream bot assertion")
+
+// DenyUpstreamBot rejects an assertion issued for the upstream (seller) bot.
+// Merchant-side owners call it after obtaining the assertion. A nil assertion
+// returns nil.
+func DenyUpstreamBot(a *Assertion) error {
+	if a != nil && a.UpstreamBot() {
+		return ErrUpstreamBotAssertion
+	}
+	return nil
+}
 
 // AuthTime is zero when the assertion carries no auth_time.
 func (a *Assertion) AuthTime() time.Time {
@@ -324,9 +369,11 @@ func (v *AssertionVerifier) Verify(token string) (*Assertion, error) {
 	if err != nil {
 		return nil, deny("assertion_malformed")
 	}
-	// Omission preserves old assertions; explicit null/empty is not a valid
-	// digest, session identifier or entry and must not masquerade as omission.
-	if names["command_sha256"] && claims.CommandSHA256 == "" || names["session_id"] && claims.SessionID == "" || names["web_entry"] && claims.WebEntry == "" {
+	// These optional claims require a nonempty string when present.
+	if names["command_sha256"] && claims.CommandSHA256 == "" ||
+		names["session_id"] && claims.SessionID == "" ||
+		names["web_entry"] && claims.WebEntry == "" ||
+		names["telegram_bot"] && claims.TelegramBot == "" {
 		return nil, deny("assertion_claims")
 	}
 	if err = claims.validate(); err != nil {

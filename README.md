@@ -19,6 +19,8 @@
 
 自 `v0.6.0` 起，`authz.Claims` 支持 `CommandSHA256`、`SessionID`、`WebEntry`，已验签的 `Assertion` 通过同名只读方法返回。命令摘要为 64 位小写十六进制 SHA-256，会话 ID 为规范小写 UUIDv7，入口使用 `authz.WebEntryPlatformAdmin` / `authz.WebEntryUpstreamPortal`；旧证明可省略，访问器返回空值。签发与接收均检查格式，显式空值、null、错误类型或未知入口拒绝，不把未知入口默认为管理端。
 
+In v0.14.0, IAM can include `telegram_bot` when `amr` contains `telegram` and `web_entry` is absent. If present, the claim must be `"merchant"` or `"upstream"`. `Assertion.TelegramBot()` returns the verified value or an empty string when omitted. `UpstreamBot()` identifies the seller bot. `MerchantBot()` also recognizes legacy Telegram assertions that omit the claim. Merchant-side owners call `call.DenyUpstreamBot()` or `authz.DenyUpstreamBot(a)` and map `authz.ErrUpstreamBotAssertion` to `PermissionDenied`. The guard returns nil for calls without an assertion.
+
 这些声明不自动开放业务：属主须按方法要求其存在，重算完整命令摘要并核对入口、认证方式、作用域与资源归属；`RequestFingerprint()` 不能代替命令摘要。公共库不读取会话数据库、不提供即时撤销、不编码 collection 请求，也不更改 MFA_RECENT/SINGLE_USE 策略。本地签发及真实 mTLS 测试只验证公共库，不代表平台登录或 collection 业务接通。
 
 组装根显式构造资源并注册业务 RPC；框架不自动发现业务。当前各私有服务仅注册标准 gRPC Health，空服务名表示进程及依赖就绪；不存在的业务服务返回 `NOT_FOUND`，不会报告业务可用。调用方身份仅证明服务身份，不能替代用户权限或资源范围检查。
@@ -120,6 +122,10 @@ RPC 耗时取秒，状态码使用 gRPC 的名称。健康服务从 RPC 与授�
 每进程创建一个采样器，先登记各流、outbox 和业务仪表，再随服务生命周期启动 `go s.Run(ctx)`。业务使用 `RegisterInt64` 或 `RegisterSeconds`，返回 `[]telemetry.Point[int64]` 或 `[]telemetry.Point[float64]`。采样器名、属性键和点分仪表名的每段均匹配 `[a-z][a-z0-9_]*`。每个点提供全部已登记的属性键，属性值只用固定枚举或部署配置。查询使用传入的 context。默认立即采样，此后每 30 秒一次，每次最多 5 秒，可通过 `Options.Interval` 和 `Timeout` 调整。导出只读缓存，查询失败会撤下该项旧值并计数。
 
 每个活跃的流和 outbox 只登记一次。在已有的流头检查计划里调用 `CheckHead`，首次成功后才有 lag 值。关闭连接池、替换 puller 前，调用 `ObservePool`、`ObserveLag` 返回的注销函数。停止采样器后再关闭它使用的数据库。
+
+## v0.14.0
+
+- Added the optional `telegram_bot` assertion claim and owner helpers for distinguishing the merchant and upstream bots.
 
 ## v0.8.0（待发布）
 
