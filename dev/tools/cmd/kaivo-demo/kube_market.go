@@ -36,9 +36,5 @@ func (k *kubeEnvironment) refreshMarket() {
 }
 
 func (k *kubeEnvironment) waitProjection() {
-	select {
-	case <-time.After(k.syncDelay):
-	case <-k.ctx.Done():
-		stop("interrupted while waiting for ConfigMap projection")
-	}
+	k.pause(k.syncDelay)
 }

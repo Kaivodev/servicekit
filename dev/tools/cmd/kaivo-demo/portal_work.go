@@ -216,7 +216,7 @@ func (d *driver) archivedWork() {
           FROM payment_audit_logs WHERE action='payment.admin.RequeueArchivedWork' AND result='accepted' AND target_type='payment_work'
           AND target_id=$1 AND actor_type='user' AND changes#>>'{metadata,kind}'='order' AND (changes#>>'{before,version}')::bigint=$2`, t.order, num(original, "version")), "恢复审计")
 		require(audit["actor_id"] == d.required("user/sre") && audit["reason"] == requeueReason && audit["attempts"] == original["attempts"] && audit["last_error_code"] == original["last_error_code"], "requeue audit mismatch")
-		waitFor("payment worker reclaimed restored task", 90*time.Second, func() bool {
+		d.waitFor("payment worker reclaimed restored task", 90*time.Second, func() bool {
 			row := oneFact(d.facts("payment", "worker_after_requeue", `SELECT version,attempts,completed_at,archived_at,
                 completed_at >= $2::timestamptz AS completed_after FROM payment_work WHERE kind='order' AND object_id=$1`, t.order, str(audit, "occurred_at")), "恢复后任务")
 			if t.channel == epayChannel {

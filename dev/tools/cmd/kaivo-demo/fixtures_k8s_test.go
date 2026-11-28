@@ -53,7 +53,7 @@ func TestServeKubeFixtures(t *testing.T) {
 	}()
 	controlAddr := listeners["127.0.0.1:8088"].Addr().String()
 	control := "http://" + controlAddr
-	if !pollUntil(3*time.Second, func() bool {
+	if !pollUntil(time.Sleep, 3*time.Second, func() bool {
 		res, e := localHTTP.Get(control + "/messages.json")
 		if e != nil {
 			return false
@@ -97,7 +97,8 @@ func TestServeKubeFixtures(t *testing.T) {
 	if send("sendMessage", object{"chat_id": merchantUser, "text": "test delivery"}) != 200 {
 		t.Fatal("Bot API")
 	}
-	read := func(path string) string { return string(getLocal(controlAddr, path, 4096)) }
+	k := &kubeEnvironment{ctx: ctx}
+	read := func(path string) string { return string(k.getLocal(controlAddr, path, 4096)) }
 	if !strings.Contains(read("/messages.json"), "test delivery") {
 		t.Fatal("missing bot control record")
 	}

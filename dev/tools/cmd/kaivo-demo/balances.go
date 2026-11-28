@@ -72,7 +72,7 @@ func (d *driver) waitForIdleBalances() accountBalances {
 	}
 	started := time.Now()
 	limit := 2 * time.Minute
-	if pollUntil(limit, idle) {
+	if pollUntil(d.pause, limit, idle) {
 		return b
 	}
 	// A previous paid order may still be waiting for its scheduled release.
@@ -85,7 +85,7 @@ func (d *driver) waitForIdleBalances() accountBalances {
 		limit = d.releaseWaitLimit(pending[0], started, limit)
 	}
 	// Poll once more even if the order was released during the deadline lookup.
-	if !pollUntil(time.Until(started.Add(limit)), idle) {
+	if !pollUntil(d.pause, time.Until(started.Add(limit)), idle) {
 		d.evidence("nonzero_holds", holds)
 		d.recordSellerHolds()
 		stop("timed out after %s waiting for idle balances: %s", limit, strings.Join(holds, ", "))

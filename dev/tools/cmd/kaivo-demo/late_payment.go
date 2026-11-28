@@ -77,7 +77,7 @@ func (t tradeRun) completeLatePayment(cancelled *result, approvalID string) {
 		}
 	})
 	detected := t.step("主动查单登记迟到付款", func() {
-		waitFor("late payment from active query", 2*time.Minute, func() bool {
+		d.waitFor("late payment from active query", 2*time.Minute, func() bool {
 			rows := d.rows("payment", "payment_late_payments", `SELECT l.id,l.upstream_order_id,encode(l.query_evidence_sha256,'hex') AS digest,l.detected_at
 				FROM payment_late_payments l JOIN payment_orders o ON o.id=l.order_id AND o.upstream_order_id=l.upstream_order_id
 				WHERE l.order_id=$1 AND o.status=7 AND (

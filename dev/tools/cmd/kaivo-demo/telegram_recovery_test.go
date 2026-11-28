@@ -335,7 +335,7 @@ func TestTelegramSocketWriteCheckpoint(t *testing.T) {
 					io.Copy(io.Discard, req.Body)
 					req.Body.Close()
 					// Keep the response pending until the write checkpoint is on disk.
-					inspected <- pollUntil(5*time.Second, func() bool {
+					inspected <- pollUntil(time.Sleep, 5*time.Second, func() bool {
 						resumed := newDriver(f.root, "", "setup")
 						var saved delivery
 						return resumed.read(testStateKey, &saved) && saved.Sent

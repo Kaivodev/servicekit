@@ -156,6 +156,16 @@ func (d *driver) trace(s string) {
 		d.active.Requests = append(d.active.Requests, s)
 	}
 }
+
+// Setup can use forwards before entering the first report step.
+func (d *driver) traceForward(line string) {
+	if d.active == nil {
+		fmt.Fprintln(os.Stderr, line)
+		return
+	}
+	d.trace(line)
+}
+
 func (d *driver) evidence(k string, v any) { d.active.Evidence[k] = v }
 func (d *driver) report() {
 	out := filepath.Join(d.dir, "reports", d.history.Scenario)
@@ -280,7 +290,7 @@ func (d *driver) refreshMarket() {
 		var quote struct{ Minute time.Time }
 		decode(k.field(k.namespaces["business"], "configmap", "payment-inputs", "rate.json"), &quote)
 		require(!quote.Minute.IsZero(), "missing refreshed market minute")
-		waitFor("ledger to import the refreshed USDT/USD observation", time.Minute, func() bool {
+		d.waitFor("ledger to import the refreshed USDT/USD observation", time.Minute, func() bool {
 			return len(d.rows("ledger", "ledger_usd_rates", "SELECT version FROM ledger_usd_rates WHERE asset='USDT' AND observed_at=$1 LIMIT 1", quote.Minute)) == 1
 		})
 	}
@@ -299,6 +309,10 @@ func (d *driver) declaration(name string, v any) string {
 	return p
 }
 func (d *driver) sleep(delay time.Duration) {
+	if !d.native() {
+		d.pause(delay)
+		return
+	}
 	select {
 	case <-time.After(delay):
 	case <-d.ctx.Done():
@@ -306,12 +320,16 @@ func (d *driver) sleep(delay time.Duration) {
 	}
 }
 
-func waitFor(why string, limit time.Duration, f func() bool) {
-	if !pollUntil(limit, f) {
+func (d *driver) waitFor(why string, limit time.Duration, f func() bool) {
+	waitFor(d.pause, why, limit, f)
+}
+
+func waitFor(pause func(time.Duration), why string, limit time.Duration, f func() bool) {
+	if !pollUntil(pause, limit, f) {
 		stop("timed out waiting for %s", why)
 	}
 }
-func pollUntil(limit time.Duration, f func() bool) bool {
+func pollUntil(pause func(time.Duration), limit time.Duration, f func() bool) bool {
 	end := time.Now().Add(limit)
 	for {
 		if f() {
@@ -320,7 +338,7 @@ func pollUntil(limit time.Duration, f func() bool) bool {
 		if !time.Now().Before(end) {
 			return false
 		}
-		time.Sleep(400 * time.Millisecond)
+		pause(400 * time.Millisecond)
 	}
 }
 func newDriver(root, repo, scope string) *driver {

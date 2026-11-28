@@ -153,7 +153,7 @@ func TestKubeSimulatorPort(t *testing.T) {
 			t.Setenv("AIPAY_DEMO_PORT_BASE", tc.base)
 			t.Setenv("AIPAY_DEMO_SIM_PORT", tc.port)
 			msg := failureText(func() {
-				k := newKubeEnvironment(t.Context(), t.TempDir())
+				k := newKubeEnvironment(t.Context(), t.TempDir(), func(line string) { t.Log(line) })
 				if tc.want != "" && k.addresses().sim != "http://127.0.0.1:"+tc.want {
 					t.Fatal("wrong local simulator endpoint")
 				}

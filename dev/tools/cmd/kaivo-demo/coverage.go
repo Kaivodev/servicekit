@@ -115,7 +115,7 @@ func (t tradeRun) coverageDenied(expired object) {
 		// Jobs revisit pending OrderPaid each tick (1s by default). Also require a
 		// post-deadline paid review so a stopped or lagging worker cannot pass.
 		d.sleep(time.Until(deadline.Add(5 * time.Second)))
-		waitFor("independent paid verification after risk_release_at for "+t.order, 75*time.Second, func() bool {
+		d.waitFor("independent paid verification after risk_release_at for "+t.order, 75*time.Second, func() bool {
 			rows := d.rows("reconciliation", "reconciliation_verification_evidence", `SELECT id, verified_at
 				FROM reconciliation_verification_evidence WHERE order_id=$1 AND verified_at >= $2 AND eligible
 				AND operation='query_payment' AND convert_from(record_json,'UTF8')::jsonb->>'Outcome'='paid'

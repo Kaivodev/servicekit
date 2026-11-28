@@ -27,7 +27,7 @@ func (t tradeRun) manualRefund(refund string) object {
 	d.liveStep(label+" 卖方凭证", func() {
 		d.login("seller")
 		var row object
-		waitFor("seller refund reservation", time.Minute, func() bool {
+		d.waitFor("seller refund reservation", time.Minute, func() bool {
 			row = t.listedRefund(base, refund)
 			return row != nil && row["status"] != "reserving"
 		})
@@ -65,7 +65,7 @@ func (t tradeRun) manualRefund(refund string) object {
 		if delay := time.Until(deadline); delay > 0 {
 			d.sleep(delay)
 		}
-		waitFor("payment refund SUCCEEDED", 2*time.Minute, func() bool {
+		d.waitFor("payment refund SUCCEEDED", 2*time.Minute, func() bool {
 			row = state()
 			require(num(row, "status") == 8 || num(row, "status") == 3, "refund left confirmation without success")
 			return num(row, "status") == 3
@@ -142,7 +142,7 @@ func (t tradeRun) approveSellerEvidence(s reviewSubject) object {
 func (t tradeRun) awaitRefundResolution(refund, approvalID, digest string) object {
 	d := t.d
 	var resolution object
-	waitFor("manual refund resolution", 2*time.Minute, func() bool {
+	d.waitFor("manual refund resolution", 2*time.Minute, func() bool {
 		rows := d.rows("reconciliation", "reconciliation_manual_refund_resolutions", `SELECT s.event_id AS resolution_id,s.outcome,
 			s.approval_request_id,encode(s.request_digest,'hex') AS request_digest,s.authorization_id,a.event_type
 			FROM reconciliation_manual_refund_reviews m JOIN reconciliation_manual_refund_resolutions s USING(event_id)

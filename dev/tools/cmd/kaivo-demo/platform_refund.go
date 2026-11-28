@@ -31,7 +31,7 @@ func (t tradeRun) platformRefund(branch string) string {
 		r := b.apiGrant("POST", c.path, c.key, c.body, b.grant(c))
 		refund := str(r, "refund_id")
 		require(obj(r["trade"])["order_id"] == t.order && r["origin"] == "platform" && r["out_refund_no"] == "platform:"+refund, "platform refund receipt mismatch")
-		waitFor("platform refund awaiting seller", time.Minute, func() bool {
+		d.waitFor("platform refund awaiting seller", time.Minute, func() bool {
 			row := d.browser("seller").api("GET", "/accounts/"+d.required("seller-account")+"/refunds/"+refund, "", nil)
 			return row["order_id"] == t.order && row["status"] == "awaiting_seller"
 		})
@@ -134,7 +134,7 @@ func (d *driver) platformRefundSuccess() {
 		require(total == num(h, "platform_fee_usdt"), "incomplete fee reversal")
 		t.noUpstreamRefund()
 		t.awaitOrderStatus("refunded")
-		waitFor("seller pending and merchant succeeded notices", time.Minute, func() bool {
+		d.waitFor("seller pending and merchant succeeded notices", time.Minute, func() bool {
 			notices := t.refundNotices(refund)
 			return notices["seller_pending"] != nil && notices["merchant_succeeded"] != nil
 		})
@@ -150,7 +150,7 @@ func (t tradeRun) awaitOrderStatus(status string) object {
 		timeout = 12 * time.Minute
 	}
 	var order object
-	waitFor("payment order "+status, timeout, func() bool {
+	t.d.waitFor("payment order "+status, timeout, func() bool {
 		order = t.d.browser("operations").api("GET", "/orders/"+t.order, "", nil)
 		return order["status"] == status
 	})
@@ -194,7 +194,7 @@ func (t tradeRun) refundNotices(refund string) map[string]object {
 
 func (t tradeRun) restoredOrder(refund string, reservationVersion int64) {
 	d := t.d
-	waitFor("payment restored RISK_HELD", 2*time.Minute, func() bool {
+	d.waitFor("payment restored RISK_HELD", 2*time.Minute, func() bool {
 		o := d.browser("operations").api("GET", "/orders/"+t.order, "", nil)
 		switch o["status"] {
 		case "refunding":
@@ -254,7 +254,7 @@ func (d *driver) platformRefundFailure() {
 		event := oneFact(d.facts("payment", "RefundFailed v2", `SELECT o.event_id,o.schema_version,f.status FROM payment_outbox o JOIN payment_refunds f ON o.refund_id=f.id
 			WHERE o.order_id=$1 AND o.refund_id=$2 AND o.event_type='RefundFailed'`, t.order, refund), "failed refund")
 		require(num(event, "status") == 4 && num(event, "schema_version") == 2 && event["event_id"] == r["resolution_id"], "resolution did not authorize this failure")
-		waitFor("ledger restored RESERVED", 2*time.Minute, func() bool {
+		d.waitFor("ledger restored RESERVED", 2*time.Minute, func() bool {
 			rows := d.facts("ledger", "失败恢复授权", `SELECT result_status,posting_seq,outcome FROM ledger_trade_authorizations
 				WHERE authorization_id=$1 AND refund_id=$2 AND order_id=$3 AND event_type='TradeRefundAuthorized'`, str(r, "authorization_id"), refund, t.order)
 			if len(rows) == 0 {

@@ -26,25 +26,13 @@ func (d *driver) queryRows(parent context.Context, owner, source, query string, 
 	defer cancel()
 	var c *pgx.Conn
 	var e error
-	var forwarded *dbForward
-	if k, ok := d.demoEnvironment.(*kubeEnvironment); ok {
-		forwarded = k.dbForwards[k.domain(owner)]
-	}
-	var previous *forward
 	// A forwarded connection may fail while a dead port-forward is being
 	// replaced; database() restarts it, so retry briefly before giving up.
 	for attempt := 1; attempt <= 4; attempt++ {
 		attemptCtx, attemptCancel := context.WithTimeout(ctx, 5*time.Second)
 		cfg := d.database(owner)
 		if attempt > 1 {
-			msg := fmt.Sprintf("%s database connection attempt %d failed, retrying on attempt %d", owner, attempt-1, attempt)
-			if forwarded != nil && forwarded.current != previous {
-				msg += " with the database forward re-established"
-			}
-			d.trace(msg)
-		}
-		if forwarded != nil {
-			previous = forwarded.current
+			d.trace(fmt.Sprintf("%s database connection attempt %d failed, retrying on attempt %d", owner, attempt-1, attempt))
 		}
 		c, e = pgx.ConnectConfig(attemptCtx, cfg)
 		attemptCancel()
@@ -173,7 +161,7 @@ func (d *driver) deposits() {
 		eid := strings.TrimSpace(string(result))
 		_, err := uuid.Parse(eid)
 		require(err == nil, "invalid collection event ID")
-		waitFor("verified seller deposit", 90*time.Second, func() bool { return checkBalances(normal) })
+		d.waitFor("verified seller deposit", 90*time.Second, func() bool { return checkBalances(normal) })
 		if staging {
 			rows := d.rows("ledger", "ledger_trade_deposits", `SELECT posting_seq,source_event_id,source_sequence
                 FROM ledger_trade_deposits WHERE chain='BSC' AND transaction_id=$1 AND transfer_index=$2
@@ -193,7 +181,7 @@ func (d *driver) deposits() {
 	d.step("预存重放", func() {
 		d.login("seller")
 		eid := strings.TrimSpace(string(d.stack("receipt", "replay", "normal")))
-		waitFor("ledger replay processing", 60*time.Second, func() bool {
+		d.waitFor("ledger replay processing", 60*time.Second, func() bool {
 			rows := d.rows("ledger", "ledger_inbox", "SELECT event_id,sequence,status FROM ledger_inbox WHERE event_id=$1 AND status='applied'", eid)
 			if len(rows) == 1 {
 				d.evidence("ledger_inbox", rows)
@@ -210,7 +198,7 @@ func (d *driver) deposits() {
 		d.stack("up")
 		d.login("seller")
 		d.stack("receipt", "add", "unfinalized")
-		waitFor("pending SellerDepositVerified before receipt", 90*time.Second, func() bool {
+		d.waitFor("pending SellerDepositVerified before receipt", 90*time.Second, func() bool {
 			matches := d.rows("reconciliation", "recon_seller_deposit_matches", "SELECT outbox_event_id FROM recon_seller_deposit_matches WHERE chain_transaction_id=$1 AND seller_account_id=$2", str(obj(samples["unfinalized"]), "chain_transaction_id"), a)
 			if len(matches) != 1 {
 				return false
@@ -229,7 +217,7 @@ func (d *driver) deposits() {
 		d.stack("deposits-on", "--seller-account-id", a, "--finalized", "3")
 		d.stack("up")
 		d.login("seller")
-		waitFor("original receipt and reclassification", 90*time.Second, func() bool { return checkBalances(normal + late) })
+		d.waitFor("original receipt and reclassification", 90*time.Second, func() bool { return checkBalances(normal + late) })
 		d.evidence("seller_portal", d.sellerBalance())
 		d.evidence("wallet_units", d.wallet(wallet))
 		rows := d.rows("ledger", "ledger_trade_deposits", "SELECT d.source_event_id,d.source_sequence,d.posting_seq,d.unmatched_seq,u.posting_seq AS wallet_posting FROM ledger_trade_deposits d JOIN ledger_trade_unmatched_receipts u USING(chain,transaction_id,transfer_index) WHERE d.wallet_account_code=$1 ORDER BY d.source_sequence", wallet)

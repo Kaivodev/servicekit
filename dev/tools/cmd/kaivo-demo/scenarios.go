@@ -86,7 +86,7 @@ func (d *driver) sim(method, path string, data object) []byte {
 	check(e)
 	req.Header.Set("Authorization", "Bearer "+str(cfg, "control_token"))
 	req.Header.Set("Content-Type", "application/json")
-	res, e := localHTTP.Do(req)
+	res, e := d.doHTTP(localHTTP, req)
 	require(e == nil, "sim transport failed")
 	defer res.Body.Close()
 	d.trace(fmt.Sprintf("%s %s → HTTP %d", method, path, res.StatusCode))
@@ -98,8 +98,10 @@ func (d *driver) sim(method, path string, data object) []byte {
 func (d *driver) cashier(link string, pay bool) {
 	u, e := url.Parse(link)
 	require(e == nil && u.Scheme+"://"+u.Host == d.addresses().cashier && u.User == nil && u.RawQuery == "" && u.Fragment == "" && regexp.MustCompile(`^/cashier/[A-Za-z0-9_-]+$`).MatchString(u.EscapedPath()), "unexpected cashier link")
-	c := d.cashierClient()
-	defer c.CloseIdleConnections()
+	c, forwardAddress := d.cashierClient()
+	if c != localHTTP {
+		defer c.CloseIdleConnections()
+	}
 	methods := []string{"GET"}
 	if pay {
 		methods = append(methods, "POST")
@@ -107,7 +109,11 @@ func (d *driver) cashier(link string, pay bool) {
 	for _, method := range methods {
 		req, e := http.NewRequestWithContext(d.ctx, method, link, nil)
 		check(e)
-		res, e := c.Do(req)
+		if forwardAddress != "" {
+			// Preserve the validated cashier Host while dialing the simulator forward.
+			req.URL.Host = forwardAddress
+		}
+		res, e := d.doHTTP(c, req)
 		require(e == nil, "cashier request failed")
 		res.Body.Close()
 		d.trace(fmt.Sprintf("%s /cashier/{token} → HTTP %d", method, res.StatusCode))
@@ -258,7 +264,7 @@ func (t tradeRun) paid(copies int) {
 
 func (t tradeRun) observePaid(copies int) {
 	d := t.d
-	waitFor("acknowledged callback copies and ledger OrderPaid", 60*time.Second, func() bool {
+	d.waitFor("acknowledged callback copies and ledger OrderPaid", 60*time.Second, func() bool {
 		var rows []object
 		decode(d.sim("GET", "/__test/deliveries", nil), &rows)
 		matches := []object{}
@@ -293,7 +299,7 @@ func (t tradeRun) terminalWithin(status string, limit time.Duration) object {
 	if status == "RELEASED" {
 		limit = d.releaseWaitLimit(d.ledgerTrade(t.order), time.Now(), limit)
 	}
-	waitFor(status, limit, func() bool { return d.ledgerTrade(t.order)["status"] == status })
+	d.waitFor(status, limit, func() bool { return d.ledgerTrade(t.order)["status"] == status })
 	return d.chainEvidence(t.order)
 }
 
@@ -360,7 +366,7 @@ func (t tradeRun) release() object {
 }
 func (t tradeRun) notify() {
 	t.step("商户验签回执", func() {
-		waitFor("signed merchant notification", 90*time.Second, func() bool {
+		t.d.waitFor("signed merchant notification", 90*time.Second, func() bool {
 			var rs []receipt
 			decode(t.d.fixtureRecord("notifications.json"), &rs)
 			for _, r := range rs {
@@ -397,7 +403,7 @@ func (t tradeRun) awaitFirstUnpaid(configured string, limit time.Duration) (late
 	d := t.d
 	var rows []object
 	var first object
-	waitFor("first independent closed/unpaid", limit, func() bool {
+	d.waitFor("first independent closed/unpaid", limit, func() bool {
 		rows = t.observations()
 		for _, r := range rows {
 			if r["outcome"] == "closed_unpaid" {
@@ -517,7 +523,7 @@ func (d *driver) cancel(late bool) {
 		if !paidAfterFirst(rows) {
 			check(timing.checkDeadline(time.Now()))
 			d.cashier(t.link, true)
-			waitFor("independent paid observation after late payment", timing.observationTimeout(), func() bool {
+			d.waitFor("independent paid observation after late payment", timing.observationTimeout(), func() bool {
 				rows = t.observations()
 				return paidAfterFirst(rows)
 			})
@@ -751,7 +757,7 @@ func (d *driver) insufficient() {
 		}
 		d.evidence("epay_reply", reply["msg"])
 		var refused object
-		waitFor("definitive refund reserve refusal", time.Minute, func() bool {
+		d.waitFor("definitive refund reserve refusal", time.Minute, func() bool {
 			rows := d.rows("payment", "拒绝退款预留", `SELECT f.id,f.status,f.stage,a.action,
 				f.data ? 'reservation' AS reserved,f.data ? 'upstream_refund_id' AS sent
 				FROM payment_refunds f JOIN payment_audit_logs a ON a.target_type='refund' AND a.target_id=f.id::text

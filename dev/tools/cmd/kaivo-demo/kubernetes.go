@@ -33,14 +33,17 @@ func setting(key, fallback string) string {
 }
 
 type kubeEnvironment struct {
-	ctx           context.Context
-	command       []string
-	namespaces    map[string]string
-	syncDelay     time.Duration
-	base, simPort int
-	seed, dir     string
-	forwards      []*forward
-	dbForwards    map[string]*dbForward
+	ctx              context.Context
+	command          []string
+	namespaces       map[string]string
+	syncDelay        time.Duration
+	base, simPort    int
+	seed, dir        string
+	forwards         map[string]*serviceForward
+	serviceByAddress map[string]string
+	launchForward    func(context.Context, string, string, []string) (*forward, error)
+	trace            func(string)
+	lastBackend      time.Time
 	// Within one invocation all consumers use the same owner secret and forwarding endpoint.
 	databases map[string]*pgx.ConnConfig
 	configs   map[string]map[string]string
@@ -50,10 +53,18 @@ type kubeEnvironment struct {
 var mailpitID = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 var dnsLabel = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
 
-func newKubeEnvironment(ctx context.Context, dir string) *kubeEnvironment {
-	k := &kubeEnvironment{ctx: ctx, dir: dir, seed: os.Getenv("KAIVO_STAGING_SEED"),
-		command: strings.Fields(setting("KUBECTL", "kubectl")), namespaces: map[string]string{},
-		databases: map[string]*pgx.ConnConfig{}, dbForwards: map[string]*dbForward{}, configs: map[string]map[string]string{}, materials: map[string][]byte{}}
+func newKubeEnvironment(ctx context.Context, dir string, trace func(string)) *kubeEnvironment {
+	k := &kubeEnvironment{
+		ctx: ctx, dir: dir, seed: os.Getenv("KAIVO_STAGING_SEED"), trace: trace,
+		command:          strings.Fields(setting("KUBECTL", "kubectl")),
+		namespaces:       map[string]string{},
+		forwards:         map[string]*serviceForward{},
+		serviceByAddress: map[string]string{},
+		databases:        map[string]*pgx.ConnConfig{},
+		configs:          map[string]map[string]string{},
+		materials:        map[string][]byte{},
+	}
+	k.launchForward = k.forward
 	require(len(k.command) > 0, "empty KUBECTL")
 	var err error
 	k.syncDelay, err = time.ParseDuration(setting("AIPAY_DEMO_CONFIGMAP_SYNC", "75s"))
@@ -187,7 +198,8 @@ func (k *kubeEnvironment) input(name string) []byte {
 }
 func (k *kubeEnvironment) database(owner string) *pgx.ConnConfig {
 	domain := k.domain(owner)
-	k.ensureDatabaseForward(domain)
+	_, err := k.ensureForward(k.ctx, domain+"-pg-rw")
+	check(err)
 	if cfg := k.databases[owner]; cfg != nil {
 		return cfg.Copy()
 	}
@@ -229,17 +241,70 @@ func (k *kubeEnvironment) callbackCIDRs() []string {
 	slices.Sort(cidrs)
 	return cidrs
 }
-func (k *kubeEnvironment) cashierClient() *http.Client {
-	// Cashier links always advertise the seeded loopback origin. Dial this
-	// invocation's port-forward after cashier() has validated the full link.
-	var dialer net.Dialer
-	tr := &http.Transport{DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
-		return dialer.DialContext(ctx, network, net.JoinHostPort("127.0.0.1", strconv.Itoa(k.simPort)))
-	}}
-	return &http.Client{Transport: tr, Timeout: localHTTP.Timeout, CheckRedirect: localHTTP.CheckRedirect}
+func (k *kubeEnvironment) doHTTP(client *http.Client, req *http.Request) (*http.Response, error) {
+	service := k.serviceByAddress[req.URL.Host]
+	restarted, err := k.ensureForward(req.Context(), service)
+	if service == "backend" {
+		k.lastBackend = time.Now()
+	}
+	if err != nil {
+		return nil, err
+	}
+	if restarted {
+		// A pooled connection can still point at the previous kubectl process.
+		localHTTP.CloseIdleConnections()
+	}
+	return client.Do(req)
 }
-func getLocal(address, path string, limit int64) []byte {
-	res, e := localHTTP.Get("http://" + address + path)
+
+const backendKeepAliveInterval = 30 * time.Second
+
+// Run probes on the polling goroutine so a restart cannot race request dispatch or teardown.
+func (k *kubeEnvironment) pause(delay time.Duration) {
+	end := time.Now().Add(delay)
+	for !k.lastBackend.IsZero() {
+		next := k.lastBackend.Add(backendKeepAliveInterval)
+		if !next.Before(end) {
+			break
+		}
+		k.sleepUntil(next)
+		k.touchBackend()
+	}
+	k.sleepUntil(end)
+}
+
+func (k *kubeEnvironment) sleepUntil(end time.Time) {
+	select {
+	case <-k.ctx.Done():
+		stop("interrupted during Kubernetes wait")
+	case <-time.After(time.Until(end)):
+	}
+}
+
+func (k *kubeEnvironment) touchBackend() {
+	ctx, cancel := context.WithTimeout(k.ctx, 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+k.local(0)+"/health/live", nil)
+	check(err)
+	res, err := k.doHTTP(localHTTP, req)
+	if err != nil {
+		k.trace("Backend keep-alive failed")
+		return
+	}
+	defer res.Body.Close()
+	if _, err := io.Copy(io.Discard, io.LimitReader(res.Body, 4096)); err != nil || res.StatusCode != http.StatusOK {
+		k.trace(fmt.Sprintf("Backend keep-alive failed (HTTP %d)", res.StatusCode))
+	}
+}
+
+func (k *kubeEnvironment) cashierClient() (*http.Client, string) {
+	return localHTTP, net.JoinHostPort("127.0.0.1", strconv.Itoa(k.simPort))
+}
+
+func (k *kubeEnvironment) getLocal(address, path string, limit int64) []byte {
+	req, e := http.NewRequestWithContext(k.ctx, http.MethodGet, "http://"+address+path, nil)
+	check(e)
+	res, e := k.doHTTP(localHTTP, req)
 	require(e == nil, "forwarded HTTP endpoint unavailable")
 	defer res.Body.Close()
 	require(res.StatusCode == http.StatusOK, fmt.Sprintf("forwarded HTTP endpoint returned %d", res.StatusCode))
@@ -248,7 +313,7 @@ func getLocal(address, path string, limit int64) []byte {
 	return b
 }
 func (k *kubeEnvironment) fixtureRecord(name string) []byte {
-	return getLocal(k.local(4), "/"+name, 32<<20)
+	return k.getLocal(k.local(4), "/"+name, 32<<20)
 }
 func (k *kubeEnvironment) mailBody(recipient, subject string) []byte {
 	for start := 0; ; {
@@ -259,14 +324,14 @@ func (k *kubeEnvironment) mailBody(recipient, subject string) []byte {
 				To []struct{ Address string }
 			}
 		}
-		decode(getLocal(k.local(3), fmt.Sprintf("/api/v1/messages?start=%d&limit=50", start), 2<<20), &page)
+		decode(k.getLocal(k.local(3), fmt.Sprintf("/api/v1/messages?start=%d&limit=50", start), 2<<20), &page)
 		for _, m := range page.Messages {
 			if !slices.ContainsFunc(m.To, func(to struct{ Address string }) bool { return to.Address == recipient }) {
 				continue
 			}
 			require(mailpitID.MatchString(m.ID), "invalid Mailpit message id")
 			var detail struct{ Text string }
-			decode(getLocal(k.local(3), "/api/v1/message/"+m.ID, 1<<20), &detail)
+			decode(k.getLocal(k.local(3), "/api/v1/message/"+m.ID, 1<<20), &detail)
 			var body iamMail
 			if json.Unmarshal([]byte(detail.Text), &body) == nil && body.To == recipient && body.Subject == subject {
 				return []byte(detail.Text)
@@ -294,7 +359,7 @@ func (k *kubeEnvironment) syncMerchantKeys() {
 	check(err)
 	req.Header.Set("Authorization", "Bearer "+string(token))
 	req.Header.Set("Content-Type", "application/json")
-	res, err := localHTTP.Do(req)
+	res, err := k.doHTTP(localHTTP, req)
 	require(err == nil, "fixture configuration endpoint unavailable")
 	defer res.Body.Close()
 	require(res.StatusCode == http.StatusNoContent, "fixture configuration rejected")

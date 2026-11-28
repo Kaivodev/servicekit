@@ -25,7 +25,7 @@ func fakeKube(t *testing.T) *kubeEnvironment {
 	t.Setenv("AIPAY_DEMO_CONFIGMAP_SYNC", "1ms")
 	t.Setenv("DEMO_TEST_ROOT", dir)
 	t.Setenv("KUBECTL", "python3 -B testdata/fake_kubectl.py wrapper")
-	return newKubeEnvironment(t.Context(), dir)
+	return newKubeEnvironment(t.Context(), dir, func(line string) { t.Log(line) })
 }
 func failureText(f func()) (msg string) {
 	defer func() {

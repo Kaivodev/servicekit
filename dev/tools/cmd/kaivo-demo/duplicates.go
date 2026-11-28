@@ -56,7 +56,7 @@ func (d *driver) duplicateEnvelope() {
 		matches := d.rows("devcollection", "devcollection_outbox", "SELECT event_id FROM devcollection_outbox WHERE stream='collection.deposits' AND sequence=$1 AND event_id=$2 AND payload_digest=(SELECT payload_digest FROM devcollection_outbox WHERE receipt_key=$3)", seq, eid, key)
 		require(len(matches) == 1, "overlap event differs from the selected receipt")
 		d.evidence("event_id", eid)
-		waitFor("two authenticated ledger readers of the same immutable event", 90*time.Second, func() bool {
+		d.waitFor("two authenticated ledger readers of the same immutable event", 90*time.Second, func() bool {
 			b, e := os.ReadFile(p + ".proof")
 			if os.IsNotExist(e) {
 				return false
@@ -71,7 +71,7 @@ func (d *driver) duplicateEnvelope() {
 			d.evidence("collection_rpc", proof)
 			return true
 		})
-		waitFor("applied envelope and one wallet effect", 90*time.Second, func() bool {
+		d.waitFor("applied envelope and one wallet effect", 90*time.Second, func() bool {
 			inbox := d.rows("ledger", "ledger_inbox", "SELECT event_id,sequence,status FROM ledger_inbox WHERE event_id=$1 AND sequence=$2 AND status='applied'", eid, seq)
 			if len(inbox) != 1 {
 				return false
@@ -94,7 +94,7 @@ func (d *driver) duplicateEnvelope() {
 		})
 		// The loser must have actually verified the server's page. An RPC observed
 		// by the producer alone cannot establish that it reached both consumers.
-		waitFor("ledger consumer concurrent cursor check", 15*time.Second, func() bool {
+		d.waitFor("ledger consumer concurrent cursor check", 15*time.Second, func() bool {
 			for _, svc := range []string{"ledger", "ledger-reader"} {
 				if d.cursorMoved(svc, d.required("overlap-start")) {
 					d.evidence("concurrent_reader_log", "logs/"+svc+"/runtime.log")
@@ -139,7 +139,7 @@ func (d *driver) staleAuthorization() {
 	t.step("签发后推进冻结版本", func() {
 		var old object
 		limit := d.releaseWaitLimit(d.ledgerTrade(t.order), time.Now(), 2*time.Minute)
-		waitFor("signed release still awaiting ledger", limit, func() bool {
+		d.waitFor("signed release still awaiting ledger", limit, func() bool {
 			rs := d.rows("reconciliation", "reconciliation_authorizations/outbox", "SELECT a.authorization_id,a.control_version,o.sequence FROM reconciliation_authorizations a JOIN reconciliation_outbox o ON o.event_id=a.authorization_id WHERE a.order_id=$1 AND a.event_type='TradeReleaseAuthorized' AND o.sequence IS NOT NULL", t.order)
 			if len(rs) != 1 {
 				return false
@@ -167,7 +167,7 @@ func (d *driver) staleAuthorization() {
 		var auth, held object
 		d.read("stale-authorization", &auth)
 		d.read("stale-held", &held)
-		waitFor("quarantined superseded release", 60*time.Second, func() bool {
+		d.waitFor("quarantined superseded release", 60*time.Second, func() bool {
 			rows := d.rows("ledger", "ledger_inbox", "SELECT event_id,sequence,status,quarantine_reason FROM ledger_inbox WHERE event_id=$1", str(auth, "authorization_id"))
 			if len(rows) != 1 || rows[0]["status"] != "quarantined" {
 				return false

@@ -65,7 +65,7 @@ func sentToBoth(rows []object) bool {
 func (t tradeRun) notice(kind, heading, expected string) {
 	d := t.d
 	trade := d.required("trade-no/" + d.scope + "/" + t.name)
-	waitFor(heading+"在私聊和群各投递一次", time.Minute, func() bool {
+	d.waitFor(heading+"在私聊和群各投递一次", time.Minute, func() bool {
 		events := d.facts("payment", kind+"_outbox", `SELECT event_id,sequence,event_type FROM payment_outbox
             WHERE stream='payment.account_notices' AND order_id=$1 AND event_type=$2`, t.order, kind)
 		if len(events) == 0 {
@@ -103,7 +103,7 @@ func (d *driver) botNotices() {
 		t.notice("MerchantPaymentReceived", "已收款", paid)
 	})
 	d.step("开通时的审核通知", func() {
-		waitFor("开通审核推送记录", time.Minute, func() bool {
+		d.waitFor("开通审核推送记录", time.Minute, func() bool {
 			events := d.facts("payment", "review_events", `SELECT o.event_id,o.sequence,o.event_type FROM payment_outbox o JOIN payment_access_changes a ON a.audit_id=o.review_audit_id
                 WHERE o.stream='payment.account_notices' AND o.event_type='PaymentAccessReviewed' AND a.access_id=$1 ORDER BY o.sequence`, d.required("access"))
 			for _, event := range events {

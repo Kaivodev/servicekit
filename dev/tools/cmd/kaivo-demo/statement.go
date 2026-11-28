@@ -79,7 +79,7 @@ func (d *driver) statement() {
 		if delay := time.Until(cutoff); delay > 0 {
 			d.sleep(delay)
 		}
-		waitFor("已结束业务日的商户日结（检查日结任务与迁移 000016）", 2*time.Minute, func() bool {
+		d.waitFor("已结束业务日的商户日结（检查日结任务与迁移 000016）", 2*time.Minute, func() bool {
 			if selectFile() {
 				return true
 			}

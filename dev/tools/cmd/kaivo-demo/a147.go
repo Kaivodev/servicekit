@@ -111,7 +111,7 @@ const disputeObservationSQL = `SELECT p.dispute_id,p.state,p.resolution,p.fence_
 
 func (r paidDispute) observation(state, resolution, ruling string, limit time.Duration) object {
 	var row object
-	waitFor("dispute payment "+state, limit, func() bool {
+	r.d.waitFor("dispute payment "+state, limit, func() bool {
 		rows := r.d.facts("payment", "payment_"+state, disputeObservationSQL, r.order)
 		if len(rows) == 0 {
 			return false
@@ -149,7 +149,7 @@ func checkDisputeObservation(row object, state, resolution, ruling string) {
 
 func (r paidDispute) verified(resolution, ruling string) object {
 	row := r.observation("verified", resolution, ruling, 2*time.Minute)
-	waitFor("ledger OrderPaid on the disputed escrow", 2*time.Minute, func() bool {
+	r.d.waitFor("ledger OrderPaid on the disputed escrow", 2*time.Minute, func() bool {
 		h := oneFact(r.d.facts("ledger", "paid_escrow", `SELECT status,dispute_id,control_version,paid_verified_at
 			FROM ledger_trade_reservations WHERE order_id=$1`, r.order), "ledger trade")
 		if h["paid_verified_at"] == nil {
@@ -167,7 +167,7 @@ const rulingReportSQL = `SELECT disposition,reason,reviewed_at,reported_at FROM 
 
 func (r paidDispute) reportedDenial(ruling string) object {
 	var report, review object
-	waitFor("reported reconciliation denial", 3*time.Minute, func() bool {
+	r.d.waitFor("reported reconciliation denial", 3*time.Minute, func() bool {
 		rows := r.d.facts("reconciliation", "ruling_report", rulingReportSQL, r.order, r.dispute, ruling, r.version)
 		if len(rows) == 0 {
 			return false
@@ -176,7 +176,7 @@ func (r paidDispute) reportedDenial(ruling string) object {
 		require(report["disposition"] == "denied" && report["reason"] == "payment_observed", "unexpected reconciliation ruling disposition")
 		return report["reported_at"] != nil
 	})
-	waitFor("payment to record the denial and lapse the return ruling", 2*time.Minute, func() bool {
+	r.d.waitFor("payment to record the denial and lapse the return ruling", 2*time.Minute, func() bool {
 		review = oneFact(r.d.facts("payment", "return_ruling", `SELECT stage,review_disposition,review_reason,reviewed_at,review_recorded_at
 			FROM payment_dispute_rulings WHERE id=$1 AND dispute_id=$2`, ruling, r.dispute), "approved return ruling")
 		return review["stage"] == "lapsed" && review["review_recorded_at"] != nil
@@ -240,7 +240,7 @@ func (r paidDispute) checkTradeInbox(outcome, ruling string) {
 		event = "TradeCancelled"
 	}
 	require(exec["result_status"] == outcome, "unexpected ledger authorization outcome")
-	waitFor("payment to consume "+event, 2*time.Minute, func() bool {
+	r.d.waitFor("payment to consume "+event, 2*time.Minute, func() bool {
 		rows := d.facts("payment", "terminal_inbox", `SELECT status,quarantine_reason FROM payment_trade_inbox
 			WHERE stream='ledger.trades' AND event_type=$1 AND event_id=$2`, event, str(exec, "result_event_id"))
 		if len(rows) == 0 || rows[0]["status"] == "pending" {
@@ -338,7 +338,7 @@ func (r paidDispute) raceBeforeResume(ruling string) {
 	d := r.d
 	configured := d.env("reconciliation")[lateWindowEnv]
 	timing, _ := r.awaitFirstUnpaid(configured, 2*time.Minute)
-	waitFor("signed cancellation for the approved return", max(2*time.Minute, timing.observationTimeout()), func() bool {
+	r.d.waitFor("signed cancellation for the approved return", max(2*time.Minute, timing.observationTimeout()), func() bool {
 		rows := d.facts("reconciliation", "signed_cancellation", `SELECT a.authorization_id,a.issued_at,o.sequence FROM reconciliation_authorizations a
 			JOIN reconciliation_outbox o ON o.event_id=a.authorization_id WHERE a.order_id=$1 AND a.ruling_id=$2
 			AND a.control_version=$3 AND a.event_type='TradeCancellationAuthorized' AND o.stream='reconciliation.matches' AND o.signature IS NOT NULL`, r.order, ruling, r.version)
@@ -387,7 +387,7 @@ func (d *driver) runDisputePaidRace() {
 	ruling := str(s.Evidence, "approval_id")
 	cancelled := r.step("Check cancellation and the linked late payment", func() {
 		deadline := ledgerTime(normalized(s.Evidence), "authorization_expires_at")
-		waitFor("ledger cancellation before the signed authorization expires", 2*time.Minute, func() bool {
+		r.d.waitFor("ledger cancellation before the signed authorization expires", 2*time.Minute, func() bool {
 			h := d.ledgerTrade(r.order)
 			if h["status"] == "CANCELLED" {
 				require(h["paid_verified_at"] == nil && units(h, "held_usdt_micro") == 0, "cancelled escrow retained a payment or hold")

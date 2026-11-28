@@ -19,6 +19,7 @@ import (
 // to the driver. All access to a running stack goes through this boundary.
 type demoEnvironment interface {
 	native() bool
+	pause(time.Duration)
 	env(service string) map[string]string
 	addresses() endpoints
 	callbackCIDRs() []string
@@ -27,7 +28,8 @@ type demoEnvironment interface {
 	mailBody(recipient, subject string) []byte
 	fixtureRecord(name string) []byte
 	syncMerchantKeys()
-	cashierClient() *http.Client
+	doHTTP(*http.Client, *http.Request) (*http.Response, error)
+	cashierClient() (*http.Client, string)
 	owner(service, dbvar string, args ...string) []byte
 	refreshMarket()
 	stack(args ...string) []byte
@@ -37,7 +39,8 @@ type demoEnvironment interface {
 type endpoints struct{ public, admin, seller, sim, gateway, cashier, notify string }
 type nativeEnvironment struct{ root, repo, dir string }
 
-func (nativeEnvironment) native() bool { return true }
+func (nativeEnvironment) native() bool              { return true }
+func (nativeEnvironment) pause(delay time.Duration) { time.Sleep(delay) }
 func (nativeEnvironment) addresses() endpoints {
 	return endpoints{"127.0.0.1:8080", "127.0.0.1:8081", "127.0.0.1:8082", "http://127.0.0.1:9080", "http://127.0.0.1:9080", "https://127.0.0.1:9443", notifyOrigin}
 }
@@ -69,11 +72,15 @@ func (d nativeEnvironment) fixtureRecord(name string) []byte {
 	return b
 }
 func (nativeEnvironment) syncMerchantKeys() {}
-func (d nativeEnvironment) cashierClient() *http.Client {
+func (nativeEnvironment) doHTTP(client *http.Client, req *http.Request) (*http.Response, error) {
+	return client.Do(req)
+}
+
+func (d nativeEnvironment) cashierClient() (*http.Client, string) {
 	roots := x509.NewCertPool()
 	require(roots.AppendCertsFromPEM(d.input("certs/ca.crt")), "missing cashier CA")
 	tr := &http.Transport{TLSClientConfig: &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12}}
-	return &http.Client{Transport: tr, Timeout: 8 * time.Second, CheckRedirect: localHTTP.CheckRedirect}
+	return &http.Client{Transport: tr, Timeout: 8 * time.Second, CheckRedirect: localHTTP.CheckRedirect}, ""
 }
 func (d nativeEnvironment) mailBody(recipient, subject string) []byte {
 	paths, e := filepath.Glob(filepath.Join(d.root, "data/iam/mail", "*.json"))
@@ -136,7 +143,7 @@ func (d nativeEnvironment) archiveWork(bin string, env, args []string) []byte {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	var reply []byte
-	waitFor("payment to release the order work lease", timeout, func() bool {
+	waitFor(time.Sleep, "payment to release the order work lease", timeout, func() bool {
 		cmd := exec.CommandContext(ctx, bin, args...)
 		cmd.Dir, cmd.Env = d.dir, env
 		var err error

@@ -157,7 +157,7 @@ func (d *driver) runA144NotSent() {
 	t, _ := d.a144Trade("建单未发送")
 	t.step("核对未发送与重新派单", func() {
 		var audits []object
-		waitFor("原单重派成功审计", 2*time.Minute, func() bool {
+		d.waitFor("原单重派成功审计", 2*time.Minute, func() bool {
 			audits = d.facts("payment", "派单许可与结果", `SELECT id,action,occurred_at FROM payment_audit_logs
 				WHERE target_type='order' AND target_id=$1 AND action IN ('order.dispatch_control','order.dispatch_not_sent','order.retry_claimed','order.dispatched')
 				ORDER BY occurred_at,id`, t.order)
@@ -189,7 +189,7 @@ func (d *driver) runA144NotSent() {
 func (d *driver) runA144NotFound() {
 	t, pins := d.a144Trade("建单丢失")
 	t.step("核对创建未知与缺单等待", func() {
-		waitFor("创建未知与原单等待审计", 2*time.Minute, func() bool {
+		d.waitFor("创建未知与原单等待审计", 2*time.Minute, func() bool {
 			rows := d.facts("payment", "创建与缺单查询", `SELECT u.id AS unknown_id,u.action AS create_action,u.occurred_at AS unknown_at,
 				c.exchange_id AS create_exchange,c.category AS create_category,c.requests AS create_requests,c.responses AS create_responses,
 				w.id AS waiting_id,w.action,w.changes#>>'{metadata,outcome}' AS outcome,w.changes#>>'{metadata,not_before}' AS not_before,
@@ -209,7 +209,7 @@ func (d *driver) runA144NotFound() {
 	t.backdateA144Create()
 	intent := t.step("核对系统关单意图", func() {
 		// Allow a complete normal polling interval if the worker was already leased.
-		waitFor("系统缺单关单意图", 11*time.Minute, func() bool {
+		d.waitFor("系统缺单关单意图", 11*time.Minute, func() bool {
 			rows := d.facts("payment", "系统关单审计", `SELECT id,action,occurred_at,changes->'metadata' AS metadata
 				FROM payment_audit_logs WHERE target_type='order' AND target_id=$1 AND action='order.system_close_requested'
 				AND changes#>>'{metadata,reason}'=$2`, t.order, a144Reason)
@@ -224,7 +224,7 @@ func (d *driver) runA144NotFound() {
 	})
 	request := t.step("核对缺单取消核验请求", func() {
 		var rows []object
-		waitFor("取消核验请求", 2*time.Minute, func() bool {
+		d.waitFor("取消核验请求", 2*time.Minute, func() bool {
 			rows = d.rows("payment", "payment_outbox", `SELECT event_id,sequence,cancellation_version,encode(payload,'hex') AS payload
 				FROM payment_outbox WHERE order_id=$1 AND event_type='OrderCancellationVerificationRequested' AND schema_version=1 AND sequence IS NOT NULL`, t.order)
 			return len(rows) > 0
@@ -299,7 +299,7 @@ func (t tradeRun) cancellationEvidence(verifyPlugin string, version int64, reaso
 	d := t.d
 	step := t.step(label, func() {
 		var authorizations []object
-		waitFor("带缺单原因的取消授权", 2*time.Minute, func() bool {
+		d.waitFor("带缺单原因的取消授权", 2*time.Minute, func() bool {
 			authorizations = d.facts("reconciliation", "取消授权与审计", `SELECT r.authorization_id,r.event_type,r.control_version,r.issued_at,a.action,a.reason_code,
 				convert_from(r.evidence_material,'UTF8')::jsonb#>>'{Review,Evidence,Cancellation,First,ID}' AS first_id,
 				convert_from(r.evidence_material,'UTF8')::jsonb#>>'{Review,Evidence,Cancellation,Second,ID}' AS second_id

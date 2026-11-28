@@ -31,7 +31,7 @@ func (k *kubeEnvironment) owner(service, dbvar string, args ...string) []byte {
 	}()
 	k.kubectl(encoded(pod), ns, "create", "-f", "-")
 	var phase string
-	waitFor("owner Pod "+name, 4*time.Minute, func() bool {
+	waitFor(k.pause, "owner Pod "+name, 4*time.Minute, func() bool {
 		phase = strings.TrimSpace(string(k.kubectl(nil, ns, "get", "pod", name, "-o", "jsonpath={.status.phase}")))
 		return phase == "Succeeded" || phase == "Failed"
 	})

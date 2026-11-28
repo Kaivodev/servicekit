@@ -82,7 +82,7 @@ func (b *browser) send(req *http.Request, label string) (int, []byte) {
 }
 
 func (b *browser) sendWithHeaders(req *http.Request, label string) (int, []byte, http.Header) {
-	res, e := localHTTP.Do(req)
+	res, e := b.d.doHTTP(localHTTP, req)
 	return b.response(req, label, res, e)
 }
 
@@ -129,7 +129,7 @@ func (b *browser) sendTracked(req *http.Request, label string, markSent func() e
 		}}
 		req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
 	}
-	res, err := client.Do(req)
+	res, err := b.d.doHTTP(&client, req)
 	if res != nil {
 		written()
 	}
@@ -450,7 +450,7 @@ func matchesMail(b []byte, recipient, subject string) bool {
 }
 func (d *driver) mail(name, subject string) string {
 	var body []byte
-	waitFor("IAM mail for "+name, 90*time.Second, func() bool {
+	d.waitFor("IAM mail for "+name, 90*time.Second, func() bool {
 		body = d.mailBody(d.email(name), subject)
 		return body != nil
 	})

@@ -313,7 +313,7 @@ func (t tradeRun) forcedClose(reason string, wantBasis pay.OrderCancellationBasi
 			FROM payment_orders o JOIN payment_admin_requests a ON a.id=o.forced_close_request_id WHERE o.id=$1`, t.order), "approved close")
 		require(a["close_reason"] == forcedReason && a["forced_close_request_id"] == aid && a["approved_at"] != nil, "order does not cite the approved close")
 		var rows []object
-		waitFor("sequenced cancellation request", 2*time.Minute, func() bool {
+		d.waitFor("sequenced cancellation request", 2*time.Minute, func() bool {
 			rows = d.rows("payment", "payment_outbox", `SELECT event_id,sequence,cancellation_version,encode(payload,'hex') AS payload FROM payment_outbox
 				WHERE order_id=$1 AND event_type='OrderCancellationVerificationRequested' AND schema_version=1 AND sequence IS NOT NULL`, t.order)
 			return len(rows) > 0
@@ -344,7 +344,7 @@ func (t tradeRun) cancelled(approvalID, verifyPlugin, reason, outcome string) *r
 	var version int64
 	require(d.read("close-version/"+approvalID, &version), "missing cancellation version")
 	t.step("Match the reconciliation request to the payment event", func() {
-		waitFor("reconciliation cancellation request", 2*time.Minute, func() bool {
+		d.waitFor("reconciliation cancellation request", 2*time.Minute, func() bool {
 			rows := d.facts("reconciliation", "verification_request", `SELECT r.event_id,coalesce(to_jsonb(r)->>'cancellation_basis', to_jsonb(r)->>'basis') AS basis
                 FROM reconciliation_verification_requests r WHERE r.event_id=$1`, d.required("close-event/"+approvalID))
 			if len(rows) == 0 {
@@ -373,7 +373,7 @@ func (d *driver) runA145NeverSent() {
 	pins := t.pluginPins()
 	t.createA145(pins[t.channel])
 	t.step("Wait for an unsent create eligible for forced close", func() {
-		waitFor("retry_create after a dispatch that sent no request", time.Minute, func() bool {
+		d.waitFor("retry_create after a dispatch that sent no request", time.Minute, func() bool {
 			rows := d.facts("payment", "unsent_dispatch", `SELECT a.id,a.occurred_at,o.stage FROM payment_orders o JOIN payment_audit_logs a
 				ON a.target_id=o.id::text AND a.target_type='order' AND a.action='order.dispatch_not_sent' WHERE o.id=$1 AND o.stage='retry_create'`, t.order)
 			if len(rows) == 0 {
@@ -473,7 +473,7 @@ func (d *driver) runA145StaleBinding() {
 	restore = true
 	t.createA145(d.required(key))
 	t.step("Observe payment's stale query classification", func() {
-		waitFor("unavailable order query from the historical trade package", 2*time.Minute, func() bool {
+		d.waitFor("unavailable order query from the historical trade package", 2*time.Minute, func() bool {
 			rows := d.facts("payment", "unavailable_queries", `SELECT a.id,a.occurred_at,q.exchange_id,q.category,q.upstream_code
 				FROM payment_audit_logs a JOIN payment_gateway_executions q ON q.order_id=$1::uuid AND q.operation='query_payment'
 				WHERE a.target_type='order' AND a.target_id=($1::uuid)::text AND a.action='order.query_unavailable'
@@ -495,7 +495,7 @@ func (d *driver) runA145UnpaidBeforeT() {
 	pins := t.pluginPins()
 	t.createA145(pins[t.channel])
 	t.step("Observe payment waiting after a missing order query", func() {
-		waitFor("not-found query with waiting outcome", 2*time.Minute, func() bool {
+		d.waitFor("not-found query with waiting outcome", 2*time.Minute, func() bool {
 			rows := d.facts("payment", "waiting_query", `SELECT a.id,a.occurred_at,a.changes#>>'{metadata,outcome}' AS outcome,q.exchange_id,q.upstream_code
 				FROM payment_audit_logs a JOIN payment_gateway_executions q ON q.order_id=$1::uuid AND encode(q.evidence_sha256,'hex')=a.changes#>>'{metadata,query_evidence_sha256}'
 				WHERE a.target_type='order' AND a.target_id=($1::uuid)::text AND a.action='order.query_not_found' AND a.changes#>>'{metadata,outcome}'='waiting'
@@ -614,7 +614,7 @@ func (d *driver) runA145Refusals() {
 	})
 	t.step("Pay the order while the approval is pending", t.payA145Cashier)
 	t.step("Refuse the first approver after payment evidence", func() {
-		waitFor("payment owner to report payment", 2*time.Minute, func() bool {
+		d.waitFor("payment owner to report payment", 2*time.Minute, func() bool {
 			v := t.view()
 			blockers, _ := v["blockers"].([]any)
 			if slices.Contains(blockers, any("payment_reported")) {

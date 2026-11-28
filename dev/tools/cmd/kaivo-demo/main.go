@@ -97,7 +97,7 @@ func executeContext(ctx context.Context, args []string) (err error) {
 	}
 	var kube *kubeEnvironment
 	if mode == "k8s" {
-		kube = newKubeEnvironment(ctx, dir)
+		kube = newKubeEnvironment(ctx, dir, d.traceForward)
 		d.demoEnvironment = kube
 		defer kube.closeForwards()
 		d.history.Logs = "kubectl logs（各服务所在命名空间）"

@@ -219,7 +219,7 @@ func (d *driver) merchant() {
 				require(v1KeyReply.MatchString(m.Text), "IAM did not deliver V1 KEY")
 				check(atomic(filepath.Join(d.dir, "merchant-key.json"), encoded(object{"PID": d.required("pid/v1"), "Key": m.Text})))
 				d.syncMerchantKeys()
-				waitFor("backend deleteMessage for KEY", 6*time.Minute, func() bool {
+				d.waitFor("backend deleteMessage for KEY", 6*time.Minute, func() bool {
 					for _, msg := range d.messages() {
 						if msg.ID == m.ID && msg.Chat == merchantUser {
 							return msg.Deleted

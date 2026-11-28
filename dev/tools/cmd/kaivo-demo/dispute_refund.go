@@ -206,7 +206,7 @@ func (t tradeRun) rulingTriggers(grace time.Duration) []object {
 					d.evidence("裁决触发观察", "截至本次读取尚无终态处置")
 					break
 				}
-				time.Sleep(400 * time.Millisecond)
+				d.pause(400 * time.Millisecond)
 			}
 		}
 	}
@@ -280,7 +280,7 @@ func (t tradeRun) proveRefundExecution(after bool, dispute, ruling, refund strin
 
 	// Wait for both payment envelopes to reach ledger before counting their
 	// effects. A separate stream may already have delivered the authorization.
-	waitFor("ledger 接收裁决和退款事件", time.Minute, func() bool {
+	d.waitFor("ledger 接收裁决和退款事件", time.Minute, func() bool {
 		rows := d.facts("ledger", "ledger_inbox 两类触发", `SELECT event_id,event_type,status FROM ledger_inbox
 			WHERE stream='payment.orders' AND event_id IN ($1,$2) ORDER BY sequence`, trigger, succeeded)
 		return len(rows) == 2 && rows[0]["status"] != "pending" && rows[1]["status"] != "pending"

@@ -17,13 +17,10 @@ type forward struct {
 	done chan struct{}
 }
 
-// dbForward remembers how a CNPG forward was started so it can be restarted:
-// kubectl port-forward exits ("lost connection to pod") when PostgreSQL resets
-// a closed connection, which happens after ordinary short-lived queries.
-type dbForward struct {
-	ns, service string
-	mappings    []string
-	current     *forward
+type serviceForward struct {
+	ns       string
+	mappings []string
+	current  *forward
 }
 
 func (f *forward) exited() bool {
@@ -35,11 +32,18 @@ func (f *forward) exited() bool {
 	}
 }
 
-// ensureDatabaseForward restarts the domain's database forward if it exited.
-func (k *kubeEnvironment) ensureDatabaseForward(domain string) {
-	if f := k.dbForwards[domain]; f != nil && f.current.exited() {
-		f.current = k.forward(f.ns, f.service, f.mappings)
+func (k *kubeEnvironment) ensureForward(ctx context.Context, service string) (bool, error) {
+	f := k.forwards[service]
+	if f == nil || !f.current.exited() {
+		return false, nil
 	}
+	current, err := k.launchForward(ctx, f.ns, service, f.mappings)
+	if err != nil {
+		return false, err
+	}
+	f.current = current
+	k.trace("Restarted port-forward for " + service)
+	return true, nil
 }
 
 func (k *kubeEnvironment) startForwards() {
@@ -55,14 +59,21 @@ func (k *kubeEnvironment) startForwards() {
 		{"ledger", "ledger-pg-rw", []string{fmt.Sprintf("%d:5432", k.base+6)}},
 		{"reconciliation", "reconciliation-pg-rw", []string{fmt.Sprintf("%d:5432", k.base+7)}},
 	} {
-		f := k.forward(k.namespaces[s.domain], s.service, s.mappings)
-		if strings.HasSuffix(s.service, "-pg-rw") {
-			k.dbForwards[s.domain] = &dbForward{k.namespaces[s.domain], s.service, s.mappings, f}
+		ns := k.namespaces[s.domain]
+		current, err := k.launchForward(k.ctx, ns, s.service, s.mappings)
+		check(err)
+		k.forwards[s.service] = &serviceForward{ns, s.mappings, current}
+		for _, mapping := range s.mappings {
+			port, _, _ := strings.Cut(mapping, ":")
+			k.serviceByAddress[net.JoinHostPort("127.0.0.1", port)] = s.service
+		}
+		if s.service == "backend" {
+			k.lastBackend = time.Now()
 		}
 	}
 }
 
-func (k *kubeEnvironment) forward(ns, service string, mappings []string) *forward {
+func (k *kubeEnvironment) forward(parent context.Context, ns, service string, mappings []string) (*forward, error) {
 	for _, mapping := range mappings {
 		local, _, _ := strings.Cut(mapping, ":")
 		// After a forward exits, a VM wrapper (such as Lima) releases the host
@@ -74,8 +85,14 @@ func (k *kubeEnvironment) forward(ns, service string, mappings []string) *forwar
 				l.Close()
 				break
 			}
-			require(time.Now().Before(deadline), "local port "+local+" already in use")
-			time.Sleep(250 * time.Millisecond)
+			if !time.Now().Before(deadline) {
+				return nil, fmt.Errorf("local port %s already in use", local)
+			}
+			select {
+			case <-parent.Done():
+				return nil, parent.Err()
+			case <-time.After(250 * time.Millisecond):
+			}
 		}
 	}
 	args := append([]string{"-n", ns, "port-forward", "--address", "127.0.0.1", "service/" + service}, mappings...)
@@ -86,10 +103,13 @@ func (k *kubeEnvironment) forward(ns, service string, mappings []string) *forwar
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Stderr = io.Discard
 	out, e := cmd.StdoutPipe()
-	check(e)
-	require(cmd.Start() == nil, "could not start port-forward for "+service)
+	if e != nil {
+		return nil, e
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("could not start port-forward for %s", service)
+	}
 	f := &forward{cmd, make(chan struct{})}
-	k.forwards = append(k.forwards, f)
 	ready := make(chan struct{})
 	go func() {
 		pending := map[string]bool{}
@@ -109,14 +129,15 @@ func (k *kubeEnvironment) forward(ns, service string, mappings []string) *forwar
 		cmd.Wait()
 		close(f.done)
 	}()
-	ctx, cancel := context.WithTimeout(k.ctx, 25*time.Second)
+	ctx, cancel := context.WithTimeout(parent, 25*time.Second)
 	defer cancel()
 	select {
 	case <-ready:
 	case <-f.done:
-		stop("port-forward for %s exited before binding %s", service, strings.Join(mappings, ","))
+		return nil, fmt.Errorf("port-forward for %s exited before binding %s", service, strings.Join(mappings, ","))
 	case <-ctx.Done():
-		stop("port-forward for %s did not become ready", service)
+		f.close()
+		return nil, fmt.Errorf("port-forward for %s did not become ready", service)
 	}
 	// A multi-word wrapper may have bound inside a VM. Confirm the driver can reach it.
 	for _, mapping := range mappings {
@@ -130,30 +151,35 @@ func (k *kubeEnvironment) forward(ns, service string, mappings []string) *forwar
 			}
 			select {
 			case <-ctx.Done():
-				stop("port-forward for %s is unreachable on local port %s", service, local)
+				f.close()
+				return nil, fmt.Errorf("port-forward for %s is unreachable on local port %s", service, local)
 			case <-f.done:
-				stop("port-forward for %s exited", service)
+				return nil, fmt.Errorf("port-forward for %s exited", service)
 			case <-time.After(100 * time.Millisecond):
 			}
 		}
 	}
-	return f
+	return f, nil
 }
+
+func (f *forward) close() {
+	if f.exited() {
+		return
+	}
+	syscall.Kill(-f.cmd.Process.Pid, syscall.SIGTERM)
+	select {
+	case <-f.done:
+	case <-time.After(2 * time.Second):
+		syscall.Kill(-f.cmd.Process.Pid, syscall.SIGKILL)
+		<-f.done
+	}
+}
+
 func (k *kubeEnvironment) closeForwards() {
 	for _, f := range k.forwards {
-		select {
-		case <-f.done:
-		default:
-			syscall.Kill(-f.cmd.Process.Pid, syscall.SIGTERM)
-		}
+		f.current.close()
 	}
-	for _, f := range k.forwards {
-		select {
-		case <-f.done:
-		case <-time.After(2 * time.Second):
-			syscall.Kill(-f.cmd.Process.Pid, syscall.SIGKILL)
-			<-f.done
-		}
-	}
-	k.forwards = nil
+	clear(k.forwards)
+	clear(k.serviceByAddress)
+	k.lastBackend = time.Time{}
 }

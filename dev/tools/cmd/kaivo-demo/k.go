@@ -51,7 +51,7 @@ func (d *driver) runKQueryTransient() {
 	})
 	require(d.read(queryPauseKey, &pause), "missing listener pause times")
 	t.step("Check the unpaid order after a failed query", func() {
-		waitFor("an unavailable query during the listener pause", time.Until(pause.ResumeAt), func() bool {
+		d.waitFor("an unavailable query during the listener pause", time.Until(pause.ResumeAt), func() bool {
 			pause.requireActive()
 			audits := d.facts("payment", "unavailable_queries", `SELECT id,occurred_at,changes#>>'{metadata,kind}' AS kind
 				FROM payment_audit_logs WHERE target_type='order' AND target_id=$1 AND action='order.query_unavailable'
@@ -97,7 +97,7 @@ func (t tradeRun) archiveCancellationWork(waitForRequest bool) {
 	d := t.d
 	d.step("Archive the order work before cancellation authorization", func() {
 		if waitForRequest {
-			waitFor("payment to request cancellation verification", 30*time.Second, func() bool {
+			d.waitFor("payment to request cancellation verification", 30*time.Second, func() bool {
 				rows := d.facts("payment", "cancellation_request", `SELECT id,cancellation_version FROM payment_orders
 					WHERE id=$1 AND cancellation_version>0`, t.order)
 				return len(rows) == 1
