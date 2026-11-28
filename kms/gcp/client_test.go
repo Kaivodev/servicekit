@@ -79,35 +79,63 @@ func TestRetryNetworkError(t *testing.T) {
 	}
 }
 
+// attemptTransport counts attempts on the client, so an attempt that times out
+// before its request reaches the server still counts, and checks that each one
+// runs under the per-attempt deadline.
+type attemptTransport struct {
+	*http.Transport
+	t        *testing.T
+	timeout  time.Duration
+	attempts atomic.Int32
+}
+
+func (tr *attemptTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	attempt := tr.attempts.Add(1)
+	if deadline, ok := r.Context().Deadline(); !ok {
+		tr.t.Errorf("attempt %d has no deadline", attempt)
+	} else if remaining := time.Until(deadline); remaining > tr.timeout {
+		tr.t.Errorf("attempt %d deadline in %v, want at most %v", attempt, remaining, tr.timeout)
+	}
+	return tr.Transport.RoundTrip(r)
+}
+
 func TestAttemptDeadlineAndBudget(t *testing.T) {
-	var attempts atomic.Int32
-	c := tlsClient(t, func(w http.ResponseWriter, r *http.Request) {
-		attempts.Add(1)
-		_, _ = io.Copy(io.Discard, r.Body)
-		<-r.Context().Done()
-	}, WithTimeout(120*time.Millisecond), WithMaxAttempts(2))
-	key, _ := c.SymmetricKey(resource)
-	if _, err := key.Decrypt(t.Context(), []byte("input"), nil); !errors.Is(err, context.DeadlineExceeded) || attempts.Load() != 2 {
-		t.Fatalf("timeouts=%d err=%v", attempts.Load(), err)
+	newKey := func(timeout time.Duration, handler http.HandlerFunc) (*SymmetricKey, *attemptTransport) {
+		c := tlsClient(t, handler, WithTimeout(timeout), WithMaxAttempts(2))
+		tr := &attemptTransport{Transport: c.http.Transport.(*http.Transport), t: t, timeout: timeout}
+		c.http.Transport = tr
+		key, _ := c.SymmetricKey(resource)
+		return key, tr
 	}
 
-	started := make(chan struct{})
-	c = tlsClient(t, func(w http.ResponseWriter, r *http.Request) {
-		close(started)
-		http.Error(w, "private", 429)
+	key, tr := newKey(120*time.Millisecond, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		<-r.Context().Done()
+		// A normal return writes an empty 200 that can race the client's cancellation.
+		panic(http.ErrAbortHandler)
 	})
-	key, _ = c.SymmetricKey(resource)
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	go func() {
-		select {
-		case <-started:
-			cancel()
-		case <-ctx.Done():
+	watchdog := time.AfterFunc(15*time.Second, cancel)
+	_, err := key.Decrypt(ctx, []byte("input"), nil)
+	watchdog.Stop()
+	if attempts := tr.attempts.Load(); !errors.Is(err, context.DeadlineExceeded) || attempts != 2 {
+		t.Fatalf("attempts=%d err=%v cause=%v, want 2 attempts and deadline exceeded", attempts, err, errors.Unwrap(err))
+	}
+
+	parent, cancelParent := context.WithCancel(t.Context())
+	defer cancelParent()
+	var calls atomic.Int32
+	// The attempt timeout is long so that only the parent cancellation ends the call.
+	key, tr = newKey(15*time.Second, func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 1 {
+			cancelParent()
 		}
-	}()
-	if _, err := key.Decrypt(ctx, []byte("input"), nil); !errors.Is(err, context.Canceled) {
-		t.Fatal("parent cancellation ignored", err)
+		http.Error(w, "private", http.StatusTooManyRequests)
+	})
+	_, err = key.Decrypt(parent, []byte("input"), nil)
+	if attempts, served := tr.attempts.Load(), calls.Load(); !errors.Is(err, context.Canceled) || attempts != 1 || served != 1 {
+		t.Fatalf("attempts=%d server calls=%d err=%v cause=%v, want 1 attempt, 1 server call and parent cancellation", attempts, served, err, errors.Unwrap(err))
 	}
 }
 
