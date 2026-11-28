@@ -32,9 +32,11 @@ func TestReportOutputArguments(t *testing.T) {
 	for _, command := range [][]string{{"setup"}, {"setup", "seller"}, {"run", "main"}} {
 		t.Run(strings.Join(command, "-"), func(t *testing.T) {
 			root := t.TempDir()
+			// A gateway stack whose backend configuration is missing.
+			check(atomic(filepath.Join(root, "env/payment.env"), []byte("AIPAY_UPSTREAM_GATEWAY_ADDRESS=trade")))
 			out := filepath.Join(root, "custom-report.json")
 			args := append([]string{root, "."}, command...)
-			// The empty stack stops at the first prerequisite, after parsing and
+			// The stack stops at the first missing prerequisite, after parsing and
 			// writing the report, without any service requests.
 			err := execute(append(args, "-o", out))
 			if err == nil || !strings.Contains(err.Error(), "backend.env") {
@@ -465,19 +467,6 @@ func TestBrowserOriginCookieRotation(t *testing.T) {
 	b.api("POST", "/auth/login", "stable", object{"email": "a@example.test", "password": "example"})
 	if d.browser("admin2").cookies["__Host-session"] != "" || newDriver(d.root, "", "setup").browser("admin1").cookies["__Host-session"] != "result" {
 		t.Fatal("cookie scope/persistence")
-	}
-}
-
-// The owners and the backend command digest accept only sorted, compact
-// manifests; pluginctl writes struct order. Integers must stay verbatim.
-func TestCanonicalManifest(t *testing.T) {
-	raw := []byte("{\n  \"type\": \"payment\",\n  \"code\": \"sim\",\n  \"abi_version\": 2,\n  \"domains\": [\"a<b\"],\n  \"public_keys\": []\n}\n")
-	want := `{"abi_version":2,"code":"sim","domains":["a<b"],"public_keys":[],"type":"payment"}`
-	if got := string(canonicalManifest(raw)); got != want {
-		t.Fatalf("canonical manifest = %s", got)
-	}
-	if got := canonicalManifest([]byte(want)); string(got) != want {
-		t.Fatal("canonical manifest is not idempotent")
 	}
 }
 

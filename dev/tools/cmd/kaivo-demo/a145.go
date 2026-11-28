@@ -38,7 +38,7 @@ func isA145Scenario(name string) bool {
 }
 
 func (d *driver) a145Order() tradeRun {
-	amount, channel := scenarioOrder(d.scope, true)
+	amount, channel := scenarioOrder(d.scope)
 	return tradeRun{d: d, name: "EPay", proto: "v1", number: d.key(d.scope + "/EPay"), channel: channel, amount: amount}
 }
 

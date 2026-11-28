@@ -32,7 +32,10 @@ func (d *driver) checkA144Environment(scenario string, startForwards func()) {
 		case scenario != disputePaidRelease && scenario != disputePaidRefund:
 			d.requireNative(scenario)
 		}
-		require(d.gatewayMode() && d.env("reconciliation")["AIPAY_RECONCILIATION_UPSTREAM_GATEWAY_ADDRESS"] != "", scenario+" 需要交易与核验网关")
+		d.requireGateways()
+		if d.native() {
+			require(d.env("reconciliation")["AIPAY_RECONCILIATION_UPSTREAM_GATEWAY_ADDRESS"] != "", scenario+" requires a verification gateway address")
+		}
 		if scenario == a144NotFound || scenario == kLedgerCancelEvent || scenario == disputeReturn || isA145Scenario(scenario) && scenario != a145NeverSent {
 			require(d.env("payment")["AIPAY_ENVIRONMENT"] == "development", scenario+" requires AIPAY_ENVIRONMENT=development for payment dev commands")
 		}
@@ -54,7 +57,7 @@ func (d *driver) checkA144Environment(scenario string, startForwards func()) {
 		// Exercise the authenticated control path before any publication or fault.
 		startForwards()
 		var next object
-		_, channel := scenarioOrder(scenario, true)
+		_, channel := scenarioOrder(scenario)
 		decode(d.sim("GET", "/__test/accounts/"+simulatorAccount(channel)+"/next-create", nil), &next)
 		switch scenario {
 		case a144NotSent, a145NeverSent, a145LatePayment, a145Refusals, kQueryTransient, kLedgerCancelEvent, disputeReturn, disputePaidRelease, disputePaidRefund, disputePaidRace:
@@ -77,7 +80,7 @@ func (t tradeRun) a144Orders() []object {
 
 func (d *driver) a144Trade(name string) (tradeRun, map[string]string) {
 	k := d.scope + "/" + name
-	amount, channel := scenarioOrder(d.history.Scenario, true)
+	amount, channel := scenarioOrder(d.history.Scenario)
 	t := tradeRun{d: d, name: name, proto: "v1", amount: amount, channel: channel, number: d.key(k)}
 	var pins map[string]string
 	if !d.read(k+"/plugins", &pins) || len(t.a144Orders()) == 0 {

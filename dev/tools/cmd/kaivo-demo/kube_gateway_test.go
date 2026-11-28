@@ -33,14 +33,21 @@ func TestGatewayModeFromDeployedSettings(t *testing.T) {
 						}
 						d.demoEnvironment = k
 					}
-					var got bool
-					msg := failureText(func() { got = d.gatewayMode() })
+					msg := failureText(d.requireGateways)
 					if !native && (trade == "") != (verify == "") {
 						if !strings.Contains(msg, payment) || !strings.Contains(msg, reconciliation) {
 							t.Fatal("mixed overlay must identify both ConfigMap settings")
 						}
-					} else if msg != "" || got != (trade != "") {
-						t.Fatal("incorrect gateway mode")
+					} else if trade == "" {
+						want := "deploy the trade and verification gateways"
+						if native {
+							want = "Prepare a fresh stack"
+						}
+						if !strings.Contains(msg, want) {
+							t.Fatalf("missing gateway diagnostic: %q", msg)
+						}
+					} else if msg != "" {
+						t.Fatal(msg)
 					}
 				})
 			}
@@ -127,7 +134,7 @@ func TestKubeChannelInputs(t *testing.T) {
 	d := newDriver(k.dir, "", "setup")
 	d.demoEnvironment = k
 	for _, code := range []string{epayChannel, md5Channel} {
-		spec := channelSetup(code, true, k.addresses().gateway, "4200")
+		spec := channelSetup(code, k.addresses().gateway, "4200")
 		if spec.tradeConfig["gateway"] != host || spec.queryConfig["gateway"] != host {
 			t.Fatal("trade and verification require the in-cluster simulator")
 		}

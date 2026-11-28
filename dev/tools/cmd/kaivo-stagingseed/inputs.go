@@ -4,7 +4,6 @@ import (
 	"crypto/rand"
 	_ "embed"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"encoding/json/jsontext"
 	jsonv2 "encoding/json/v2"
@@ -41,14 +40,6 @@ type simConfig struct {
 	Control     string         `json:"control_token"`
 	Accounts    []simAccount   `json:"accounts"`
 	Extra       jsontext.Value `json:",embed"`
-}
-
-type credential struct {
-	Secrets fields `json:"secrets"`
-}
-type pluginConfig struct {
-	Credentials map[string]credential `json:"credentials"`
-	EvidenceKey string                `json:"evidence_key"`
 }
 
 func jsonFile(v any) string {
@@ -130,27 +121,32 @@ func simulatorInputs(old, result materials) error {
 			return invalid(simPrivate, "config.json")
 		}
 	}
-	var pluginShared string
-	var plugins pluginConfig
-	pluginFile, hasPlugin := old[paymentPrivate]["plugins.json"]
-	if hasPlugin {
-		if jsonv2.Unmarshal([]byte(pluginFile), &plugins) != nil || !encoded32(base64.StdEncoding, plugins.EvidenceKey) {
-			return invalid(paymentPrivate, "plugins.json")
+	// The demo reads the trade handoff from md5-demo in the simulator Secret.
+	// Recover the old key if a previous bootstrap stopped before publishing that Secret.
+	shared := account.Shared
+	if !hasSim {
+		if legacy, ok := old[paymentPrivate]["plugins.json"]; ok {
+			var cfg struct {
+				Credentials map[string]struct {
+					Secrets fields `json:"secrets"`
+				} `json:"credentials"`
+			}
+			if err := jsonv2.Unmarshal([]byte(legacy), &cfg); err != nil {
+				return invalid(paymentPrivate, "plugins.json")
+			}
+			raw, err := base64.StdEncoding.DecodeString(cfg.Credentials["sim-md5-v1"].Secrets["shared"])
+			if err != nil || len(raw) == 0 || !utf8.Valid(raw) {
+				return invalid(paymentPrivate, "plugins.json")
+			}
+			shared = string(raw)
+		} else {
+			shared = randomHex()
 		}
-		raw, err := base64.StdEncoding.DecodeString(plugins.Credentials["sim-md5-v1"].Secrets["shared"])
-		if err != nil || len(raw) == 0 || !utf8.Valid(raw) {
-			return invalid(paymentPrivate, "plugins.json")
-		}
-		pluginShared = string(raw)
 	}
 	var query fields
 	queryFile, hasQuery := old[handoff]["query.json"]
 	if hasQuery && (jsonv2.Unmarshal([]byte(queryFile), &query) != nil || query["query_key"] == "") {
 		return invalid(handoff, "query.json")
-	}
-	shared, err := pairedSecret(account.Shared, pluginShared)
-	if err != nil {
-		return invalid(paymentPrivate, "plugins.json")
 	}
 	readOnly, err := pairedSecret(account.Query, query["query_key"])
 	if err != nil {
@@ -160,17 +156,6 @@ func simulatorInputs(old, result materials) error {
 		return errors.New("transaction and query credentials must be independent")
 	}
 
-	if !hasPlugin {
-		plugins = pluginConfig{map[string]credential{"sim-md5-v1": {fields{"shared": base64.StdEncoding.EncodeToString([]byte(shared))}}}, randomBase64()}
-		pluginFile = jsonFile(plugins)
-	}
-	evidence, _ := base64.StdEncoding.DecodeString(plugins.EvidenceKey)
-	for _, peer := range []string{shared, readOnly} {
-		raw, err := hex.DecodeString(peer)
-		if string(evidence) == peer || (err == nil && string(evidence) == string(raw)) {
-			return invalid(paymentPrivate, "plugins.json")
-		}
-	}
 	if !hasSim {
 		cfg = simConfig{Environment: "test", Listen: "0.0.0.0:9080", BaseURL: "http://127.0.0.1:9080", Control: randomURL(),
 			Accounts: []simAccount{{ID: "md5-demo", Style: "form-md5", Shared: shared, Query: readOnly}}}
@@ -191,7 +176,6 @@ func simulatorInputs(old, result materials) error {
 		queryFile = jsonFile(fields{"query_key": readOnly})
 	}
 	result[simPrivate]["config.json"] = simFile
-	result[paymentPrivate]["plugins.json"] = pluginFile
 	result[handoff]["query.json"] = queryFile
 	epayFile, ok := old[handoff]["epay.json"]
 	if !ok {

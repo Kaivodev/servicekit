@@ -1,6 +1,6 @@
 # 阶段 2 本地联调栈
 
-两个入口共用业务配置生成器。源码按同级目录布局。运行命令均从 servicekit 根目录开始。本机 mTLS 与 Compose 都运行两份 Rust 上游网关。开发 HTTPS 收银入口把浏览器请求转给 upstream-sim。验收依赖和目前阻塞资金闭环的具体环节见[演示清单](demo.md)。
+两个入口共用业务配置生成器。源码按同级目录布局。运行命令均从 servicekit 根目录开始。 Both native transports and Compose run the Rust trade and verification gateways. Preparing and verifying their TOML requires Python 3.11 or later. 开发 HTTPS 收银入口把浏览器请求转给 upstream-sim。验收依赖和目前阻塞资金闭环的具体环节见[演示清单](demo.md)。
 
 ## 本机进程
 
@@ -21,7 +21,7 @@ python3 dev/native/stack.py down
 - 数据库名为 `aipay_<服务>`，迁移角色为服务名。IAM、ledger、payment、reconciliation 以迁移脚本授权的 `<服务>_app` 非 owner 身份运行。backend、settlement 使用各自独立的开发角色。notifier 使用 payment 的二进制和自己的 mTLS 身份，upstream-sim 使用内存存储；两者都没有数据库或迁移。
 - 缓存 Redis 的 DB 0–5 依次分配给 backend、IAM、ledger、settlement、reconciliation、payment，传入 URL 的 DB 部分由栈替换。队列有独立实例，IAM 和 payment 分别用 DB 1、5。提供 `AIPAY_DEV_QUEUE_REDIS_URL` 会使用已有的持久化、noeviction 队列实例；仅有缓存 URL 时，栈用本机 `redis-server` 和 `redis-cli` 在 127.0.0.1:6389 管理第二个实例，启用 AOF 并将队列数据保存在状态目录。
 - `build` 构建 Go 服务、开发工具和同级 `upstream-gateway` 的 release 二进制。网关需要 Cargo、Rust 1.99.1 和 wasm-tools 1.263.0。Go 默认使用各模块固定版本。protobuf v0.18.0 发布前用 `build --workspace`，属主使用工作区根的 go.work，开发工具使用只含 dev/tools、servicekit、protobuf、observability 的临时 go.work。可用 `--bin-dir <目录>` 单独构建。
-- `upstream-gateway-trade` 在 9107 只接受 payment，`upstream-gateway-verification` 在 9108 只接受 reconciliation。两个实例分别拥有 `aipay_upstream_gateway_trade`、`aipay_upstream_gateway_verification` 数据库及同名 owner。网关当前通过私有连接访问开发 PostgreSQL，使用 `sslmode=disable`。各自的 `inputs/<实例>/gateway.toml` 引用独立 KEK 和 TLS 身份，DSN 从 `env/<实例>.env` 读取。网关启动时迁移，TCP 监听就绪后才启动属主。围栏退出可在各自的 `logs/<实例>/process.log` 查看，排除原因后再次执行 `up`。
+- `upstream-gateway-trade` 在 9107 只接受 payment，`upstream-gateway-verification` 在 9108 只接受 reconciliation。两个实例分别拥有 `aipay_upstream_gateway_trade`、`aipay_upstream_gateway_verification` 数据库及同名 owner。网关当前通过私有连接访问开发 PostgreSQL，使用 `sslmode=disable`。 Each gateway reads its KEK and authentication settings from `inputs/<instance>/gateway.toml` and its DSN from `env/<instance>.env`. 网关启动时迁移，TCP 监听就绪后才启动属主。围栏退出可在各自的 `logs/<实例>/process.log` 查看，排除原因后再次执行 `up`。
 - 监听地址均为 127.0.0.1。IAM、ledger、settlement、reconciliation、payment、notifier 的 gRPC 端口分别为 9101、9102、9103、9104、9105、9115。backend 公网、平台与卖方监听分别为 8080、8081、8082。模拟上游 API 为 9080，浏览器收银链接用 HTTPS 9443，客户端仅需信任本栈的 `certs/ca.crt`。upstream-sim 重启后原模拟订单与收银链接失效。
 - `up` 逐个等待服务就绪；gRPC 使用属主 CLI（含 `notifier healthcheck`），backend 使用 `/health/ready`，upstream-sim 使用 `/healthz`，收银入口通过 HTTPS 转发该探针。失败时仅回收本次成功启动的进程。日志在 `logs/<service>/`，子 PID 在 `run/<service>.pid`。停机指令通过私有 Unix socket 交给持有子进程句柄的父进程。外部 PostgreSQL、缓存与自备队列不会收到停止指令。`status` 在有服务未就绪时返回非零。
 - 私有 env、7 天证书、持久化 ES256 签名密钥与公钥、EPay 平台 RSA、密封密钥、上游凭据分别存于 `env/`、`certs/`、`inputs/`、`handoff/`。目录 0700、文件 0600。保留整组状态以继续开发；证书过期应协调重签和重启。原有签名链、密封数据仍依赖原业务密钥。不要打印 env、私钥、数据库 URL、整个 Compose 配置或模拟器凭据接口的响应。
@@ -46,7 +46,7 @@ Both commands print the path to `STATE/demo/invitations/<invitation id>.json`. T
 
 ### 已有栈升级到 UG-7
 
-已完成 form-md5 开通的本机 mTLS 网关栈可以原地升级，沿用原数据库、卖方与 `demo/state.json`。从目标栈所在工作区的 servicekit 根目录执行，确认该目录含本轮驱动和控制器，同级 upstream-sim 源码已支持 `query_addtime_backdate_seconds`。保持独立终端的 `stack.py demo serve` 运行。
+A native gateway stack with form-md5 already configured can reuse its database, seller and `demo/state.json` during an in-place upgrade. 从目标栈所在工作区的 servicekit 根目录执行，确认该目录含本轮驱动和控制器，同级 upstream-sim 源码已支持 `query_addtime_backdate_seconds`。保持独立终端的 `stack.py demo serve` 运行。
 
 ```sh
 stack() { python3 -B dev/native/stack.py "$@"; }
@@ -61,7 +61,7 @@ stack demo run seller-offline
 stack demo run cancel
 ```
 
-`epay-on` 在停机时补齐模拟器账户和私有 handoff，更新回调路径与核验插件映射，并执行离线校验。凭据字段名取自插件 manifest 的 `secrets` 键名。EPay 交易和核验两侧按 A136 ③ 分别密封同一个商户 KEY，均从 `handoff/epay.json` 的唯一字段 `merchant_key` 读取。升级旧文件时复用模拟器原 KEY 并保留权限，重复执行会跳过已符合要求的文件。命令仅支持本机网关模式。plaintext 使用内嵌插件，Compose 容器的运行状态由 Docker 管理，本机控制器无法检查。
+`epay-on` 在停机时补齐模拟器账户和私有 handoff，更新回调路径与核验插件映射，并执行离线校验。凭据字段名取自插件 manifest 的 `secrets` 键名。EPay 交易和核验两侧按 A136 ③ 分别密封同一个商户 KEY，均从 `handoff/epay.json` 的唯一字段 `merchant_key` 读取。升级旧文件时复用模拟器原 KEY 并保留权限，重复执行会跳过已符合要求的文件。 Run `epay-on` on a stopped native stack using either transport. Docker manages Compose containers separately.
 
 `build --workspace` 同时更新 kaivo-demo 与模拟器。控制器从同级 upstream-sim 复制 go.mod 和 go.sum 到临时目录，以 `GOWORK=off go build -mod=mod -modfile …` 构建 `./cmd/upstream-sim` 到原栈的 `bin/upstream-sim`。若 `stack coverage status` 显示 attestation，放币和取消都需要有效证明，可在上述 `down` 与 `up` 之间执行 `stack coverage file`。
 
@@ -105,7 +105,7 @@ export KAIVO_STAGING_SEED="$PWD/.bin/kaivo-stagingseed"
 (cd ../deploy && scripts/staging-bootstrap.sh)
 ```
 
-首次引导逐个应用 9 个 Secret 和 10 个 ConfigMap。sim 域的 `deposit-dataset/chain.json` 起初只有创世块，使 devchain 可在卖方登记前启动。重复引导会复用原私钥、凭据、签名生效时间、卖方审核资料和已初始化的行情。中断后可重跑，生成器从幸存副本补齐共享材料。三域公钥登记表、EPay、交易或查询密钥出现冲突时，生成器向 stderr 写入脱敏诊断，stdout 为空。已有公钥但对应私钥全部丢失时，需要恢复原私钥。请串行执行引导、行情更新和卖方 setup。
+首次引导逐个应用 9 个 Secret 和 10 个 ConfigMap。sim 域的 `deposit-dataset/chain.json` 起初只有创世块，使 devchain 可在卖方登记前启动。重复引导会复用原私钥、凭据、签名生效时间、卖方审核资料和已初始化的行情。中断后可重跑，生成器从幸存副本补齐共享材料。 Conflicting public registries, EPay keys or query credentials stop generation with a redacted diagnostic on stderr and empty stdout. 已有公钥但对应私钥全部丢失时，需要恢复原私钥。请串行执行引导、行情更新和卖方 setup。
 
 启用 KMS 时，iam、ledger、reconciliation、payment 和 backend 各自用本服务的 ServiceAccount 在集群内的一次性 Job 中运行 `kaivo-stagingseed kms-export <service>`，其中 payment 导出事件签名公钥，backend 导出门户 Cookie 包裹密钥，iam 可按规格导出 EPay V2 平台公钥，供三个命名空间发布。`KAIVO_KMS_SPEC_FILE` 指向 deploy 提供的规格，`GOOGLE_APPLICATION_CREDENTIALS` 指向该服务的工作负载身份配置。Job 将签名公钥和经解包验证的包裹密钥写到标准输出。每个服务只生成一次，将结果保存为 `exports/<service>.json`，与规格 `keys.json` 一起保存在 deploy 仓库。本机引导时将 `KAIVO_STAGING_KMS_DIR` 指向这个目录即可离线合并。重复引导复用同一份导出。密钥轮换另行处理。
 
@@ -127,7 +127,7 @@ read -r -a kube <<< "${KUBECTL:-kubectl}"
 ### 准备环境
 
 - deploy 需提供包含本版工具的镜像和清单，完成 seed、迁移与部署。业务、账本、核验域沿用各自的 CNPG；sim 域增加 `sim-pg/collection_dev`、devchain 和 devcollection。ledger、reconciliation 要能订阅并验证 `collection.deposits`。后台 SMTP 使用 Mailpit。
-- Install Python 3 and kubectl. For embedded mode, use the sibling upstream-plugins v0.2.2 checkout, Go 1.27.3 and its offline module cache. The tools image build context includes the servicekit root module and dev/tools.
+- Install Python 3 and kubectl. The tools image build context includes the servicekit root module and dev/tools.
 - kubectl 身份需要读取 Deployment、Service、Pod、Secret 和 ConfigMap，创建和删除属主 Pod、读取其日志，使用 pods/portforward，创建或 patch 开发输入 ConfigMap，对行情执行 server-side apply，以及 patch 和 watch 三个预存 Deployment。CNPG 策略允许对应的 `<服务>-admin` Pod；sim 库使用 `collection-admin`。
 - 夹具使用单副本，状态目录挂载 `emptyDir.medium: Memory`。NetworkPolicy 放行 backend 到夹具 8081、notifier 到 3128，控制端口 8088 只监听 Pod 回环。payment、reconciliation 的热更新输入采用目录挂载。
 
@@ -145,7 +145,7 @@ read -r -a kube <<< "${KUBECTL:-kubectl}"
 
 ### Kubernetes gateway overlay
 
-Use a fresh gateway-mode staging deployment or one whose owners have migrated the embedded plugin registrations and credentials. Reconciliation records its mode in `reconciliation_verification_mode`. Keep the private demo state with the deployment that created it. Deploy owns the gateway overlay, database migrations, per-role databases and wrapped keys. Follow its bootstrap and rollout procedure before running setup. [Deploy gateway overlay](../../deploy/k8s/staging/gateway/README.md)
+Use a fresh staging gateway deployment or one whose service owners have migrated the plugin registrations and credentials. Reconciliation records its mode in `reconciliation_verification_mode`. Keep the private demo state with the deployment that created it. Deploy owns the gateway overlay, database migrations, per-role databases and wrapped keys. Follow its bootstrap and rollout procedure before running setup. [Deploy gateway overlay](../../deploy/k8s/staging/gateway/README.md)
 
 | Deployed setting | Gateway overlay value |
 |---|---|
@@ -155,11 +155,11 @@ Use a fresh gateway-mode staging deployment or one whose owners have migrated th
 | `payment-config/AIPAY_PLUGIN_CALLBACK_URL` | `http://backend.kaivo-business.svc:8080/callback/{channel_code}`. Payment expands the path per order. The simulator sends GET to `/callback/epay_v1` and POST to `/callback/sim_form_md5`. |
 | `payment-config/AIPAY_PLUGIN_INSTRUCTION_TTL` | Defaults to `10m`. Payment accepts 1s–24h at microsecond precision and requires `unpaid_timeout_seconds >= TTL + 1h`. The driver rounds that minimum up to whole seconds and sets the same string on both EPay accounts (default `"4200"`). |
 
-Both addresses select gateway mode. Omit both for embedded mode. A partial overlay stops setup and scenarios. The overlay uses upstream-gateway v0.8.0, which migrates in a separate owner Job and runs as an application role, payment `c65983b` or later and reconciliation `0ce1baa` or later. Earlier builds reject the simulator's http cashier link in gateway mode, so orders stay unknown or are never released. Remove the embedded-only settings and mount a projected ServiceAccount token for each caller with audience `kaivo:upstream-gateway-trade` or `kaivo:upstream-gateway-verification`, respectively. The two gateways verify issuer, audience and caller identity on plaintext gRPC. Allow DNS and development-only private HTTP from both roles to `http://upstream-sim.kaivo-sim.svc.cluster.local:9080`, and simulator callbacks to backend. Keep `AIPAY_PLUGIN_TEST_ONLY_ALLOW_HTTP=true` on payment, `AIPAY_RECONCILIATION_VERIFICATION_ALLOW_HTTP=on` on reconciliation and `AIPAY_EPAY_TEST_ONLY_ALLOW_HTTP_CASHIER=true` on the development backend. In gateway mode the payment and reconciliation switches only admit http payment links in upstream results. Channel setup registers the simulator Pod IPs for callbacks.
+Setup and scenarios require both deployed gateway addresses. The overlay uses upstream-gateway v0.8.0, which migrates in a separate owner Job and runs as an application role, payment `c65983b` or later and reconciliation `0ce1baa` or later. Earlier builds reject the simulator's http cashier link in gateway mode, so orders stay unknown or are never released. Mount a projected ServiceAccount token for each caller with audience `kaivo:upstream-gateway-trade` or `kaivo:upstream-gateway-verification`, respectively. The two gateways verify issuer, audience and caller identity on plaintext gRPC. Allow DNS and development-only private HTTP from both roles to `http://upstream-sim.kaivo-sim.svc.cluster.local:9080`, and simulator callbacks to backend. Keep `AIPAY_PLUGIN_TEST_ONLY_ALLOW_HTTP=true` on payment, `AIPAY_RECONCILIATION_VERIFICATION_ALLOW_HTTP=on` on reconciliation and `AIPAY_EPAY_TEST_ONLY_ALLOW_HTTP_CASHIER=true` on the development backend. In gateway mode the payment and reconciliation switches only admit http payment links in upstream results. Channel setup registers the simulator Pod IPs for callbacks.
 
 Use the sibling upstream-gateway checkout or set `KAIVO_DEMO_PLUGIN_PACKAGES`. The driver checks the exact simulator hostname, including `AIPAY_DEMO_NS_SIM` overrides, in each package's `domains`. Minimum manifest versions are **0.3.1** for `sim_form_md5`, `sim_form_md5_verify` and `epay_v1`, and **0.2.1** for `epay_v1_verify`. The JSON/RSA pair also gained the staging domain in 0.3.1. The demo installs the form-md5 and EPay pairs.
 
-Bootstrap with this version of `kaivo-stagingseed`. The existing `upstream-sim-private/config.json` gains the `epay-demo` account (style `epay-v1`, numeric PID 1001). `reconciliation-handoff/epay.json` holds its `merchant_key` for independent sealing in the two gateways. Form-md5 uses its existing simulator trade key and `reconciliation-handoff/query.json`. The shared `iam-inputs/routes.json` authorizes `POST /api/v1/platform/channel-accounts/credentials` with `payment.channel.manage` for payment. Embedded payment returns `FailedPrecondition` before storing credentials.
+Bootstrap with this version of `kaivo-stagingseed`. The existing `upstream-sim-private/config.json` gains the `epay-demo` account (style `epay-v1`, numeric PID 1001). `reconciliation-handoff/epay.json` holds its `merchant_key` for independent sealing in the two gateways. Form-md5 uses its existing simulator trade key and `reconciliation-handoff/query.json`. The shared `iam-inputs/routes.json` authorizes `POST /api/v1/platform/channel-accounts/credentials` with `payment.channel.manage` for payment.
 
 Use an upstream-sim image containing `db63a80` for the seeded EPay account and **`0c27af7` or later** for the full demo. The latter adds per-order `query_addtime_backdate_seconds` for A140 cancellation. Roll out the reseeded simulator and IAM routes before creating orders. The simulator continues advertising cashier links at `http://127.0.0.1:9080`. The driver validates that origin and connects through its selected local port.
 
@@ -191,14 +191,6 @@ export KUBECTL="kubectl --context=${KAIVO_DOKS_CONTEXT:?set the staging context}
 export AIPAY_DEMO_SIM_PORT=19080
 ```
 
-For the embedded local k3s stack, prepare its images and Services.
-
-```bash
-export KUBECTL='limactl shell kaivo-k3s sudo k3s kubectl'
-export KAIVO_K3S_IMPORT='limactl shell kaivo-k3s sudo k3s ctr -n k8s.io images import -'
-(cd ../deploy && scripts/k3s-local.sh images && scripts/k3s-local.sh up)
-```
-
 Run setup and scenarios against the selected deployment.
 
 ```bash
@@ -211,7 +203,7 @@ for scenario in main cancel refund-before-release refund-after-release dispute \
 done
 ```
 
-In gateway mode, `demo setup` packages and publishes both plugin pairs. The 2.00 orders in `main`, `cancel`, `dispute`, `seller-offline`, `bot-notices`, `statement` and `archived-work` use EPay. Run each with `demo run SCENARIO`. The 1.00 refund orders use form-md5. The duplicates and ledger process-control scenarios require the native stack.
+`demo setup` packages and publishes both plugin pairs. The 2.00 orders in `main`, `cancel`, `dispute`, `seller-offline`, `bot-notices`, `statement` and `archived-work` use EPay. Run each with `demo run SCENARIO`. The 1.00 refund orders use form-md5. The duplicates and ledger process-control scenarios require the native stack.
 
 单独执行 `demo setup seller` 可续跑卖方阶段。驱动把 IAM 登记资料的摘要合入 payment 的开发审核列表，刷新行情，发布同一份链、回执与地址绑定，然后依次重启并等待 devchain、devcollection、reconciliation 就绪。ledger 开启预存订阅后一直运行。驱动派生 `ledger-admin` 登记钱包、`collection-admin` 签发 normal 回执，并等待最多 90 秒确认到账。同一预发保留首个卖方和原始区块时间；`demo run deposits` 与卖方 setup 共用充值断点。
 
@@ -248,9 +240,11 @@ stack down
 stack transport mtls
 ```
 
-`transport status` 可在运行中查询。切换模式要求所有受管进程已停止，包含独立的 ledger-reader。本机控制器沿用预存阶段的 mTLS 配置，明文模式与 `deposits-on` 互斥。明文模式跳过两个网关与 settlement，payment 使用本机生成的 plugins.json，reconciliation 使用本地密封密钥。切回 mTLS 会恢复网关地址并移除 plugins.json。两种模式各自开通通道，插件版本、凭据引用与审批断点随模式绑定。收银模拟器继续提供 HTTPS，演示驱动与收银健康检查沿用栈的 CA。
+Check `stack transport status` at any time. Stop all managed processes, including the separate ledger reader, before switching. If the stack was already prepared for plaintext, rerun `stack transport plaintext` once while stopped to update the existing gateways and clients. Both transports reuse the same gateway addresses, databases and KEKs.
 
-受管进程 `devtoken` 在业务进程之前启动、之后停止。签发私钥位于私有状态目录 `native/token-issuer/issuer.key`，权限为 0600。控制器从 `dev/stack_config.py` 的 `PEERS` 反推调用关系，令牌按 `native/tokens/<调用方>/<目标>` 独立存放，有效期 10 分钟，每 4 分钟原子替换。服务运行时仅收到自己的令牌目录、公钥集路径、签发方和命名空间映射。notifier 使用自己的身份，ledger-reader 复用 ledger 身份。磁盘上的服务 env 文件保留 mTLS 配置，Compose 继续使用 mTLS。
+In plaintext, payment and reconciliation call their respective gateways with service tokens. Settlement and the deposit tools still require mTLS. Disable deposits before switching to plaintext. The cashier and its health probe continue using HTTPS and the stack CA.
+
+The controller starts `kaivo-devtoken` before the gateways and stops it last. The issuer keeps its signing key in `native/token-issuer/issuer.key` with mode 0600. It creates a file for each caller and target in `PEERS` and `GATEWAYS` under `native/tokens/<caller>/<target>`. Tokens expire after ten minutes and rotate every four minutes. Each caller receives its own token directory. The gateways verify tokens with `token-issuer/jwks.json`, issuer `kaivo-native` and namespace `local`. Notifier uses its own identity, and the second ledger reader uses ledger's identity. The controller keeps the TLS settings on disk for the switch back to mTLS. Compose uses mTLS.
 
 ## 本机遥测与日志
 
@@ -335,8 +329,8 @@ stack demo run refund-insufficient
 - `stack demo run settle-refunds` 扫描演示卖方待提交凭证、待复核和异议期内的退款，支持旧订单。驱动按原单金额提交演示 PNG，完成 TOTP 与双人 WebAuthn 复核，等待核验授权和账本入账，核对卖方可用余额增加 Q、退款占用归零。中断后重跑同一命令可续办。
 - 已有本机栈在停机时，从目标工作区包含本轮代码的 servicekit 根目录执行 `python3 -B dev/native/stack.py demo-config`，更新 IAM 路由、开启 payment 退款通知，并将 payment 异议期与 reconciliation 异议期下限设为 10 秒。使用含本轮修改的 kaivo-demo 和已迁移的服务启动。
 - upstream-gateway v0.8.0 and later no longer migrate on start by default. Native and Compose gateway configs set `migrate_on_start = true`, and `demo-config` adds it to configs written before v0.8.0. A database that reports a schema version other than the gateway's expected version needs this switch or `upstream-gateway migrate` before the gateway starts.
-- Run an individual phase with `demo setup [iam|registry|packages|seller|channels|merchant]`. A plain `demo setup` runs them in order and stops at the first failure. Native and Compose use payment.env to select Rust ABI v3. Kubernetes reads both deployed gateway addresses. Embedded mode uses Go 1.27.3 and upstream-plugins v0.2.2. [Package tools and layout](demo.md#网关制包与凭据)
-- Gateway setup publishes `epay_v1`, `epay_v1_verify`, `sim_form_md5` and `sim_form_md5_verify`. Orders of 101–10000000 cents use EPay (`epay-demo`, PID 1001) and 1–100 cents use form-md5 (`md5-demo`). In embedded mode form-md5 covers 1–10000000 cents.
+- Run an individual phase with `demo setup [iam|registry|packages|seller|channels|merchant]`. A plain `demo setup` runs them in order and stops at the first failure. All targets use Rust ABI v3 packages. Native and Compose require the trade gateway address in `payment.env`. Kubernetes checks both gateway addresses. [Package tools and layout](demo.md#网关制包与凭据)
+- Gateway setup publishes `epay_v1`, `epay_v1_verify`, `sim_form_md5` and `sim_form_md5_verify`. Orders of 101–10000000 cents use EPay (`epay-demo`, PID 1001) and 1–100 cents use form-md5 (`md5-demo`).
 - `a144-not-sent` 和 `a144-not-found` 各下单 2.00 元，仅在启用 upstream-sim 测试控制接口的本机双网关栈运行。前者暂停监听 3 秒，核对重新获准建单、付款和放币。后者丢弃一次建单，先核对担保仍冻结，再用 payment 的开发专用命令 `dev backdate-create` 将最后一次建单时间回拨通道的 `unpaid_timeout_seconds` 加 120 秒，等待两次缺单核验和资金归还。预发和生产均禁止该回拨命令。
 - 升级网关后，已有通道和核验账户仍绑定原插件。两个 A144 场景都会在下单前读取绑定，若版本不足，从同级 upstream-gateway 的 HEAD 制包，通过双人审批发布并切换到 `epay_v1` ≥ 0.4.0、`epay_v1_verify` ≥ 0.3.0，回读版本和包摘要。已有订单继续使用建单时的交易插件。需使用包含这些版本的网关源码及 A144 版模拟器、payment（迁移 000021）和 reconciliation（迁移 000018）。
 - `a145-never-sent` pauses the simulator listener for 60 seconds and force-closes a 2.00 EPay order while payment is retrying an unsent create. It counts eligibility retries, checks for later dispatch grants and transmitted creates, and follows two independent missing-order observations through cancellation and return of the escrow. All five A145 scenarios require the native gateway stack and the simulator test control API. The four scenarios below also require payment in development mode for `dev backdate-create`.

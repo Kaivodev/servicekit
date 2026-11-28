@@ -20,6 +20,7 @@ func TestDisputeRefundRegistrationAndReport(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			root := t.TempDir()
 			check(atomic(filepath.Join(root, "env/backend.env"), nil))
+			check(atomic(filepath.Join(root, "env/payment.env"), []byte("AIPAY_UPSTREAM_GATEWAY_ADDRESS=trade")))
 			d := newDriver(root, "", tc.name)
 			d.put("credential/private-fixture", "private-auth-sentinel")
 			d.put("cashier/"+tc.name+"/sample", "https://localhost/cashier/private-cashier-sentinel")

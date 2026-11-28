@@ -92,16 +92,13 @@ func TestLiveEntryPoints(t *testing.T) {
 		}
 	}
 	check(atomic(filepath.Join(root, "env/payment.env"), nil))
-	for _, code := range []string{md5Channel, md5Channel + "_verify"} {
-		d.put("step/setup/制作 "+code, result{Name: "制作 " + code, Status: "ok"})
-	}
-	if err := execute([]string{root, root, "setup", "packages"}); err != nil {
-		t.Fatal(err)
+	if err := execute([]string{root, root, "setup", "packages"}); err == nil || !strings.Contains(err.Error(), "Prepare a fresh stack") {
+		t.Fatal("package setup requires the native gateway")
 	}
 	path := liveFile(t, testEnv)
 	for _, action := range []string{"setup", "run"} {
 		err := execute([]string{root, root, action, livePhase})
-		if err == nil || !strings.Contains(err.Error(), "gateway mode") {
+		if err == nil || !strings.Contains(err.Error(), "Prepare a fresh stack") {
 			t.Fatal("expected gateway prerequisite")
 		}
 	}
@@ -148,7 +145,7 @@ func TestLiveChannelAndOrder(t *testing.T) {
 		t.Fatal("invalid live channel specification")
 	}
 	for _, code := range []string{md5Channel, epayChannel} {
-		if channelKey(code, "channel") == channelKey(liveVariant, "channel") || channelSetup(code, true, "", "4200").priority != 1 {
+		if channelKey(code, "channel") == channelKey(liveVariant, "channel") || channelSetup(code, "", "4200").priority != 1 {
 			t.Fatal("simulator account or priority collision")
 		}
 	}

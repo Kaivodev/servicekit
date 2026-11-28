@@ -27,6 +27,7 @@ func TestRound11ScenarioReports(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			root := t.TempDir()
 			check(atomic(filepath.Join(root, "env/backend.env"), nil))
+			check(atomic(filepath.Join(root, "env/payment.env"), []byte("AIPAY_UPSTREAM_GATEWAY_ADDRESS=trade")))
 			out := filepath.Join(root, "report.md")
 			err := execute([]string{root, "", "run", name, "-o", out})
 			if err == nil || !strings.Contains(err.Error(), "seller-account") {
@@ -134,7 +135,7 @@ func TestPortalReauthenticationHeaders(t *testing.T) {
 	}
 }
 
-func TestChannelVersionsAndWorkerClaim(t *testing.T) {
+func TestChannelVersions(t *testing.T) {
 	s := normalized(object{"seller_account_id": "seller", "channel_account_id": "ch", "online": false, "platform_enabled": true, "seller_online_version": 2, "control_version": 5, "seller_online_changed_at": "instant"})
 	p := normalized(object{"configuration": object{"seller_account_id": "seller", "channel_account_id": "ch", "enabled": true}, "seller_online": false, "seller_online_version": 2, "control_version": 5, "seller_online_changed_at": "instant"})
 	channelState(s, p, "seller", "ch", false, 2, 5)
@@ -142,14 +143,6 @@ func TestChannelVersionsAndWorkerClaim(t *testing.T) {
 		bad := normalized(p)
 		bad[k] = v
 		expectFailure(t, func() { channelState(s, normalized(bad), "seller", "ch", false, 2, 5) })
-	}
-	for _, tc := range []struct {
-		version, attempts int
-		completed, want   bool
-	}{{1, 11, false, false}, {2, 0, false, false}, {2, 1, false, true}, {2, 0, true, true}} {
-		if reclaimedWork(normalized(object{"version": tc.version, "attempts": tc.attempts, "completed_after": tc.completed}), 1) != tc.want {
-			t.Fatal(tc)
-		}
 	}
 }
 

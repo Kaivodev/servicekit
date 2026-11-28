@@ -274,8 +274,7 @@ func (b *browser) write(label, path string, makeBody func() object) object {
 	}
 	var body object
 	privateBody := privateApproval && !strings.HasSuffix(path, "/assertions")
-	upload := path == "/plugins" || path == "/verification/plugins" || path == "/channel-accounts/credentials" ||
-		path == "/verification/credentials" && (d.liveEPay || !d.native() || d.gatewayMode())
+	upload := path == "/plugins" || path == "/verification/plugins" || seal
 	if privateBody || upload {
 		body = makeBody()
 		digest := fmt.Sprintf("%x", sha256.Sum256(encoded(body)))

@@ -318,7 +318,6 @@ func opaqueKeys(old, result materials) error {
 		valid    func(string) bool
 	}{
 		{iamPrivate, "sealer.key", raw, isRaw},
-		{reconPrivate, "sealer.key", raw, isRaw},
 		{iamPrivate, "data-key", randomBase64, func(s string) bool { return encoded32(base64.StdEncoding, s) }},
 		{backendPrivate, "portal-cookie-key", randomURL, isURL},
 		{backendPrivate, "telegram-webhook-secret", randomURL, isURL},
@@ -346,9 +345,6 @@ func opaqueKeys(old, result materials) error {
 		if spec.name == "bot-token" {
 			result[fixturePrivate][spec.name] = value
 		}
-	}
-	if result[iamPrivate]["sealer.key"] == result[reconPrivate]["sealer.key"] {
-		return errors.New("IAM and reconciliation sealer keys must be independent")
 	}
 	return nil
 }

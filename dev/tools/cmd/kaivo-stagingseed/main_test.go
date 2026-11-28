@@ -28,9 +28,9 @@ var testTime = time.Date(2026, 11, 19, 12, 30, 10, 765000123, time.UTC)
 var contract = map[objectID]string{
 	{"kaivo-business", "Secret", "backend-private"}:                "bot-token epay.der portal-cookie-key telegram-webhook-secret",
 	{"kaivo-business", "Secret", "iam-private"}:                    "data-key epay.der sealer.key signing.pem",
-	{"kaivo-business", "Secret", "payment-private"}:                "epay.der plugins.json signing.pem",
+	{"kaivo-business", "Secret", "payment-private"}:                "epay.der signing.pem",
 	{"kaivo-ledger", "Secret", "ledger-private"}:                   "report.pem signing.pem",
-	{"kaivo-reconciliation", "Secret", "reconciliation-private"}:   "sealer.key signing.pem",
+	{"kaivo-reconciliation", "Secret", "reconciliation-private"}:   "signing.pem",
 	{"kaivo-reconciliation", "Secret", "reconciliation-handoff"}:   "epay.json query.json",
 	{"kaivo-sim", "ConfigMap", "deposit-dataset"}:                  "chain.json",
 	{"kaivo-sim", "Secret", "collection-private"}:                  "collection.jwks signing.pem",
@@ -193,9 +193,8 @@ func checkKeys(t *testing.T, c cluster) {
 			t.Fatal("report public key mismatch")
 		}
 	}
-	iamSeal, reconSeal := raw(t, c, iamPrivate, "sealer.key"), raw(t, c, reconPrivate, "sealer.key")
-	if len(iamSeal) != 32 || len(reconSeal) != 32 || iamSeal == reconSeal || !encoded32(base64.StdEncoding, raw(t, c, iamPrivate, "data-key")) {
-		t.Fatal("invalid sealers/data key")
+	if len(raw(t, c, iamPrivate, "sealer.key")) != 32 || !encoded32(base64.StdEncoding, raw(t, c, iamPrivate, "data-key")) {
+		t.Fatal("invalid IAM sealer or data key")
 	}
 	bot := raw(t, c, backendPrivate, "bot-token")
 	if raw(t, c, fixturePrivate, "bot-token") != bot || !strings.HasPrefix(bot, "10001:") || !encoded32(base64.RawURLEncoding, strings.TrimPrefix(bot, "10001:")) ||
@@ -212,10 +211,8 @@ func checkPair(t *testing.T, c cluster) {
 		t.Fatal("invalid simulator config")
 	}
 	a := cfg.Accounts[0]
-	p := decoded[pluginConfig](t, raw(t, c, paymentPrivate, "plugins.json"))
-	tx, err := base64.StdEncoding.DecodeString(p.Credentials["sim-md5-v1"].Secrets["shared"])
 	query := decoded[fields](t, raw(t, c, handoff, "query.json"))["query_key"]
-	if err != nil || a.ID != "md5-demo" || a.Style != "form-md5" || string(tx) != a.Shared || a.Query != query || a.Query == a.Shared || !encoded32(base64.StdEncoding, p.EvidenceKey) {
+	if a.ID != "md5-demo" || a.Style != "form-md5" || a.Query != query || a.Query == a.Shared {
 		t.Fatal("simulator credential mismatch")
 	}
 	for _, s := range []string{query, a.Shared} {
@@ -330,12 +327,29 @@ func TestUpgradeFormMD5Seed(t *testing.T) {
 	upgraded := decoded[map[string]any](t, raw(t, next, simPrivate, "config.json"))
 	upgraded["accounts"] = upgraded["accounts"].([]any)[:1]
 	if !reflect.DeepEqual(upgraded, cfg) ||
-		next[handoff].Data["query.json"] != c[handoff].Data["query.json"] ||
-		next[paymentPrivate].Data["plugins.json"] != c[paymentPrivate].Data["plugins.json"] {
+		next[handoff].Data["query.json"] != c[handoff].Data["query.json"] {
 		t.Fatal("upgrade changed existing simulator credentials")
 	}
 	if !reflect.DeepEqual(next, generate(t, next, testTime.Add(2*time.Hour))) {
 		t.Fatal("repeated upgrade changed staged materials")
+	}
+}
+
+func TestRecoverTradeKeyFromPartialLegacySeed(t *testing.T) {
+	setupKubectl(t)
+	c := generate(t, nil, testTime)
+	md5 := decoded[simConfig](t, raw(t, c, simPrivate, "config.json")).Accounts[0]
+	delete(c, simPrivate)
+	legacy := jsonFile(map[string]any{"credentials": map[string]any{"sim-md5-v1": map[string]any{
+		"secrets": fields{"shared": base64.StdEncoding.EncodeToString([]byte(md5.Shared))},
+	}}})
+	c[paymentPrivate].Data["plugins.json"] = base64.StdEncoding.EncodeToString([]byte(legacy))
+	c[reconPrivate].Data["sealer.key"] = c[iamPrivate].Data["sealer.key"]
+	next := generate(t, c, testTime)
+	checkInventory(t, next, contract)
+	got := decoded[simConfig](t, raw(t, next, simPrivate, "config.json")).Accounts[0]
+	if got.Shared != md5.Shared || got.Query != md5.Query {
+		t.Fatal("partial seed lost the simulator credentials")
 	}
 }
 
@@ -347,7 +361,6 @@ func TestPartialApplication(t *testing.T) {
 		ids  []objectID
 	}{
 		{"simulator alone", []objectID{simPrivate}},
-		{"plugin and query without simulator", []objectID{paymentPrivate, handoff}},
 		{"handoff alone", []objectID{handoff}},
 		{"fixture token alone", []objectID{fixturePrivate}},
 		{"EPay surviving in IAM", []objectID{iamPrivate}},
@@ -419,8 +432,6 @@ func TestRejectConflict(t *testing.T) {
 				delete(c, id)
 			}
 		}},
-		{"sealers equal", func(c cluster) { c[iamPrivate].Data["sealer.key"] = c[reconPrivate].Data["sealer.key"] }},
-		{"transaction mismatch", func(c cluster) { c[paymentPrivate].Data["plugins.json"] = other[paymentPrivate].Data["plugins.json"] }},
 		{"EPay merchant key mismatch", func(c cluster) { c[handoff].Data["epay.json"] = other[handoff].Data["epay.json"] }},
 		{"malformed EPay handoff", func(c cluster) {
 			c[handoff].Data["epay.json"] = base64.StdEncoding.EncodeToString([]byte(`{"merchant_key":"secret-in-handoff"}`))
@@ -435,7 +446,8 @@ func TestRejectConflict(t *testing.T) {
 		{"broken existing Secret", func(c cluster) { c[backendPrivate].Data["bot-token"] = "secret-in-base64" }},
 		{"empty existing key", func(c cluster) { c[iamPrivate].Data["data-key"] = "" }},
 		{"invalid signer timestamp precision", func(c cluster) { c[iamInputs].Data["signer-valid-from"] = "2026-11-19T12:30:10.765000123Z" }},
-		{"unreadable plugin file", func(c cluster) {
+		{"unrecoverable legacy trade key", func(c cluster) {
+			delete(c, simPrivate)
 			c[paymentPrivate].Data["plugins.json"] = base64.StdEncoding.EncodeToString([]byte("secret-in-plugins"))
 		}},
 	} {

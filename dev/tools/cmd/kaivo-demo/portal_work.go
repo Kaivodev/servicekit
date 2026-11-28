@@ -69,24 +69,12 @@ func channelState(seller, platform object, account, channel string, online bool,
 
 func (d *driver) sellerOffline() {
 	seller, op := d.browser("seller"), d.browser("operations")
-	amount, code := scenarioOrder("seller-offline", d.gatewayMode())
+	amount, code := scenarioOrder("seller-offline")
 	account, ch := d.required("seller-account"), d.required(channelKey(code, "uuid/channel"))
 	path := "/accounts/" + account + "/channels/" + ch
 	var initial object
-	baseline := "唯一演示通道"
-	if code == epayChannel {
-		baseline = "EPay 卖方通道"
-	}
-	d.step(baseline, func() {
-		var platform object
-		if code == epayChannel {
-			platform = op.api("GET", "/channel-accounts/"+ch, "", nil)
-		} else {
-			list := op.api("GET", "/channel-accounts?limit=2", "", nil)
-			items, ok := list["items"].([]any)
-			require(ok && len(items) == 1 && list["next_cursor"] == nil, "expected exactly one demo channel")
-			platform = obj(items[0])
-		}
+	d.step("EPay 卖方通道", func() {
+		platform := op.api("GET", "/channel-accounts/"+ch, "", nil)
 		require(obj(platform["configuration"])["channel_code"] == code, "unexpected seller channel code")
 		initial = channelState(seller.api("GET", path, "", nil), platform, account, ch, true, num(platform, "seller_online_version"), num(platform, "control_version"))
 		d.put("offline/baseline", initial)
@@ -146,11 +134,7 @@ func (d *driver) archivedWork() {
 	b := d.browser("sre")
 	t := d.trade("归档样本", "v2")
 	t.step("持续返回未知查单结果", func() {
-		if t.channel == epayChannel {
-			t.setScenario(object{"api_fault": "malformed"})
-		} else {
-			t.setScenario(object{"query_unknown": true})
-		}
+		t.setScenario(object{"api_fault": "malformed"})
 	})
 	d.step("平台列出本单归档任务", func() {
 		budget := 3 * time.Hour
@@ -164,7 +148,7 @@ func (d *driver) archivedWork() {
 		var firstFailure []object
 		for {
 			sample = oneFact(d.facts("payment", "sample_work", `SELECT object_id,attempts,available_at,archived_at,completed_at FROM payment_work WHERE kind='order' AND object_id=$1`, t.order), "演示订单任务")
-			if t.channel == epayChannel && len(firstFailure) == 0 {
+			if len(firstFailure) == 0 {
 				firstFailure = d.facts("payment", "首次查单失败", `SELECT exchange_id,occurred_at,category,error_code
 					FROM payment_gateway_executions WHERE order_id=$1 AND operation='query_payment'
 					AND category='unknown' AND error_code='upstream_unknown' AND responses>0 ORDER BY occurred_at LIMIT 1`, t.order)
@@ -184,7 +168,7 @@ func (d *driver) archivedWork() {
 			items, ok := page["items"].([]any)
 			require(ok, "invalid archived task list")
 			if row := archivedOrder(items, t.order); row != nil {
-				require(t.channel != epayChannel || len(firstFailure) == 1, "archived EPay order has no failed upstream query")
+				require(len(firstFailure) == 1, "archived EPay order has no failed upstream query")
 				require(sample["archived_at"] == nil || sameInstant(row["archived_at"], sample["archived_at"]), "portal archived time differs from work row")
 				d.put("archive/original", row)
 				d.evidence("archived", row)
@@ -219,36 +203,29 @@ func (d *driver) archivedWork() {
 		d.waitFor("payment worker reclaimed restored task", 90*time.Second, func() bool {
 			row := oneFact(d.facts("payment", "worker_after_requeue", `SELECT version,attempts,completed_at,archived_at,
                 completed_at >= $2::timestamptz AS completed_after FROM payment_work WHERE kind='order' AND object_id=$1`, t.order, str(audit, "occurred_at")), "恢复后任务")
-			if t.channel == epayChannel {
-				// A successful pending poll can reset attempts before we observe the claim.
-				queried := d.facts("payment", "恢复后的查单", `SELECT exchange_id,occurred_at FROM payment_gateway_executions
-					WHERE order_id=$1 AND operation='query_payment' AND category='succeeded' AND occurred_at >= $2 ORDER BY occurred_at LIMIT 1`,
-					t.order, str(audit, "occurred_at"))
-				return num(row, "version") == num(original, "version")+1 && len(queried) > 0
-			}
-			return reclaimedWork(row, num(original, "version"))
+			// A successful pending poll can reset attempts before we observe the claim.
+			queried := d.facts("payment", "恢复后的查单", `SELECT exchange_id,occurred_at FROM payment_gateway_executions
+				WHERE order_id=$1 AND operation='query_payment' AND category='succeeded' AND occurred_at >= $2 ORDER BY occurred_at LIMIT 1`,
+				t.order, str(audit, "occurred_at"))
+			return num(row, "version") == num(original, "version")+1 && len(queried) > 0
 		})
 	})
 	t.step("关闭已验收的未付样本", func() {
 		d.login("seller")
 		d.login("operations")
 		d.refreshMarket()
-		if t.channel == epayChannel {
-			// Restoring an old order can itself register the A140 system intent.
-			order := oneFact(d.facts("payment", "恢复后的订单",
-				"SELECT close_requested,close_reason FROM payment_orders WHERE id=$1", t.order), "恢复后的订单")
-			if order["close_requested"] == true {
-				t.terminal("CANCELLED")
-				t.setScenario(object{})
-				return
-			}
-			t.backdateUnpaid()
+		// Restoring an old order can itself register the A140 system intent.
+		order := oneFact(d.facts("payment", "恢复后的订单",
+			"SELECT close_requested,close_reason FROM payment_orders WHERE id=$1", t.order), "恢复后的订单")
+		if order["close_requested"] == true {
+			t.terminal("CANCELLED")
+			t.setScenario(object{})
+			return
 		}
+		t.backdateUnpaid()
 		d.epay("v2", "/api/pay/close", url.Values{"out_trade_no": {t.number}})
 		t.terminal("CANCELLED")
-		if t.channel == epayChannel {
-			t.setScenario(object{})
-		}
+		t.setScenario(object{})
 	})
 }
 
@@ -264,8 +241,4 @@ func archivedOrder(items []any, order string) object {
 		return r
 	}
 	return nil
-}
-
-func reclaimedWork(row object, archivedVersion int64) bool {
-	return num(row, "version") == archivedVersion+1 && (num(row, "attempts") > 0 || row["completed_after"] == true)
 }

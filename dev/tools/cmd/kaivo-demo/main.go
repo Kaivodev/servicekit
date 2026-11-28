@@ -79,7 +79,9 @@ func executeContext(ctx context.Context, args []string) (err error) {
 	if action == "serve" {
 		require(target == "", "serve takes no target")
 		require(mode == "native", "K8s 夹具使用 serve-k8s")
-		(&driver{demoEnvironment: nativeEnvironment{root, repo, dir}, root: root, dir: dir}).serve()
+		d := driver{demoEnvironment: nativeEnvironment{root, repo, dir}, root: root, dir: dir}
+		d.requireGateways()
+		d.serve()
 		return nil
 	}
 	if mode == "k8s" && !localCapability(target) {
@@ -94,9 +96,9 @@ func executeContext(ctx context.Context, args []string) (err error) {
 	if d.liveEPay {
 		d.trimSavedLiveLinks()
 		d.liveStep("测试上游运行条件", func() {
-			require(mode == "native", "epay-live requires gateway mode")
+			require(mode == "native", "epay-live requires the native stack")
 			if scope == liveOffPhase {
-				require(d.gatewayMode(), "epay-live requires gateway mode")
+				d.requireGateways()
 			} else {
 				d.checkLivePrerequisites(action)
 			}
@@ -111,12 +113,12 @@ func executeContext(ctx context.Context, args []string) (err error) {
 	}
 	startForwards := func() {
 		if kube != nil && len(kube.forwards) == 0 {
-			d.gatewayMode() // Reject a partial overlay before making setup or scenario changes.
 			kube.startForwards()
 		}
 	}
 	loadOrigins := sync.OnceFunc(func() { d.origins = readPortalOrigins(d.env("backend")) })
 	start := sync.OnceFunc(func() {
+		d.requireGateways()
 		startForwards()
 		loadOrigins()
 		d.syncMerchantKeys()

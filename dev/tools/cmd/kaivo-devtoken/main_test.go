@@ -27,7 +27,10 @@ func TestIssuerRotation(t *testing.T) {
 		defer cancel()
 		done := make(chan error, 1)
 		go func() {
-			done <- run(ctx, root, "local-issuer", map[string][]string{"backend": {"iam", "ledger"}, "iam": {}})
+			done <- run(ctx, root, "kaivo-native", map[string][]string{
+				"backend": {"iam", "ledger"}, "iam": {},
+				"payment": {"upstream-gateway-trade"}, "reconciliation": {"upstream-gateway-verification"},
+			})
 		}()
 		synctest.Wait()
 		pub, err := signing.LoadJWKS(filepath.Join(root, "token-issuer", "jwks.json"))
@@ -38,9 +41,9 @@ func TestIssuerRotation(t *testing.T) {
 		if !ok {
 			t.Fatal("issuer public key missing")
 		}
-		check := func(target string) string {
+		check := func(caller, target string) string {
 			t.Helper()
-			path := filepath.Join(root, "tokens", "backend", target)
+			path := filepath.Join(root, "tokens", caller, target)
 			file, err := os.ReadFile(path)
 			if err != nil {
 				t.Fatal(err)
@@ -67,17 +70,19 @@ func TestIssuerRotation(t *testing.T) {
 					ServiceAccount struct{ Name string }
 				} `json:"kubernetes.io"`
 			}
-			if json.Unmarshal(body, &c) != nil || c.Iss != "local-issuer" || c.Sub != "system:serviceaccount:local:backend" || len(c.Aud) != 1 || c.Aud[0] != "kaivo:"+target ||
-				c.Nbf != c.Iat || c.Iat != time.Now().Unix() || c.Exp-c.Iat != 600 || c.Kube.Namespace != "local" || c.Kube.ServiceAccount.Name != "backend" {
+			if json.Unmarshal(body, &c) != nil || c.Iss != "kaivo-native" || c.Sub != "system:serviceaccount:local:"+caller || len(c.Aud) != 1 || c.Aud[0] != "kaivo:"+target ||
+				c.Nbf != c.Iat || c.Iat != time.Now().Unix() || c.Exp-c.Iat != 600 || c.Kube.Namespace != "local" || c.Kube.ServiceAccount.Name != caller {
 				t.Fatal("invalid issued claims")
 			}
 			return string(file)
 		}
-		first := check("iam")
-		check("ledger")
+		first := check("backend", "iam")
+		check("backend", "ledger")
+		check("payment", "upstream-gateway-trade")
+		check("reconciliation", "upstream-gateway-verification")
 		time.Sleep(4 * time.Minute)
 		synctest.Wait()
-		if check("iam") == first {
+		if check("backend", "iam") == first {
 			t.Fatal("issuer did not refresh the target token")
 		}
 		for _, path := range []string{"token-issuer/issuer.key", "token-issuer/jwks.json", "tokens/backend/iam"} {

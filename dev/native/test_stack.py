@@ -8,6 +8,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import tomllib
 import unittest
 import uuid
 from unittest.mock import patch
@@ -19,11 +20,11 @@ import processes
 import stack
 import deposit_scenario as fixture
 import stack_config as cfg
+from verify import verify_gateway_transport
 
 
 class Configuration(unittest.TestCase):
     def test_gateway_configs_migrate_on_start(self):
-        import tomllib
         for compose in (False, True):
             with tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
@@ -37,7 +38,6 @@ class Configuration(unittest.TestCase):
                     self.assertIs(settings["migrate_on_start"], True)
 
     def test_existing_gateway_configs_gain_migrate_on_start(self):
-        import tomllib
         old = 'role = "trade"\nmode = "development"\nlisten = "127.0.0.1:9107"\n'
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -168,7 +168,7 @@ class Configuration(unittest.TestCase):
             payment = cfg.gateway_client_settings("upstream-gateway-trade") | {
                 callback: origin + "/callback/sim_form_md5?site=dev", "OTHER": "with=equals"}
             channels = {"sim_form_md5_verify": "sim_form_md5", "other_verify": "other"}
-            cfg.save_env(payment_path, payment)
+            cfg.save_env(payment_path, payment | {"AIPAY_PLUGIN_EGRESS_PROXY": "obsolete"})
             cfg.save_env(recon_path, cfg.gateway_client_settings("upstream-gateway-verification") |
                          {mapping: json.dumps(channels), "OTHER": "keep"})
             cfg.coverage_mode(root, "attestation", "6m")
@@ -194,6 +194,7 @@ class Configuration(unittest.TestCase):
                 for path in (sim_path, payment_path, recon_path):
                     self.assertEqual(path.stat().st_mode & 0o777, 0o640)
                 self.assertEqual(handoff.stat().st_mode & 0o777, 0o600)
+                (root / "transport.plaintext").touch()
                 with patch.object(cfg, "write", side_effect=AssertionError("unexpected rewrite")):
                     stack.epay_on(root)
                 # Retry after the simulator was updated but the handoff was not installed.
@@ -218,12 +219,10 @@ class Configuration(unittest.TestCase):
     def test_epay_requires_native_gateway(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            for marker, reason in (("transport.plaintext", "plaintext"), ("stack.env", "Compose")):
-                with self.subTest(marker=marker):
-                    (root / marker).touch()
-                    with self.assertRaisesRegex(ValueError, reason):
-                        stack.epay_on(root)
-                    (root / marker).unlink()
+            (root / "stack.env").touch()
+            with self.assertRaisesRegex(ValueError, "Compose"):
+                stack.epay_on(root)
+            (root / "stack.env").unlink()
             (root / "env").mkdir()
             cfg.save_env(root / "env/payment.env", {})
             cfg.save_env(root / "env/reconciliation.env", {})
@@ -405,13 +404,17 @@ class Configuration(unittest.TestCase):
                 query = json.loads(files[root / "handoff/query.json"])["query_key"]
                 trade = json.loads(files[root / "handoff/trade.json"])["shared"]
                 self.assertTrue(query == sim["query_shared_secret"] != sim["shared_secret"] == trade)
-                self.assertNotIn(root / "inputs/payment/plugins.json", files)
+                self.assertIn(root / "inputs/iam/sealer.key", files)
+                for old in ("inputs/payment/plugins.json", "handoff/plaintext-evidence.key", "inputs/reconciliation/sealer.key"):
+                    self.assertNotIn(root / old, files)
+                self.assertFalse((root / "data/payment/evidence").exists())
+                self.assertIn(cfg.TRADE_CREDENTIALS_ROUTE, json.loads(files[root / "inputs/iam/routes.json"]))
                 for name, peer in cfg.GATEWAYS.items():
                     self.assertNotIn(name, cfg.PEERS)
                     self.assertNotIn(name, cert_calls[0][cert_calls[0].index("--signing-services") + 1].split(","))
                     self.assertEqual(len(files[root / "inputs" / name / "kek"]), 32)
                     self.assertTrue(cfg.gateway_client_settings(name).items() <= envs[peer].items())
-                    self.assertFalse(cfg.embedded_client_settings(root, peer).keys() & envs[peer].keys())
+                    self.assertTrue(envs[peer].keys().isdisjoint(cfg.RETIRED_CLIENT_KEYS[peer]))
                     self.assertNotIn("AIPAY_GRPC_ADDR", files[root / "env" / (name + ".env")])
                     db = "aipay_" + name.replace("-", "_")
                     self.assertIn("://" + db + ":", files[root / "env" / (name + ".env")])
@@ -644,11 +647,14 @@ class Transport(unittest.TestCase):
     def test_switch_and_injection(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            (root / "env").mkdir()
-            for directory in ("handoff", "inputs/iam", "inputs/payment", "inputs/reconciliation"):
+            for directory in ("env", "logs", "handoff", "inputs/iam"):
                 (root / directory).mkdir(parents=True)
-            cfg.dump(root / "inputs/iam/routes.json", cfg.routes())
+            cfg.dump(root / "inputs/iam/routes.json", [])
             cfg.dump(root / "handoff/trade.json", {"shared": "demo-shared"})
+            cfg.gateway_inputs(root, "postgresql://admin@localhost/postgres", {}, compose=False)
+            mtls = {name: (root / "inputs" / name / "gateway.toml").read_bytes() for name in cfg.GATEWAYS}
+            material = {path: path.read_bytes() for name in cfg.GATEWAYS for path in
+                        (root / "inputs" / name / "kek", root / "env" / (name + ".env"))}
             tls = {"AIPAY_TLS_CERT_FILE": "cert", "AIPAY_NOTIFIER_TLS_KEY_FILE": "private"}
             for name in cfg.SERVICES:
                 cfg.save_env(root / "env" / (name + ".env"), tls)
@@ -657,14 +663,36 @@ class Transport(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "down"):
                     stack.change_mode(root, "transport", "plaintext")
             stack.change_mode(root, "transport", "plaintext")
-            self.assertEqual(processes.services(root)[0], "devtoken")
-            self.assertNotIn("settlement", processes.services(root))
-            self.assertFalse(set(cfg.GATEWAYS) & set(processes.services(root)))
-            self.assertTrue((root / "inputs/payment/plugins.json").is_file())
-            self.assertEqual(list(reversed(processes.services(root)))[-1], "devtoken")
-            self.assertEqual(json.loads(processes.command(root, "devtoken")[-1]), processes.token_targets())
-            self.assertEqual({(c, t) for c, ts in processes.token_targets().items() for t in ts},
-                             {(c, t) for t, callers in cfg.PEERS.items() for c in callers.split(",")})
+            verify_gateway_transport(root)
+            services = processes.services(root)
+            self.assertEqual(services[0], "devtoken")
+            self.assertNotIn("settlement", services)
+            self.assertIn(cfg.TRADE_CREDENTIALS_ROUTE, json.loads((root / "inputs/iam/routes.json").read_text()))
+            expected_targets = {(c, t) for t, callers in cfg.PEERS.items() for c in callers.split(",")}
+            expected_targets.update({("payment", "upstream-gateway-trade"), ("reconciliation", "upstream-gateway-verification")})
+            targets = json.loads(processes.command(root, "devtoken")[-1])
+            self.assertCountEqual(((c, t) for c, ts in targets.items() for t in ts), expected_targets)
+            for name, caller in cfg.GATEWAYS.items():
+                self.assertLess(services.index(name), services.index(caller))
+                path = root / "inputs" / name / "gateway.toml"
+                settings = tomllib.loads(path.read_text())
+                self.assertEqual(settings, {
+                    "role": name.removeprefix("upstream-gateway-"), "mode": "development", "transport": "plaintext",
+                    "migrate_on_start": True, "listen": f"127.0.0.1:{cfg.PORTS[name]}", "allowed_peers": [caller],
+                    "database_url_env": "GATEWAY_DATABASE_URL", "local_kek_file": "kek", "allow_loopback_http": True,
+                    "allow_uncommitted": False, "service_token": {"issuer": "kaivo-native",
+                        "jwks_file": "../../token-issuer/jwks.json", "service_namespaces": {caller: "local"}},
+                })
+                env = processes.service_env(root, caller)
+                prefix = "AIPAY_" if caller == "payment" else "AIPAY_RECONCILIATION_"
+                self.assertEqual(env[prefix + "UPSTREAM_GATEWAY_SERVER_NAME"], name)
+                self.assertEqual(env[prefix + "UPSTREAM_GATEWAY_ADDRESS"], f"127.0.0.1:{cfg.PORTS[name]}")
+                self.assertEqual((path.parent / settings["service_token"]["jwks_file"]).resolve(),
+                                 Path(env["AIPAY_RPC_TOKEN_JWKS_FILE"]).resolve())
+                cfg.write(path, mtls[name])
+                with self.assertRaisesRegex(ValueError, name):
+                    verify_gateway_transport(root)
+                stack.change_mode(root, "transport", "plaintext")
             for name in (*processes.TOKEN_SERVICES, "ledger-reader"):
                 env = processes.service_env(root, name)
                 owner = "ledger" if name == "ledger-reader" else name
@@ -674,10 +702,6 @@ class Transport(unittest.TestCase):
                 self.assertEqual(env["AIPAY_RPC_TOKEN_ISSUER"], processes.TOKEN_ISSUER)
                 self.assertIn(owner + "=local", env["AIPAY_RPC_SERVICE_NAMESPACES"].split(","))
                 self.assertFalse(env.keys() & tls.keys())
-                expected = dict(tls)
-                if owner in cfg.GATEWAYS.values():
-                    expected.update({k: str(v) for k, v in cfg.embedded_client_settings(root, owner).items()})
-                self.assertEqual(cfg.read_env(root / "env" / (owner + ".env")), expected)
             self.assertNotIn("AIPAY_RPC_TRANSPORT", processes.service_env(root, "cashier"))
             with self.assertRaisesRegex(ValueError, "devcollection requires mTLS"):
                 stack.deposits(root, "seller", None)
@@ -685,15 +709,94 @@ class Transport(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "down"):
                     stack.change_mode(root, "transport", "mtls")
             stack.change_mode(root, "transport", "mtls")
-            self.assertNotIn("devtoken", processes.services(root))
-            self.assertFalse((root / "inputs/payment/plugins.json").exists())
+            verify_gateway_transport(root)
+            services = processes.services(root)
+            self.assertNotIn("devtoken", services)
             for name, peer in cfg.GATEWAYS.items():
-                self.assertLess(processes.services(root).index(name), processes.services(root).index("payment"))
+                self.assertLess(services.index(name), services.index(peer))
+                self.assertEqual((root / "inputs" / name / "gateway.toml").read_bytes(), mtls[name])
                 self.assertEqual(cfg.read_env(root / "env" / (peer + ".env")), tls | cfg.gateway_client_settings(name))
+            self.assertEqual(json.loads((root / "inputs/iam/routes.json").read_text()).count(cfg.TRADE_CREDENTIALS_ROUTE), 1)
+            self.assertTrue(all(path.read_bytes() == value for path, value in material.items()))
             self.assertEqual(processes.service_env(root, "notifier")["AIPAY_NOTIFIER_TLS_KEY_FILE"], "private")
             (root / "deposits.enabled").touch()
             with self.assertRaisesRegex(ValueError, "devcollection requires mTLS"):
                 stack.change_mode(root, "transport", "plaintext")
+
+    def test_upgrade_retired_client_settings(self):
+        obsolete = {
+            "payment": ("PLUGIN_CREDENTIALS_FILE", "PLUGIN_EVIDENCE_DIRECTORY", "PLUGIN_EGRESS_PROXY",
+                        "PLUGIN_TEST_ONLY_ALLOW_LOOPBACK", "PLUGIN_TEST_ONLY_ALLOW_PRIVATE", "PLUGIN_REQUEST_TIMEOUT"),
+            "reconciliation": tuple("RECONCILIATION_" + k for k in ("VERIFICATION_PROXY", "VERIFICATION_TIMEOUT",
+                "VERIFICATION_ALLOW_LOOPBACK", "VERIFICATION_TEST_ONLY_ALLOW_PRIVATE", "SECRET_KEY_FILE",
+                "SECRET_KEYS_FILE", "SECRET_KMS_KEY", "SECRET_SEALER")),
+        }
+        keep = {"payment": {"AIPAY_PLUGIN_ENABLED": "true", "AIPAY_PLUGIN_TEST_ONLY_ALLOW_HTTP": "true",
+                            "AIPAY_PLUGIN_CALLBACK_URL": "http://localhost/callback/{channel_code}"},
+                "reconciliation": {"AIPAY_RECONCILIATION_VERIFICATION": "on", "AIPAY_RECONCILIATION_PLUGIN_CHANNELS": "{}",
+                                   "AIPAY_RECONCILIATION_VERIFICATION_ALLOW_HTTP": "on"}}
+        for upgrade in ("plaintext", "mtls", "demo-config", "compose"):
+            with self.subTest(upgrade=upgrade), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                for folder in ("env", "logs", "handoff", "inputs/iam", "inputs/ledger", "inputs/payment", "inputs/reconciliation"):
+                    (root / folder).mkdir(parents=True)
+                cfg.gateway_inputs(root, "postgresql://admin@localhost/postgres", {}, compose=upgrade == "compose")
+                cfg.dump(root / "handoff/trade.json", {"shared": "existing"})
+                cfg.dump(root / "inputs/iam/routes.json", [])
+                stale = root / "inputs/payment/plugins.json"
+                cfg.write(stale, "existing user data")
+                for service in ("backend", "ledger", "notifier"):
+                    cfg.save_env(root / "env" / (service + ".env"), {})
+                cfg.save_env(root / "env/iam-migrate.env", {"AIPAY_DATABASE_URL": "test"})
+                for name, caller in cfg.GATEWAYS.items():
+                    values = keep[caller] | {"AIPAY_" + k: "old" for k in obsolete[caller]}
+                    if upgrade == "compose":
+                        values.update(cfg.gateway_client_settings(name))
+                    cfg.save_env(root / "env" / (caller + ".env"), values)
+                if upgrade == "compose":
+                    cfg.upgrade_demo(root, compose=True)
+                elif upgrade == "demo-config":
+                    (root / "transport.plaintext").touch()
+                    stack.demo_config(root)
+                else:
+                    stack.change_mode(root, "transport", upgrade)
+                verify_gateway_transport(root)
+                for name, caller in cfg.GATEWAYS.items():
+                    env = cfg.read_env(root / "env" / (caller + ".env"))
+                    self.assertTrue(keep[caller].items() <= env.items())
+                    self.assertTrue(env.keys().isdisjoint("AIPAY_" + k for k in obsolete[caller]))
+                    self.assertTrue(cfg.gateway_client_settings(name, upgrade in ("plaintext", "demo-config")).items() <= env.items())
+                self.assertEqual(stale.read_text(), "existing user data")
+                self.assertIn(cfg.TRADE_CREDENTIALS_ROUTE, json.loads((root / "inputs/iam/routes.json").read_text()))
+
+    def test_up_rejects_incomplete_gateway_switch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for directory in ("env", "inputs", "logs"):
+                (root / directory).mkdir()
+            cfg.gateway_inputs(root, "postgresql://admin@localhost/postgres", {}, compose=False)
+            (root / "prepared").touch()
+            cwd = Path.cwd()
+            try:
+                with patch.object(stack, "ROOT", root), patch.object(stack, "start") as start, patch("os.umask"), \
+                     patch.object(sys, "argv", ["stack.py", "up"]):
+                    for name, owner in cfg.GATEWAYS.items():
+                        cfg.save_env(root / "env" / (owner + ".env"), cfg.gateway_client_settings(name))
+                    path = root / "env/reconciliation.env"
+                    cfg.save_env(path, {})
+                    with self.assertRaisesRegex(ValueError, "reconciliation"):
+                        stack.main()
+                    cfg.save_env(path, cfg.gateway_client_settings("upstream-gateway-verification"))
+                    (root / "transport.plaintext").touch()
+                    with self.assertRaisesRegex(ValueError, "payment"):
+                        stack.main()
+                    for name, owner in cfg.GATEWAYS.items():
+                        cfg.save_env(root / "env" / (owner + ".env"), cfg.gateway_client_settings(name, plaintext=True))
+                    with self.assertRaisesRegex(ValueError, "transport"):
+                        stack.main()
+                    start.assert_not_called()
+            finally:
+                os.chdir(cwd)
 
     @unittest.skipUnless(os.getenv("AIPAY_TEST_DEVTOKEN_BINARY"), "supply kaivo-devtoken for process test")
     def test_managed_issuer(self):

@@ -18,7 +18,7 @@ import (
 
 func TestA145ScenarioRouting(t *testing.T) {
 	for _, name := range []string{a145NeverSent, a145StaleBinding, a145UnpaidBeforeT, a145LatePayment, a145Refusals} {
-		amount, channel := scenarioOrder(name, true)
+		amount, channel := scenarioOrder(name)
 		if !isA145Scenario(name) || scenarios[name] == nil || amount != "2.00" || channel != epayChannel {
 			t.Errorf("incorrect native EPay route for %s", name)
 		}

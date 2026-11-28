@@ -173,15 +173,9 @@ func TestDemoOrderRouting(t *testing.T) {
 			if scenarios[name] == nil {
 				t.Fatalf("unregistered scenario %s", name)
 			}
-			for _, gateway := range []bool{true, false} {
-				channel, sim := group.channel, group.sim
-				if !gateway {
-					channel, sim = "sim_form_md5", "md5-demo"
-				}
-				amount, code := scenarioOrder(name, gateway)
-				if amount != group.amount || code != channel || simulatorAccount(code) != sim {
-					t.Errorf("%s (gateway=%v): got %s %s", name, gateway, amount, code)
-				}
+			amount, code := scenarioOrder(name)
+			if amount != group.amount || code != group.channel || simulatorAccount(code) != group.sim {
+				t.Errorf("%s: got %s %s", name, amount, code)
 			}
 		}
 	}
@@ -201,10 +195,9 @@ func TestEPayTimeout(t *testing.T) {
 
 func TestChannelSetupAndWitness(t *testing.T) {
 	const address = "http://127.0.0.1:9080"
-	md5 := channelSetup(md5Channel, true, address, "")
-	epay := channelSetup(epayChannel, true, address, "4200")
-	if md5.minAmount != "1" || md5.maxAmount != "100" || epay.minAmount != "101" || epay.maxAmount != "10000000" ||
-		channelSetup(md5Channel, false, address, "").maxAmount != "10000000" {
+	md5 := channelSetup(md5Channel, address, "")
+	epay := channelSetup(epayChannel, address, "4200")
+	if md5.minAmount != "1" || md5.maxAmount != "100" || epay.minAmount != "101" || epay.maxAmount != "10000000" {
 		t.Fatal("incorrect routing limits")
 	}
 	if epay.queryConfig["gateway"] != address || epay.queryConfig["pid"] != "1001" || epay.queryConfig["unpaid_timeout_seconds"] != "4200" ||
@@ -366,7 +359,7 @@ func TestResumeEPayChannelSetup(t *testing.T) {
 			}))
 			defer srv.Close()
 			op.addr = strings.TrimPrefix(srv.URL, "http://")
-			reason := failureText(func() { d.setupChannel(epayChannel, true) })
+			reason := failureText(func() { d.setupChannel(epayChannel) })
 			if !strings.Contains(reason, "test approval boundary") || d.required("trade-ref/epay_v1") != "new-ref" ||
 				d.required("trade-digest/epay_v1") != digest {
 				t.Fatalf("EPay setup did not resume with the resealed credential: %s", reason)

@@ -3,7 +3,7 @@
 set -eu
 
 if [ -z "${AIPAY_MODULES_TOKEN:-}" ]; then
-  echo "Set AIPAY_MODULES_TOKEN with read-only Contents access to Kaivodev/observability, Kaivodev/protobuf, Kaivodev/servicekit and (for owner images) Kaivodev/upstream-plugins." >&2
+  echo "Set AIPAY_MODULES_TOKEN with read-only Contents access to Kaivodev/observability, Kaivodev/protobuf and Kaivodev/servicekit." >&2
   exit 1
 fi
 if [ "$#" -eq 0 ]; then
@@ -28,7 +28,7 @@ while IFS='=' read -r key value; do
 done
 [ "$protocol" = https ] && [ "$host" = github.com ] || exit 0
 case "$repo_path" in
-  Kaivodev/observability|Kaivodev/observability.git|Kaivodev/protobuf|Kaivodev/protobuf.git|Kaivodev/servicekit|Kaivodev/servicekit.git|Kaivodev/upstream-plugins|Kaivodev/upstream-plugins.git)
+  Kaivodev/observability|Kaivodev/observability.git|Kaivodev/protobuf|Kaivodev/protobuf.git|Kaivodev/servicekit|Kaivodev/servicekit.git)
     printf 'username=x-access-token\npassword=%s\n' "$AIPAY_MODULES_TOKEN" ;;
 esac
 HELPER

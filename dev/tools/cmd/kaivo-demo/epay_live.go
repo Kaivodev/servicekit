@@ -151,7 +151,7 @@ func (c liveCredentials) reportConfig() object {
 
 func (d *driver) checkLivePrerequisites(action string) {
 	c := readLiveCredentials()
-	require(d.gatewayMode(), "epay-live requires gateway mode")
+	d.requireGateways()
 	if action == "run" {
 		require(d.data["step/setup/"+channelStepName(liveVariant, "核验账户与启用")] != nil, "complete demo setup epay-live first")
 	} else {
@@ -190,7 +190,7 @@ func requireLiveDomain(code, host string, manifest []byte) {
 }
 
 func liveChannelSpec(c liveCredentials, timeout string) channelSpec {
-	s := channelSetup(epayChannel, true, c.gateway.String(), timeout)
+	s := channelSetup(epayChannel, c.gateway.String(), timeout)
 	s.name, s.minAmount, s.maxAmount, s.priority = "EPay 测试上游", "111", "111", 0
 	s.tradeFile, s.queryFile = "", ""
 	s.tradeConfig["pid"], s.queryConfig["pid"] = c.pid, c.pid
@@ -203,7 +203,7 @@ func (d *driver) setupLiveEPay() {
 		d.evidence("配置", d.liveCredentials().reportConfig())
 		d.login("operations")
 	})
-	d.setupChannel(liveVariant, true)
+	d.setupChannel(liveVariant)
 }
 
 func liveOrderSettings() (string, time.Duration) {

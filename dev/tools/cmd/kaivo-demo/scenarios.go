@@ -127,16 +127,13 @@ type tradeRun struct {
 	channel, amount                  string
 }
 
-func scenarioOrder(scenario string, gateway bool) (amount, channel string) {
+func scenarioOrder(scenario string) (amount, channel string) {
 	switch scenario {
 	case livePhase:
 		return "1.11", epayChannel
 	case "main", "duplicates", "dispute", "seller-offline", "bot-notices", "statement", "archived-work", "cancel", a144NotSent, a144NotFound,
 		a145NeverSent, a145StaleBinding, a145UnpaidBeforeT, a145LatePayment, a145Refusals, kQueryTransient, kLedgerCancelEvent, disputeReturn, disputePaidRelease, disputePaidRace:
-		if gateway {
-			return "2.00", epayChannel
-		}
-		return "2.00", md5Channel
+		return "2.00", epayChannel
 	default:
 		return "1.00", md5Channel
 	}
@@ -155,7 +152,7 @@ func (d *driver) createParams(number, amount string) url.Values {
 }
 
 // Resolve the immutable binding on the created order before using any upstream
-// endpoint. On resume this also recovers pre-UG-7 embedded order amounts.
+// endpoint.
 func (t tradeRun) readOrderRoute() (order, code, money string) {
 	d := t.d
 	rows := d.rows("payment", "payment_orders", `SELECT id::text AS order_id,channel_code,channel_account_id,
@@ -179,12 +176,9 @@ func (t tradeRun) checkOrderRoute(row object) (order, code, money string) {
 		require(account == d.required("uuid/"+channelKey(liveVariant, "channel")),
 			fmt.Sprintf("order routed to %s channel account %s instead of the EPay test upstream", code, account))
 	}
-	gateway := d.gatewayMode()
-	amount, expected := scenarioOrder(d.history.Scenario, gateway)
+	amount, expected := scenarioOrder(d.history.Scenario)
 	require(code == expected, fmt.Sprintf("order %s routed to %s, expected %s", order, code, expected))
-	if gateway {
-		require(money == amount, "gateway order amount differs from scenario")
-	}
+	require(money == amount, "gateway order amount differs from scenario")
 	return order, code, money
 }
 
@@ -202,7 +196,7 @@ func (t tradeRun) baseline() {
 }
 
 func (d *driver) trade(name, proto string) tradeRun {
-	amount, _ := scenarioOrder(d.history.Scenario, d.gatewayMode())
+	amount, _ := scenarioOrder(d.history.Scenario)
 	t := tradeRun{d: d, name: name, proto: proto, number: d.key(d.scope + "/" + name)}
 	k := d.scope + "/" + name
 	t.baseline()
@@ -488,11 +482,7 @@ func (d *driver) cancel(late bool) {
 	t := d.trade(name, "v2")
 	configured := d.env("reconciliation")[lateWindowEnv]
 	t.step("关单", func() {
-		if t.channel == epayChannel {
-			t.backdateUnpaid()
-		} else if late {
-			t.setScenario(object{"late_payment": true})
-		}
+		t.backdateUnpaid()
 		if late {
 			d.rows("reconciliation", "database forward warm-up", "SELECT 1 AS ok")
 		}
@@ -511,9 +501,7 @@ func (d *driver) cancel(late bool) {
 			// Keep the existing one-second tolerance for the merchant close scenario.
 			checkUnpaidSeparation(rows, window-time.Second)
 			d.evidence("independent_observations", rows)
-			if t.channel == epayChannel {
-				t.inferredCloseEvidence()
-			}
+			t.inferredCloseEvidence()
 			t.finish(false)
 		})
 		return
@@ -530,20 +518,16 @@ func (d *driver) cancel(late bool) {
 		}
 		d.evidence("independent_observations", rows)
 		d.chainEvidence(t.order)
-		if t.channel == epayChannel {
-			t.inferredCloseEvidence()
-		}
+		t.inferredCloseEvidence()
 		require(d.ledgerTrade(t.order)["status"] != "CANCELLED" && len(d.rows("ledger", "ledger_trade_authorizations", "SELECT source_event_id FROM ledger_trade_authorizations WHERE order_id=$1 AND event_type='TradeCancellationAuthorized'", t.order)) == 0, "late payment released escrow as unpaid")
 		d.evidence("after", d.balanceSnapshot(d.scope+"/late"))
 	})
 	t.release()
-	if t.channel == epayChannel {
-		t.step("无取消授权", func() {
-			auth := d.facts("reconciliation", "取消授权", `SELECT authorization_id FROM reconciliation_authorizations
-				WHERE order_id=$1 AND event_type='TradeCancellationAuthorized'`, t.order)
-			require(len(auth) == 0, "cancellation authorization issued for late payment")
-		})
-	}
+	t.step("无取消授权", func() {
+		auth := d.facts("reconciliation", "取消授权", `SELECT authorization_id FROM reconciliation_authorizations
+			WHERE order_id=$1 AND event_type='TradeCancellationAuthorized'`, t.order)
+		require(len(auth) == 0, "cancellation authorization issued for late payment")
+	})
 }
 func (d *driver) refund(after bool) {
 	t := d.refundTrade("退款", "v2")

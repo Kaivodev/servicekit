@@ -6,7 +6,6 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"io/fs"
 	"os"
@@ -233,43 +232,6 @@ func (d *driver) registry(kind, kid string, decl object) {
 	check(e)
 	require(time.Now().Before(expiry), "registry record expired")
 }
-func (d *driver) packages() {
-	if d.gatewayMode() {
-		d.gatewayPackages()
-		return
-	}
-	for _, code := range []string{"sim_form_md5", "sim_form_md5_verify"} {
-		d.step("制作 "+code, func() {
-			local := filepath.Join(filepath.Dir(d.repo), "upstream-plugins")
-			src := filepath.Join(d.dir, "upstream-plugins-v0.2.2")
-			if _, e := os.Stat(src); os.IsNotExist(e) {
-				command(d.dir, os.Environ(), "git", "clone", "--no-local", "--branch", "v0.2.2", "--depth", "1", local, src)
-			}
-			env := append(os.Environ(), "GOWORK=off", "GOTOOLCHAIN=go1.27.3")
-			head := command(src, env, "git", "rev-parse", "HEAD")
-			tag := command(local, env, "git", "rev-parse", "v0.2.2^{commit}")
-			require(bytes.Equal(head, tag) && len(command(src, env, "git", "status", "--porcelain", "--untracked-files=all")) == 0, "plugin source differs from clean v0.2.2")
-			ctl := filepath.Join(d.dir, "pluginctl")
-			command(src, env, "go", "build", "-mod=readonly", "-o", ctl, "./cmd/pluginctl")
-			out, e := os.MkdirTemp(d.dir, code+"-")
-			check(e)
-			pkg := filepath.Join(out, "package")
-			source := "plugins/" + code
-			for _, args := range [][]string{{"build", "--source", source, "--out", out + "/build"}, {"package", "--dir", out + "/build", "--out", pkg}, {"replay", "--dir", pkg, "--out", out + "/report.json"}, {"verify", "--source", source, "--dir", pkg}} {
-				d.trace("pluginctl " + args[0] + " " + code)
-				result := command(src, env, ctl, args...)
-				if args[0] == "package" {
-					var v object
-					decode(result, &v)
-					d.put("hash/"+code, str(v, "package_sha256"))
-				}
-			}
-			d.put("package/"+code, pkg)
-			d.evidence("commit", strings.TrimSpace(string(head)))
-			d.evidence("package_sha256", d.required("hash/"+code))
-		})
-	}
-}
 func (d *driver) upload(code string) object {
 	return d.uploadPackage(code, "")
 }
@@ -292,30 +254,11 @@ func (d *driver) uploadPackage(code, ref string) object {
 	hash, e := hex.DecodeString(d.required("hash/" + key))
 	check(e)
 	manifest, wasm := file(filepath.Join(pkg, "manifest.json")), file(filepath.Join(pkg, "plugin.wasm"))
-	if d.gatewayMode() {
-		_, digest := d.checkGatewayPackage(code, manifest, wasm, d.gatewayRevision(ref, ref != ""))
-		require(bytes.Equal(digest, hash), "gateway package changed since setup packages")
-	} else {
-		manifest = canonicalManifest(manifest)
-	}
+	_, digest := d.checkGatewayPackage(code, manifest, wasm, d.gatewayRevision(ref, ref != ""))
+	require(bytes.Equal(digest, hash), "gateway package changed since setup packages")
 	return object{"manifest_json": b64.EncodeToString(manifest), "package_sha256": b64.EncodeToString(hash), "plugin_wasm": b64.EncodeToString(wasm), "fixtures": fixtures}
 }
 
-// canonicalManifest re-encodes the package manifest the way payment,
-// reconciliation and the backend command digest expect: compact JSON with
-// object keys sorted, integers kept verbatim and no HTML escaping. pluginctl
-// writes struct field order, which the owners reject as non-canonical.
-func canonicalManifest(raw []byte) []byte {
-	d := json.NewDecoder(bytes.NewReader(raw))
-	d.UseNumber()
-	var v any
-	check(d.Decode(&v))
-	var out bytes.Buffer
-	e := json.NewEncoder(&out)
-	e.SetEscapeHTML(false)
-	check(e.Encode(v))
-	return bytes.TrimSuffix(out.Bytes(), []byte("\n"))
-}
 func (d *driver) seller() {
 	d.step("卖方开通登记", d.enrollSeller)
 	d.step("卖方邀请与 TOTP", func() {

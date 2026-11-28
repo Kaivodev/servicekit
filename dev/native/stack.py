@@ -14,10 +14,10 @@ import tempfile
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from stack_config import (DEPOSIT_SERVICES, GATEWAYS, LIBRARY, OWNERS, SERVICES, STATE, WORKSPACE,
-                          coverage_mode, dump, gateway_client_settings, native_deposit_inputs, new_epay_account,
-                          prepare, read_env, refresh, save_env, switch_gateway_clients, upgrade_demo, write)
+                          coverage_mode, current_client_env, dump, gateway_client_keys, native_deposit_inputs, new_epay_account,
+                          prepare, read_env, refresh, save_env, switch_gateways, upgrade_demo, write)
 from deposit_scenario import SPEC, generate
-from verify import epay_handoff, verify
+from verify import epay_handoff, verify, verify_gateway_transport
 import telemetry
 from processes import health, request, service_env, services, start, stop, supervise, transport
 
@@ -164,10 +164,10 @@ def change_mode(root, action, mode, endpoint=None):
         if mode == "plaintext":
             if (root / "deposits.enabled").exists():
                 raise ValueError("plaintext conflicts with deposits-on because devcollection requires mTLS")
-            switch_gateway_clients(root, plaintext=True)
+            switch_gateways(root, plaintext=True)
             write(marker, "")
         else:
-            switch_gateway_clients(root, plaintext=False)
+            switch_gateways(root, plaintext=False)
             marker.unlink(missing_ok=True)
     elif mode == "stdout":
         write(root / "logs.stdout", "")
@@ -185,14 +185,14 @@ def demo_config(root):
 def epay_on(root):
     if (root / "stack.env").is_file():
         raise ValueError("epay-on requires a native stack; the native controller cannot check running Compose containers")
-    if transport(root) == "plaintext":
-        raise ValueError("epay-on requires mTLS gateway mode; plaintext is unsupported")
     if any(request(name, "pid") for name in ("upstream-sim", "payment", "reconciliation", *GATEWAYS)):
         raise ValueError("run down before enabling EPay")
 
     payment_path = root / "env/payment.env"
     recon_path = root / "env/reconciliation.env"
-    payment, recon = read_env(payment_path), read_env(recon_path)
+    old_payment, old_recon = read_env(payment_path), read_env(recon_path)
+    payment = current_client_env("payment", old_payment)
+    recon = current_client_env("reconciliation", old_recon)
     if not payment.get("AIPAY_UPSTREAM_GATEWAY_ADDRESS") or not recon.get("AIPAY_RECONCILIATION_UPSTREAM_GATEWAY_ADDRESS"):
         raise ValueError("epay-on requires configured trade and verification gateways")
     callback = "AIPAY_PLUGIN_CALLBACK_URL"
@@ -221,10 +221,12 @@ def epay_on(root):
         dump(handoff, credential, mode=handoff.stat().st_mode & 0o777 if handoff.exists() else 0o600)
     if url.path != "/callback/{channel_code}":
         payment[callback] = url._replace(path="/callback/{channel_code}").geturl()
+    if payment != old_payment:
         save_env(payment_path, payment, mode=payment_path.stat().st_mode & 0o777)
     if channels.get("epay_v1_verify") != "epay_v1":
         channels["epay_v1_verify"] = "epay_v1"
         recon[mapping] = json.dumps(channels, separators=(",", ":"))
+    if recon != old_recon:
         save_env(recon_path, recon, mode=recon_path.stat().st_mode & 0o777)
     verify(root)
 
@@ -242,7 +244,7 @@ def main():
     coverage = sub.add_parser("coverage")
     coverage.add_argument("mode", choices=("file", "attestation", "status"))
     coverage.add_argument("--validity", metavar="DURATION", help="attestation lifetime (default 4m, range 1m to 26h)")
-    sub.add_parser("epay-on", help="upgrade a stopped native mTLS gateway stack in place for the EPay demo")
+    sub.add_parser("epay-on", help="upgrade a stopped native gateway stack in place for the EPay demo")
     modes = sub.add_parser("telemetry").add_subparsers(dest="mode", required=True)
     modes.add_parser("on").add_argument("--endpoint")
     modes.add_parser("off")
@@ -353,12 +355,13 @@ def main():
         elif args.action == "migrate":
             migrate()
         elif args.action == "up":
-            gateway_mode = transport(ROOT) == "mtls"
+            mode = transport(ROOT)
             for name, peer in GATEWAYS.items():
-                owner_env = read_env(ROOT / "env" / (peer + ".env"))
-                configured = all(owner_env.get(key) for key in gateway_client_settings(name))
-                if configured != gateway_mode:
-                    raise ValueError("inconsistent transport configuration; rerun transport MODE or prepare a fresh UG-4 stack")
+                env = read_env(ROOT / "env" / (peer + ".env"))
+                address, server_name = gateway_client_keys(name)
+                if not env.get(address) or (mode == "plaintext" and env.get(server_name) != name):
+                    raise ValueError(f"{peer} gateway settings are incomplete. Rerun stack transport {mode}.")
+            verify_gateway_transport(ROOT)
             started = []
             try:
                 for name in names:

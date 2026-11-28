@@ -75,7 +75,7 @@ func TestA144CancellationPayload(t *testing.T) {
 func TestNativeGatewayScenarioPrerequisites(t *testing.T) {
 	for _, scenario := range []string{a144NotFound, a144NotSent, a145NeverSent, a145StaleBinding, a145UnpaidBeforeT, a145LatePayment, a145Refusals, kQueryTransient, kLedgerCancelEvent, disputeReturn} {
 		root := t.TempDir()
-		amount, channel := scenarioOrder(scenario, true)
+		amount, channel := scenarioOrder(scenario)
 		if scenarios[scenario] == nil || channel != epayChannel || amount != "2.00" {
 			t.Fatal("missing EPay scenario", scenario)
 		}
@@ -95,7 +95,7 @@ func TestNativeGatewayScenarioPrerequisites(t *testing.T) {
 		check(os.Remove(marker))
 		payment := filepath.Join(root, "env/payment.env")
 		check(atomic(payment, nil))
-		refuses("需要交易与核验网关")
+		refuses("Prepare a fresh stack")
 		check(atomic(filepath.Join(root, "env/reconciliation.env"), []byte("AIPAY_RECONCILIATION_UPSTREAM_GATEWAY_ADDRESS=verify\n")))
 		check(atomic(filepath.Join(root, "inputs/upstream-sim/config.json"), []byte(`{"environment":"test"}`)))
 		for _, mode := range []string{"staging", "production"} {

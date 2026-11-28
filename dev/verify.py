@@ -4,9 +4,10 @@ import json
 import re
 import stat
 import subprocess
+import tomllib
 from urllib.parse import urlsplit
 
-from stack_config import APP_ROLES, GATEWAYS, PEERS, SERVICES, read_env
+from stack_config import APP_ROLES, GATEWAYS, PEERS, SERVICES, TOKEN_ISSUER, read_env
 
 
 def check(ok, message):
@@ -27,7 +28,29 @@ def epay_handoff(accounts):
     return {"merchant_key": key}
 
 
+def verify_gateway_transport(root):
+    mode = "plaintext" if (root / "transport.plaintext").is_file() else "mtls"
+    for name, peer in GATEWAYS.items():
+        path = root / "inputs" / name / "gateway.toml"
+        config = tomllib.loads(path.read_text())
+        check(config.get("role") == name.removeprefix("upstream-gateway-") and config.get("allowed_peers") == [peer],
+              f"{name} role or caller mismatch")
+        check(config.get("transport", "mtls") == mode, f"{name} transport does not match {mode}")
+        if mode == "mtls":
+            tls = config.get("tls")
+            check(isinstance(tls, dict) and all(tls.get(k) for k in ("trust_domain", "ca_file", "cert_file", "key_file"))
+                  and "service_token" not in config, f"{name} requires mTLS authentication settings")
+        else:
+            token = config.get("service_token")
+            check("tls" not in config and isinstance(token, dict) and token.get("issuer") == TOKEN_ISSUER and
+                  "issuer_file" not in token and token.get("service_namespaces") == {peer: "local"} and
+                  isinstance(token.get("jwks_file"), str) and
+                  (path.parent / token["jwks_file"]).resolve() == (root / "token-issuer/jwks.json").resolve(),
+                  f"{name} service token settings do not match the local issuer")
+
+
 def verify(root):
+    verify_gateway_transport(root)
     certs = root / "certs"
     for directory in ("env", "inputs", "handoff", "certs"):
         for path in (root / directory).rglob("*"):
@@ -73,9 +96,6 @@ def verify(root):
     check(epay_handoff(accounts) == json.loads((root / "handoff/epay.json").read_bytes()),
           "EPay handoff credential mismatch")
     shared = json.loads((root / "handoff/trade.json").read_bytes())["shared"]
-    if (root / "transport.plaintext").exists():
-        payment = json.loads((root / "inputs/payment/plugins.json").read_bytes())["credentials"]["sim-md5-v1"]
-        check(base64.b64decode(payment["secrets"]["shared"]).decode() == shared, "embedded credential mismatch")
     readonly = json.loads((root / "handoff/query.json").read_text())["query_key"]
     check(sim["shared_secret"] == shared and
           sim["query_shared_secret"] == readonly and readonly != sim["shared_secret"], "simulator credential mismatch")

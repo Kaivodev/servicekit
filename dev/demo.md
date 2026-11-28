@@ -4,7 +4,7 @@
 
 ## 网关制包与凭据
 
-Native and Compose read the gateway address from payment.env. Kubernetes selects the same gateway setup when payment-config and reconciliation-config both specify their respective gateways. Embedded deployments use upstream-plugins v0.2.2. [Kubernetes configuration and package versions](README.md#kubernetes-gateway-overlay)
+All targets use Rust ABI v3 packages. Native and Compose require the trade gateway address in `payment.env`. Kubernetes requires the trade and verification addresses in their respective ConfigMaps. Native plaintext transport runs both gateways with service tokens. [Kubernetes configuration and package versions](README.md#kubernetes-gateway-overlay)
 
 `demo setup packages` 从同级 upstream-gateway 的 HEAD 克隆已提交内容，用该提交的 pluginctl 对 `sim_form_md5`、`sim_form_md5_verify`、`epay_v1`、`epay_v1_verify` 分别 build、package、replay。使用 Git、Cargo、Rust 1.99.1（`wasm32-unknown-unknown`）、wasm-tools 1.263.0 和 Python 3.14.7，构建主机见网关的 build-config.json。源码已含生成好的绑定，重新生成绑定时使用 wit-bindgen-cli 0.63.0。也可将 `KAIVO_DEMO_PLUGIN_PACKAGES` 指向含上述四个包的目录，每包提供 `<code>/manifest.json`、`plugin.wasm`、`fixtures/`。驱动校验 ABI v3、提交及规范 manifest，与存在的同级仓库核对 HEAD，并对原始 manifest 和 wasm 的连续字节计算 SHA-256。
 
@@ -29,7 +29,7 @@ stack demo run seller-offline
 stack demo run cancel
 ```
 
-`epay-on` 仅支持停机的本机 mTLS 网关栈。`build --workspace` 会更新驱动，并用临时 modfile、`GOWORK=off` 从 `./cmd/upstream-sim` 重编原栈的模拟器。开通阶段沿用 md5 断点，对仍使用旧上限的通道双批限额，再完成 EPay 的发布、绑定与核验。若 `stack coverage status` 显示 attestation，放币和取消需要有效证明，可在停机期间、`up` 之前执行 `stack coverage file`。
+`epay-on` supports stopped native gateway stacks with either mTLS or plaintext gRPC. `build --workspace` 会更新驱动，并用临时 modfile、`GOWORK=off` 从 `./cmd/upstream-sim` 重编原栈的模拟器。开通阶段沿用 md5 断点，对仍使用旧上限的通道双批限额，再完成 EPay 的发布、绑定与核验。若 `stack coverage status` 显示 attestation，放币和取消需要有效证明，可在停机期间、`up` 之前执行 `stack coverage file`。
 
 ## 通道与金额
 
@@ -38,9 +38,8 @@ stack demo run cancel
 | 网关 `epay_v1` | `epay-demo`，PID 1001 | 101–10000000 | main、duplicates、dispute、seller-offline、bot-notices、statement、archived-work、cancel，每单 2.00 元 |
 | 网关 `epay_v1` 测试上游（显式开通） | 运营者提供的测试商户 | 111 | epay-live，1.11 元，优先级 0 |
 | 网关 `sim_form_md5` | `md5-demo` | 1–100 | refund-insufficient、refund-before-release、refund-after-release、dispute-refund-before-release、dispute-refund-after-release、manual-refund、manual-refund-failure、late-payment，每单 1.00 元 |
-| Embedded `sim_form_md5` (native or Kubernetes) | `md5-demo` | 1–10000000 | 按上述场景取 2.00 或 1.00 元，两种金额均走 form-md5 |
 | Native gateway `epay_v1` | `epay-demo` | 101–10000000 | dispute-return, 2.00 per order |
-| Gateway or embedded `sim_form_md5` | `md5-demo` | 1–100 for gateway, 1–10000000 for embedded | dispute-return-paid, 1.00 per order |
+| Gateway `sim_form_md5` | `md5-demo` | 1–100 | dispute-return-paid, 1.00 per order |
 
 同一卖方使用同一支付方式，payment 按金额筛选候选通道。渠道定价、风控、核验账户各按通道双批，商户平台默认定价只开通一次。报告从 `payment_orders` 读取原单通道和金额，随后按实际账户设置单笔测试场景。payment 用 `AIPAY_PLUGIN_CALLBACK_URL=http://<backend>/callback/{channel_code}` 派发通知地址，EPay 用 GET 通知，form-md5 用 POST。退款单的收银与付款查询走原单通道。卖方提交人工退款凭证后，两名平台复核人使用 WebAuthn 签署当前版本。开发环境异议期为 10 秒，reconciliation 复核后签发 TradeRefundAuthorized，ledger 据此入账。
 
@@ -73,7 +72,7 @@ V1 返回 HTTP 200 且 `code == 1` 时，驱动优先取 `payurl`，缺省时取
 | 初始管理员 | IAM 属主 `bootstrap` 封存同一份声明，通过安全邮件及平台 `auth/password/reset` 设置各自密码。两人分别登录、注册 ES256 凭据、重新登录并完成挑战 | 待验证机 |
 | 邀请人员 | 管理员 1 在平台 `invitations/platform-staff` 邀请两名审批人和审核、运营、风控人员各一名。受保护邀请由管理员 2 批准。每人用自己的邮件令牌接受邀请，注册 WebAuthn 并登录 | 待验证机 |
 | 登记审批人 | payment `approvers register`；reconciliation `registry approvers/dispute-approvers register`。争议登记使用 payment 返回的 key ID 和同一自然人。重试先 list 并核对指纹 | 待验证机 |
-| 制包 | 按栈配置选择四份 Rust v3 包或两份 Go v0.2.2 包，上传前核对包摘要 | 待验证机 |
+| Packaging | Build the four Rust ABI v3 packages and verify each digest before upload. | Pending validation |
 | 卖方 | Telegram 私聊 `/start` 注册，`/balance` 取账户 ID，按账户 ID 和 Telegram 用户 ID 只读核对 `iam_telegram_bindings.user_id`。将六项声明持久化后执行 IAM 属主 `sellers activate`。管理员邀请同一账户和邮箱，卖方接受邀请、绑定 TOTP 并登录。指定已登记账户时用 `sellers list` 核对 | 待验证机 |
 | 钱包与预存 | `deposits-on` 为实际卖方生成绑定，ledger `wallets register` 开立 collection_wallet。normal、replay、延后原回执的第三块样本，逐笔核对卖方门户与钱包 | 待验证机 |
 | 双域发布 | 运营分别在平台 `plugins`、`verification/plugins` 上传，两名登记审批人各自签署属主生成的规范材料。核对实际提交人的 `requested_by`、材料摘要、两份签署记录和最终状态 | 待验证机 |
@@ -94,7 +93,7 @@ Both K scenarios require the native stack with trade and verification gateways, 
 |---|---|---|
 | epay-live | 浏览器支付 1.11 元，核对网关建单和查单记录、独立 paid 观测、放币授权及余额，最后停用测试通道。 | 待验证机 |
 | main | V1 /mapi.php 下单。卖方门户冻结 Q 后显示模拟收银页，HTTPS POST 付款，模拟器向 backend 回调。payment 主动查单产生 OrderPaid，商户验签并回 success。风险到期后 reconciliation 独立查单、签授权，ledger 放币。卖方减少 Q，商户增加 N，三项费用合计增加 F，Q=N+F | 2026-11-26 本机 mTLS 栈在 EPay 通过 |
-| cancel | V2 /api/pay/create、/api/pay/close。两笔独立订单，首次需两条间隔至少五秒的 closed/unpaid 才归还 Q。EPay 查 payment 跳过关单审计、超时推定完成码和取消核验请求。嵌入模式迟付单使用 late_payment。在首条核验后收银付款，要求其后观察到 paid 且没有取消授权。payment 可能先于独立复查查到付款并转入放币核验，所以这条 paid 记在取消或放币核验下都算，再等待放币，按该单基线核对卖方 −Q、商户 +N、三项费用 +F | 2026-11-26 本机 mTLS 栈在 EPay 通过（迟付步骤在断言修正后续跑，沿用原样本证据） |
+| cancel | V2 /api/pay/create、/api/pay/close。两笔独立订单，首次需两条间隔至少五秒的 closed/unpaid 才归还 Q。EPay 查 payment 跳过关单审计、超时推定完成码和取消核验请求。在首条核验后收银付款，要求其后观察到 paid 且没有取消授权。payment 可能先于独立复查查到付款并转入放币核验，所以这条 paid 记在取消或放币核验下都算，再等待放币，按该单基线核对卖方 −Q、商户 +N、三项费用 +F | 2026-11-26 本机 mTLS 栈在 EPay 通过（迟付步骤在断言修正后续跑，沿用原样本证据） |
 | a144-not-sent | 本机 EPay 监听暂停 3 秒。用派单许可审计 ID 核对首次建单的 transport_connect、零请求和重试成功记录，从平台原单取付款指令，验签商户通知并核对放币余额 | 待本机运行 |
 | a144-not-found | 本机模拟器丢失一次已发送的建单。查单缺单期间原担保仍为 RESERVED。开发属主回拨后核对系统关单原因、取消请求的 protobuf basis、间隔至少 5 秒的两次 not_found_unpaid 及取消授权，最后核对原单、冻结与余额 | 待本机运行 |
 | a145-never-sent | Pause the native simulator for 60 seconds. Force-close an unsent EPay order in retry_create, count eligibility retries, and check zero transmitted creates, two not_found_unpaid observations, and the returned escrow. | Pending native run |
@@ -122,7 +121,7 @@ Both K scenarios require the native stack with trade and verification gateways, 
 | seller-offline | 卖方 TOTP 再认证后切换本单通道。两端意愿版本各加一，平台 control_version 保持原值；下线期间新单收到签名拒绝，原已付款订单仍放币，上线后另一下单成功 | 2026-11-26 本机 mTLS 栈在 EPay 通过 |
 | bot-notices | 用新单触发已收款、资金已可用。按事件 ID 和序号核对 backend 的 sent 投递，按两个单号及法币/USDT 金额核对私聊和群的四个消息 ID，并检查开通审核投递 | 2026-11-26 本机 mTLS 栈在 EPay 通过 |
 | statement | 私聊列业务日并收 zip，核对说明、发布公钥、清单签名、三个文件摘要及 CSV/JSON 与当日分录。已绑定群两条命令均引导私聊 | 未纳入 UG-7 验收：ledger 按 UTC+8 自然日出文件，新栈当天无法发布；与上游通道无关，2026-11-24 在 form-md5 通过 |
-| archived-work | EPay 用 `api_fault=malformed` 使本单查单持续返回 unknown，嵌入模式用 `query_unknown=true`。PUT `{}` 恢复。平台运维从归档清单选中原任务。WebAuthn 再认证后恢复，按操作人、版本、原次数、原因和 worker 重新领取记录验收 | 未纳入 UG-7 验收：等待时间来自 payment 重试退避（约 2.5 小时），与上游通道无关；EPay 截断应答判为 unknown 已按源码核对，2026-11-24 在 form-md5 通过 |
+| archived-work | Set `api_fault=malformed` on the EPay order to keep returning an unknown query result. Send `PUT` with `{}` to restore normal responses. 平台运维从归档清单选中原任务。WebAuthn 再认证后恢复，按操作人、版本、原次数、原因和 worker 重新领取记录验收 | 未纳入 UG-7 验收：等待时间来自 payment 重试退避（约 2.5 小时），与上游通道无关；EPay 截断应答判为 unknown 已按源码核对，2026-11-24 在 form-md5 通过 |
 
 ## 第 11 轮运行条件
 

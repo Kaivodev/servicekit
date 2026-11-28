@@ -54,7 +54,7 @@ In v0.14.0, IAM can include `telegram_bot` when `amr` contains `telegram` and `w
 
 ## 使用与验证
 
-Native mTLS, Compose and the Kubernetes gateway overlay use Rust ABI v3 plugins for trade and verification. Kubernetes selects gateway mode from the payment and reconciliation ConfigMaps. Embedded deployments use the Go plugins. [Kubernetes setup](dev/README.md#kubernetes-gateway-overlay) · [Demo prerequisites](dev/demo.md)
+Native, Compose and Kubernetes run separate trade and verification gateways with Rust ABI v3 plugins. Native defaults to mTLS. With `stack transport plaintext`, both gateways authenticate gRPC calls using short-lived service tokens. Kubernetes requires both gateway addresses in the payment and reconciliation ConfigMaps. [Kubernetes setup](dev/README.md#kubernetes-gateway-overlay) · [Demo prerequisites](dev/demo.md)
 
 生产使用已发布固定版本，各服务示例配置位于自身 `.env.example`。CI 的只读 `AIPAY_MODULES_TOKEN` 需要读取 observability、protobuf 和 dev/tools 固定使用的已发布 servicekit。本机也可使用 Git 凭据。
 

@@ -13,10 +13,9 @@ import time
 
 import telemetry
 
-from stack_config import DEPOSIT_SERVICES, GATEWAYS, LIBRARY, PEERS, PORTS, SERVICES, deposit_settings, read_env, write
+from stack_config import DEPOSIT_SERVICES, GATEWAYS, LIBRARY, PEERS, PORTS, SERVICES, TOKEN_ISSUER, deposit_settings, read_env, write
 
 
-TOKEN_ISSUER = "kaivo-native"
 TOKEN_SERVICES = tuple(name for name in SERVICES if name != "cashier")
 
 
@@ -29,6 +28,8 @@ def token_targets():
     for target, callers in PEERS.items():
         for caller in callers.split(","):
             targets[caller].append(target)
+    for target, caller in GATEWAYS.items():
+        targets[caller].append(target)
     return targets
 
 
@@ -69,8 +70,7 @@ def services(root):
     # The line-6000 settlement binary only accepts mTLS and has no K2 workload.
     workloads = tuple(s for s in SERVICES if not (plaintext and s == "settlement"))
     queue = ("queue-redis",) if (root / "data/queue-redis/redis.conf").exists() else ()
-    gateways = () if plaintext else tuple(GATEWAYS)
-    return issuer + managed + queue + deposits + gateways + workloads
+    return issuer + managed + queue + deposits + tuple(GATEWAYS) + workloads
 
 
 def command(root, name):

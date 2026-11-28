@@ -29,6 +29,7 @@ CACHE_DB = {"backend": 0, "iam": 1, "ledger": 2, "settlement": 3, "reconciliatio
 PEERS = {"iam": "backend,payment,settlement", "ledger": "backend,payment,reconciliation,settlement",
          "payment": "backend,ledger,reconciliation,notifier", "reconciliation": "backend,ledger,settlement",
          "settlement": "backend"}
+TOKEN_ISSUER = "kaivo-native"
 GATEWAYS = {"upstream-gateway-trade": "payment", "upstream-gateway-verification": "reconciliation"}
 LEDGER_RATE_FILE_LIMIT = 64 << 10  # ledger/internal/fx/devfile.go
 
@@ -249,7 +250,7 @@ def generate_inputs(root, sim_listen, cert_days=None):
     for svc in SERVICES:
         for parent in ("inputs", "logs", "data"):
             (root / parent / svc).mkdir(parents=True, mode=0o700)
-    for directory in ("env", "handoff", "data/iam/mail", "data/ledger/anchors", "data/payment/evidence"):
+    for directory in ("env", "handoff", "data/iam/mail", "data/ledger/anchors"):
         (root / directory).mkdir(mode=0o700)
     ids = ",".join((*PEERS, *GATEWAYS, "backend", "notifier", "collection", "probe", "cashier"))
     args = ["go", "run", "-mod=readonly", "./cmd/devcert", "--services", ids,
@@ -281,7 +282,7 @@ def generate_inputs(root, sim_listen, cert_days=None):
 
 
 def gateway_inputs(root, admin, passwords, compose):
-    for name, peer in GATEWAYS.items():
+    for name in GATEWAYS:
         inputs = root / "inputs" / name
         inputs.mkdir(mode=0o700)
         (root / "logs" / name).mkdir(mode=0o700)
@@ -292,10 +293,13 @@ def gateway_inputs(root, admin, passwords, compose):
             "GATEWAY_DATABASE_URL": database_url(admin, db, password, db, prefix=""),
         })
         write(inputs / "kek", secrets.token_bytes(32))
-        certs = Path("/run/kaivo/identity") if compose else Path("../../certs") / name
-        ca = "/run/kaivo/ca.crt" if compose else "../../certs/ca.crt"
-        listen = "0.0.0.0" if compose else "127.0.0.1"
-        write(inputs / "gateway.toml", f'''role = "{name.removeprefix('upstream-gateway-')}"
+        write(inputs / "gateway.toml", gateway_toml(name, compose=compose))
+
+
+def gateway_toml(name, *, compose=False, plaintext=False):
+    listen = "0.0.0.0" if compose else "127.0.0.1"
+    peer = GATEWAYS[name]
+    config = f'''role = "{name.removeprefix('upstream-gateway-')}"
 mode = "development"
 {GATEWAY_MIGRATE_ON_START}
 listen = "{listen}:{PORTS[name]}"
@@ -304,13 +308,26 @@ database_url_env = "GATEWAY_DATABASE_URL"
 local_kek_file = "kek"
 allow_loopback_http = true
 allow_uncommitted = false
+'''
+    if plaintext:
+        return config + f'''transport = "plaintext"
 
+[service_token]
+jwks_file = "../../token-issuer/jwks.json"
+issuer = "{TOKEN_ISSUER}"
+
+[service_token.service_namespaces]
+{peer} = "local"
+'''
+    certs = Path("/run/kaivo/identity") if compose else Path("../../certs") / name
+    ca = "/run/kaivo/ca.crt" if compose else "../../certs/ca.crt"
+    return config + f'''
 [tls]
 trust_domain = "aipay.test"
 ca_file = "{ca}"
 cert_file = "{certs}/tls.crt"
 key_file = "{certs}/tls.key"
-''')
+'''
 
 
 # upstream-gateway v0.8.0 runs no DDL unless told to. Development stacks keep
@@ -334,60 +351,50 @@ def enable_gateway_migration(root):
         write(path, "".join(lines))
 
 
-def gateway_client_settings(name):
+def gateway_client_keys(name):
     prefix = "AIPAY_RECONCILIATION_" if GATEWAYS[name] == "reconciliation" else "AIPAY_"
-    return {prefix + "UPSTREAM_GATEWAY_ADDRESS": f"127.0.0.1:{PORTS[name]}"}
+    return prefix + "UPSTREAM_GATEWAY_ADDRESS", prefix + "UPSTREAM_GATEWAY_SERVER_NAME"
 
 
-def embedded_client_settings(root, peer):
-    if peer == "payment":
-        return {"AIPAY_PLUGIN_CREDENTIALS_FILE": root / "inputs/payment/plugins.json",
-                "AIPAY_PLUGIN_EVIDENCE_DIRECTORY": root / "data/payment/evidence",
-                "AIPAY_PLUGIN_TEST_ONLY_ALLOW_LOOPBACK": "true"}
-    return {"AIPAY_RECONCILIATION_VERIFICATION_ALLOW_HTTP": "on",
-            "AIPAY_RECONCILIATION_VERIFICATION_ALLOW_LOOPBACK": "on",
-            "AIPAY_RECONCILIATION_SECRET_SEALER": "local",
-            "AIPAY_RECONCILIATION_SECRET_KEY_FILE": root / "inputs/reconciliation/sealer.key"}
-
-
-def switch_gateway_clients(root, plaintext):
-    trade = root / "handoff/trade.json"
-    if not trade.is_file():
-        raise ValueError("UG-4 requires fresh prepare with gateway identities and databases (see dev/README.md)")
-    plugins = root / "inputs/payment/plugins.json"
+def gateway_client_settings(name, plaintext=False):
+    address, server_name = gateway_client_keys(name)
+    settings = {address: f"127.0.0.1:{PORTS[name]}"}
     if plaintext:
-        # Retain the two embedded-mode keys across transport switches.
-        evidence = root / "handoff/plaintext-evidence.key"
-        sealer = root / "inputs/reconciliation/sealer.key"
-        for key in (evidence, sealer):
-            if not key.exists():
-                write(key, secrets.token_bytes(32))
-        shared = json.loads(trade.read_bytes())["shared"]
-        dump(plugins, {"credentials": {"sim-md5-v1": {"secrets": {"shared": b64(shared.encode())}}},
-                       "evidence_key": b64(evidence.read_bytes())})
+        settings[server_name] = name
+    return settings
+
+
+# Older prepared stacks may still contain settings rejected by the gateway clients.
+RETIRED_CLIENT_KEYS = {
+    "payment": tuple("AIPAY_PLUGIN_" + key for key in (
+        "CREDENTIALS_FILE", "EVIDENCE_DIRECTORY", "EGRESS_PROXY", "TEST_ONLY_ALLOW_LOOPBACK",
+        "TEST_ONLY_ALLOW_PRIVATE", "REQUEST_TIMEOUT")),
+    "reconciliation": tuple("AIPAY_RECONCILIATION_" + key for key in (
+        "VERIFICATION_PROXY", "VERIFICATION_TIMEOUT", "VERIFICATION_ALLOW_LOOPBACK",
+        "VERIFICATION_TEST_ONLY_ALLOW_PRIVATE", "SECRET_KEY_FILE", "SECRET_KEYS_FILE", "SECRET_KMS_KEY",
+        "SECRET_SEALER")),
+}
+
+
+def current_client_env(service, values):
+    retired = RETIRED_CLIENT_KEYS.get(service, ())
+    return {key: value for key, value in values.items() if key not in retired}
+
+
+def switch_gateways(root, plaintext):
+    if not (root / "handoff/trade.json").is_file():
+        raise ValueError("prepare a fresh stack with gateway identities and databases")
     for name, peer in GATEWAYS.items():
+        write(root / "inputs" / name / "gateway.toml", gateway_toml(name, plaintext=plaintext))
         env = root / "env" / (peer + ".env")
-        values = read_env(env)
-        gateway, embedded = gateway_client_settings(name), embedded_client_settings(root, peer)
-        remove, add = (gateway, embedded) if plaintext else (embedded, gateway)
-        prefix = "AIPAY_" if peer == "payment" else "AIPAY_RECONCILIATION_"
-        if plaintext:
-            for suffix in ("UPSTREAM_GATEWAY_CALL_TIMEOUT", "UPSTREAM_GATEWAY_SERVER_NAME"):
-                values.pop(prefix + suffix, None)
-        else:
-            suffixes = ("PLUGIN_EGRESS_PROXY", "PLUGIN_TEST_ONLY_ALLOW_PRIVATE", "PLUGIN_REQUEST_TIMEOUT") if peer == "payment" else (
-                "VERIFICATION_PROXY", "VERIFICATION_TIMEOUT", "VERIFICATION_TEST_ONLY_ALLOW_PRIVATE")
-            for suffix in suffixes:
-                values.pop(prefix + suffix, None)
-        for k in remove:
-            values.pop(k, None)
-        save_env(env, values | add)
+        values = current_client_env(peer, read_env(env))
+        _, server_name = gateway_client_keys(name)
+        values.pop(server_name, None)
+        save_env(env, values | gateway_client_settings(name, plaintext))
     table = root / "inputs/iam/routes.json"
-    current = json.loads(table.read_bytes())
-    rules = [rule for rule in current if rule != TRADE_CREDENTIALS_ROUTE]
-    dump(table, rules if plaintext else rules + [TRADE_CREDENTIALS_ROUTE])
-    if not plaintext:
-        plugins.unlink(missing_ok=True)
+    rules = json.loads(table.read_bytes())
+    if TRADE_CREDENTIALS_ROUTE not in rules:
+        dump(table, rules + [TRADE_CREDENTIALS_ROUTE])
 
 
 def native_deposit_inputs(root, admin, passwords):
@@ -508,7 +515,10 @@ def upgrade_demo(root, compose=False):
             raise ValueError("conflicting IAM route: " + " ".join(key))
         by_path[key] = rule
     write(table, json.dumps(list(by_path.values()), separators=(",", ":")) + "\n")
-    enable_gateway_migration(root)
+    if not compose and (root / "transport.plaintext").is_file():
+        switch_gateways(root, plaintext=True)
+    else:
+        enable_gateway_migration(root)
     review = root / "inputs/payment/seller-reviews.json"
     if not review.exists():
         write(review, "[]\n")
@@ -525,7 +535,7 @@ def upgrade_demo(root, compose=False):
     }
     for svc, additions in changes.items():
         path = root / "env" / (svc + ".env")
-        values = read_env(path)
+        values = current_client_env(svc, read_env(path))
         if svc == "payment" and values.get("AIPAY_PAYMENT_DEV_SELLER_REVIEWS_FILE"):
             del additions["AIPAY_PAYMENT_DEV_SELLER_REVIEWS_FILE"]
         settings = demo_settings(root, svc, compose)

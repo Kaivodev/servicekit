@@ -47,13 +47,20 @@ func versionAtLeast(version, minimum string) bool {
 	return true
 }
 
-func (d *driver) gatewayMode() bool {
-	trade := d.env("payment")["AIPAY_UPSTREAM_GATEWAY_ADDRESS"] != ""
-	if !d.native() {
-		verification := d.env("reconciliation")["AIPAY_RECONCILIATION_UPSTREAM_GATEWAY_ADDRESS"] != ""
-		require(trade == verification, "payment-config/AIPAY_UPSTREAM_GATEWAY_ADDRESS and reconciliation-config/AIPAY_RECONCILIATION_UPSTREAM_GATEWAY_ADDRESS must both be configured or both be absent")
+func (d *driver) requireGateways() {
+	const payment = "AIPAY_UPSTREAM_GATEWAY_ADDRESS"
+	const verification = "AIPAY_RECONCILIATION_UPSTREAM_GATEWAY_ADDRESS"
+	if d.native() {
+		if _, err := os.Stat(filepath.Join(d.root, "env/payment.env")); os.IsNotExist(err) {
+			stop("payment.env is missing. Prepare a fresh stack before running the demo.")
+		}
+		require(d.env("payment")[payment] != "", "payment.env requires "+payment+". Prepare a fresh stack before running the demo.")
+		return
 	}
-	return trade
+	trade := d.env("payment")[payment] != ""
+	verify := d.env("reconciliation")[verification] != ""
+	require(trade == verify, "partial gateway overlay: payment-config/"+payment+" and reconciliation-config/"+verification+" must both be configured")
+	require(trade, "deploy the trade and verification gateways and configure both gateway addresses before running the demo")
 }
 
 func (d *driver) gatewayRepo() string {
@@ -135,7 +142,8 @@ func pluginCommand(dir string, env []string, bin string, args ...string) []byte 
 	return out
 }
 
-func (d *driver) gatewayPackages() {
+func (d *driver) packages() {
+	d.requireGateways()
 	d.buildGatewayPackages(os.Getenv("KAIVO_DEMO_PLUGIN_PACKAGES"), "", md5Channel, md5Channel+"_verify", epayChannel, epayChannel+"_verify")
 }
 
