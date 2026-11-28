@@ -33,6 +33,8 @@ type delivery struct {
 	ID, After, Chat, User int64
 	Command               string
 	Date                  int64
+	TOTPStep              int64
+	Sent                  bool
 }
 
 func (t delivery) update() object {
@@ -52,45 +54,33 @@ func (d *driver) deliver(label string, user, chat int64, command func() string) 
 	if d.read(key+"/reply", &saved) {
 		return saved
 	}
+	// Loading the webhook configuration can cross a TOTP step on a resumed run.
+	env := d.env("backend")
 	var t delivery
-	if !d.read(key, &t) {
-		var serial int64
-		if !d.read("update_id", &serial) {
-			// backend keeps update digests in the shared cache Redis for 24 hours,
-			// so a fresh state must not reuse an earlier stack's update IDs.
-			serial = time.Now().UnixMilli()
+	pending := d.read(key, &t)
+	if pending && t.TOTPStep != 0 {
+		now := totpStep(time.Now())
+		if t.TOTPStep < now-iamTOTPSkewSteps || t.TOTPStep > now+iamTOTPSkewSteps {
+			// A crash can fall between the HTTP write and its checkpoint. Reconcile
+			// an expired pending update even if the write was never confirmed.
+			if msg, found := d.checkExpiredDelivery(label, t); found {
+				d.put(key+"/reply", msg)
+				return msg
+			}
+			delete(d.data, key)
+			d.save()
+			pending = false
 		}
-		serial++
-		d.put("update_id", serial)
-		t = delivery{serial, int64(len(d.messages())), chat, user, command(), time.Now().Unix()}
+	}
+	if !pending {
+		t = d.newDelivery(user, chat, command)
 		d.put(key, t)
 	}
-	env := d.env("backend")
-	route := env["AIPAY_TELEGRAM_WEBHOOK_PATH"]
-	if route == "" {
-		route = "/telegram/webhook"
-	}
-	b := d.browser("merchant")
-	cmd := strings.Fields(t.Command)[0]
-	req := b.request("POST", route, "application/json", encoded(t.update()), map[string]string{"X-Telegram-Bot-Api-Secret-Token": env["AIPAY_TELEGRAM_WEBHOOK_SECRET"]})
-	if cmd == "/start" {
-		d.queueStart(t.User)
-	}
-	code, _ := b.send(req, route+" "+cmd)
-	require(code == 200, "webhook delivery failed")
-	var msg message
-	for _, m := range d.messages() {
-		replyChat := chat
-		if t.Command == "/bind_group" {
-			replyChat = user
-		}
-		if m.ID > t.After && m.Chat == replyChat && !accountNoticeText(m.Text) {
-			msg = m
-			break
-		}
-	}
-	require(msg.ID > 0, "webhook acknowledged without a bot reply (check monitor and fixtures)")
-	if msg.Text == "请求无法处理" || strings.HasPrefix(msg.Text, "输入格式有误") || msg.Text == "尚未开放" {
+	d.sendDelivery(env, key, &t, !pending)
+	replies := d.deliveryReplies(t)
+	require(len(replies) > 0, "webhook acknowledged without a bot reply (check monitor and fixtures)")
+	msg := replies[0]
+	if botRefused(msg.Text) {
 		// Definitive refusal: a new update (and a fresh TOTP) is needed after the cause is fixed.
 		delete(d.data, key)
 		if strings.HasPrefix(t.Command, "/access_submit ") {
@@ -102,6 +92,79 @@ func (d *driver) deliver(label string, user, chat int64, command func() string) 
 	require(msg.Text != "" || msg.Document != nil, "bot reply was deleted before delivery could be confirmed")
 	d.put(key+"/reply", msg)
 	return msg
+}
+
+func (d *driver) newDelivery(user, chat int64, command func() string) delivery {
+	var serial int64
+	if !d.read("update_id", &serial) {
+		// Backend keeps update digests for 24 hours, including across fresh driver states.
+		serial = time.Now().UnixMilli()
+	}
+	serial++
+	d.put("update_id", serial)
+	t := delivery{ID: serial, After: int64(len(d.messages())), Chat: chat, User: user}
+	previous := d.commandTOTPStep
+	d.commandTOTPStep = &t.TOTPStep
+	defer func() { d.commandTOTPStep = previous }()
+	t.Command = command()
+	t.Date = time.Now().Unix()
+	return t
+}
+
+func (d *driver) sendDelivery(env map[string]string, key string, t *delivery, firstAttempt bool) {
+	defer func() {
+		// A failed replay cannot rule out a write by an earlier driver.
+		if firstAttempt && !t.Sent {
+			delete(d.data, key)
+			d.save()
+		}
+	}()
+	d.postTelegram(env, *t, func() error {
+		if t.Sent {
+			return nil
+		}
+		t.Sent = true
+		d.data[key] = encoded(t)
+		return d.saveState()
+	})
+}
+
+func (d *driver) postTelegram(env map[string]string, t delivery, markSent func() error) {
+	route := env["AIPAY_TELEGRAM_WEBHOOK_PATH"]
+	if route == "" {
+		route = "/telegram/webhook"
+	}
+	b := d.browser("merchant")
+	cmd := strings.Fields(t.Command)[0]
+	req := b.request("POST", route, "application/json", encoded(t.update()), map[string]string{"X-Telegram-Bot-Api-Secret-Token": env["AIPAY_TELEGRAM_WEBHOOK_SECRET"]})
+	if cmd == "/start" {
+		d.queueStart(t.User)
+	}
+	var code int
+	if markSent == nil {
+		code, _ = b.send(req, route+" "+cmd)
+	} else {
+		code = b.sendTracked(req, route+" "+cmd, markSent)
+	}
+	require(code == 200, "webhook delivery failed")
+}
+
+func (d *driver) deliveryReplies(t delivery) []message {
+	var replies []message
+	replyChat := t.Chat
+	if t.Command == "/bind_group" {
+		replyChat = t.User
+	}
+	for _, m := range d.messages() {
+		if m.ID > t.After && m.Chat == replyChat && !accountNoticeText(m.Text) {
+			replies = append(replies, m)
+		}
+	}
+	return replies
+}
+
+func botRefused(s string) bool {
+	return s == "\u8bf7\u6c42\u65e0\u6cd5\u5904\u7406" || strings.HasPrefix(s, "\u8f93\u5165\u683c\u5f0f\u6709\u8bef") || s == "\u5c1a\u672a\u5f00\u653e"
 }
 func (d *driver) bot(key, cmd string) string {
 	return d.telegram(key, merchantUser, func() string { return cmd }).Text
@@ -153,7 +216,7 @@ func (d *driver) merchant() {
 			ver := capture(` · 版本 ([0-9]+)`, s)
 			if proto == "v1" {
 				m := d.telegram("issue-key", merchantUser, func() string { return "/key_generate " + app + " " + ver + " " + d.freshTOTP("merchant") })
-				require(regexp.MustCompile(`^[A-Za-z0-9]{32}$`).MatchString(m.Text), "IAM did not deliver V1 KEY")
+				require(v1KeyReply.MatchString(m.Text), "IAM did not deliver V1 KEY")
 				check(atomic(filepath.Join(d.dir, "merchant-key.json"), encoded(object{"PID": d.required("pid/v1"), "Key": m.Text})))
 				d.syncMerchantKeys()
 				waitFor("backend deleteMessage for KEY", 6*time.Minute, func() bool {
@@ -172,7 +235,7 @@ func (d *driver) merchant() {
 				s = d.telegram("upload-key", merchantUser, func() string {
 					return "/key_upload " + app + " " + ver + " " + base64.StdEncoding.EncodeToString(spki) + " " + d.freshTOTP("merchant")
 				}).Text
-				require(s == "已上传 V2 公钥", "RSA upload refused")
+				require(s == v2UploadReply, "RSA upload refused")
 			}
 			if proto == "v2" {
 				keyInfo := d.bot("platform-key", "/platform_key "+app)

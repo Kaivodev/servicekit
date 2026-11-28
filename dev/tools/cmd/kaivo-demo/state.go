@@ -122,9 +122,13 @@ type driver struct {
 	history                report
 	active                 *result
 	browsers               map[string]*browser
+	commandTOTPStep        *int64
 }
 
-func (d *driver) save()               { check(atomic(filepath.Join(d.dir, "state.json"), encoded(d.data))) }
+func (d *driver) saveState() error {
+	return atomic(filepath.Join(d.dir, "state.json"), encoded(d.data))
+}
+func (d *driver) save()               { check(d.saveState()) }
 func (d *driver) put(k string, v any) { d.data[k] = encoded(v); d.save() }
 func (d *driver) read(k string, v any) bool {
 	b, ok := d.data[k]

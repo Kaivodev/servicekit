@@ -108,11 +108,13 @@ func emergencyChallenge(owner, user, key, version string, control uint64, reason
 	b = binary.BigEndian.AppendUint64(b, control)
 	return approval.Digest(appendField(b, reason))
 }
+func totpStep(at time.Time) int64 { return at.Unix() / 30 }
+
 func totp(secret string, at time.Time) string {
 	key, e := base32.StdEncoding.WithPadding(base32.NoPadding).DecodeString(secret)
 	check(e)
 	h := hmac.New(sha1.New, key)
-	h.Write(binary.BigEndian.AppendUint64(nil, uint64(at.Unix()/30)))
+	h.Write(binary.BigEndian.AppendUint64(nil, uint64(totpStep(at))))
 	sum := h.Sum(nil)
 	n := sum[len(sum)-1] & 15
 	return fmt.Sprintf("%06d", (binary.BigEndian.Uint32(sum[n:])&0x7fffffff)%1000000)

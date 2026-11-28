@@ -2,16 +2,20 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
 	"io"
 	"maps"
+	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 
 	"slices"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -79,6 +83,66 @@ func (b *browser) send(req *http.Request, label string) (int, []byte) {
 
 func (b *browser) sendWithHeaders(req *http.Request, label string) (int, []byte, http.Header) {
 	res, e := localHTTP.Do(req)
+	return b.response(req, label, res, e)
+}
+
+type deliveryConn struct {
+	net.Conn
+	written func()
+}
+
+func (c deliveryConn) Write(p []byte) (int, error) {
+	n, err := c.Conn.Write(p)
+	if n > 0 {
+		c.written()
+	}
+	return n, err
+}
+
+// Observe the connection for this webhook alone. For a small HTTP/1 POST,
+// WroteRequest can fire while the entire request is still buffered in net/http.
+func (b *browser) sendTracked(req *http.Request, label string, markSent func() error) int {
+	var once sync.Once
+	var saveErr error
+	written := func() { once.Do(func() { saveErr = markSent() }) }
+	client := *localHTTP
+	if transport, ok := client.Transport.(*http.Transport); ok {
+		tr := transport.Clone()
+		dial := tr.DialContext
+		if dial == nil {
+			dial = (&net.Dialer{}).DialContext
+		}
+		tr.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			conn, err := dial(ctx, network, addr)
+			if err != nil {
+				return nil, err
+			}
+			return deliveryConn{conn, written}, nil
+		}
+		client.Transport = tr
+		defer tr.CloseIdleConnections()
+	} else {
+		trace := &httptrace.ClientTrace{WroteRequest: func(info httptrace.WroteRequestInfo) {
+			if info.Err == nil {
+				written()
+			}
+		}}
+		req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
+	}
+	res, err := client.Do(req)
+	if res != nil {
+		written()
+	}
+	once.Do(func() {}) // Join an in-flight callback and disarm any later one.
+	if saveErr != nil && res != nil {
+		res.Body.Close()
+	}
+	check(saveErr)
+	code, _, _ := b.response(req, label, res, err)
+	return code
+}
+
+func (b *browser) response(req *http.Request, label string, res *http.Response, e error) (int, []byte, http.Header) {
 	if e != nil {
 		stop("%s %s transport failed", req.Method, label)
 	}
@@ -241,8 +305,9 @@ func (d *driver) email(name string) string {
 // below the limit and wait for the window to expire instead of tripping the
 // lockout. The state key keeps its historical totp-window name.
 const (
-	totpWindow = 5*time.Minute + 2*time.Second
-	totpBudget = 4
+	totpWindow       = 5*time.Minute + 2*time.Second
+	totpBudget       = 4
+	iamTOTPSkewSteps = 1
 )
 
 type mfaWindow struct {
@@ -285,11 +350,15 @@ func (d *driver) freshTOTP(name string) string {
 	now := d.chargeMFA(name, func() {
 		var last int64
 		d.read("totp-step/"+name, &last)
-		for time.Now().Unix()/30 <= last || time.Now().Unix()%30 >= 28 {
+		for totpStep(time.Now()) <= last || time.Now().Unix()%30 >= 28 {
 			d.sleep(250 * time.Millisecond)
 		}
 	})
-	d.put("totp-step/"+name, now.Unix()/30)
+	step := totpStep(now)
+	d.put("totp-step/"+name, step)
+	if d.commandTOTPStep != nil {
+		*d.commandTOTPStep = step
+	}
 	return totp(d.required("totp/"+name), now)
 }
 func (d *driver) login(name string) {
