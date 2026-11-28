@@ -58,7 +58,7 @@ func materialBytes(b []byte, desc pr.MessageDescriptor, m object) []byte {
 			if v == nil {
 				// These owner encodings include an explicit absent-presence byte.
 				require(desc.ParentFile().Package() == "aipay.reconciliation.v1" ||
-					desc.Name() == "SellerRefundReviewMaterial" || desc.Name() == "SellerRefundFailureMaterial", "missing approval field "+k)
+					desc.Name() == "SellerRefundReviewMaterial" || desc.Name() == "SellerRefundFailureMaterial" || desc.Name() == "AmountMismatchRecoveryMaterial", "missing approval field "+k)
 				b = append(b, 0)
 				continue
 			}
@@ -228,6 +228,9 @@ func (d *driver) approveExisting(label, owner, requesterID, assertPath string, r
 		}
 		d.login(person)
 		r = d.browser(person).write(label+"/"+person, assertPath+"/approvals/"+aid+"/assertions", func() object { return object{"assertion": d.assert(person, digest)} })
+		if nested, ok := r["approval"].(object); ok {
+			r = nested
+		}
 		require(bytes.Equal(challenge(owner, requesterID, r), digest), "approval changed between people")
 	}
 	records, ok := r["approvals"].([]any)

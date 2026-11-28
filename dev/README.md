@@ -372,6 +372,21 @@ Run these scenarios on the native process stack with both simulator gateways, si
 - `dispute-paid-refund` pays a 1.00 form-md5 order with an open dispute and no ruling. It checks duplicate callbacks, rejects a return proposal and completes a pre-release manual refund through seller evidence, two reviews and a signed merchant refund query.
 - `dispute-paid-race` requires deposits enabled. It backdates a 2.00 simulator order and **pauses ledger's reconciliation matches reader** while reconciliation authorizes cancellation and payment records the fence. It checks that release, refund and another return are all refused, resumes the reader within the signed authorization lifetime (five minutes locally), and follows the linked late payment through seller evidence and review to closure. The merchant sees status 0 and receives no payment notification.
 
+### Risk extensions and amount-mismatch recovery
+
+Run `stack demo run SCENARIO` on the native gateway stack after seller, channel and merchant V2 setup. Use payment migration 000029, reconciliation 000024, ledger 000021 and IAM 000022. These scenarios use a 2.00 CNY order on the shared EPay V1 simulator channel. Extension orders lock a two-person-approved policy with a 20-second hold and a 3,600-second extension cap. The driver then restores the shared channel terms for subsequent orders.
+
+| Scenario | Checks |
+| --- | --- |
+| `risk-extension-platform` | Request a 600-second extension, check deferral past the original deadline and refuse self-approval. After two approvals, verify the merchant notice and release within three minutes of the extended deadline, with `effective_at` equal to that deadline. |
+| `risk-extension-seller-rejected` | Bind seller TOTP to the request, reject it, and verify withdrawal and the seller notice. Check release within three minutes of the original deadline with `effective_at` equal to it. Refuse a repeat request and a grant for the merchant account scope. |
+| `risk-extension-superseded` | Register a dispute with the merchant's order evidence. Verify the superseded hold stays on disputed escrow through the pre-release refund handoff. After the seller refunds and two reviewers approve with a zero objection window, check escrow and order are refunded. Allow up to 11 minutes for payment to record `moot`. |
+| `mismatch-reverify` | Override the query amount, verify an open case on a stopped order, clear the override and follow two approvals through a fresh paid query, OrderPaid and independently authorized release. |
+| `mismatch-refund` | Refund the observed 1.00 CNY after two approvals. Check the ledger occupation precedes the seller notice, reject 2.00 evidence, review 1.00 evidence twice and verify the seller receives Q while the merchant query stays unpaid. |
+| `mismatch-refund-failed` | Obtain two approvals to judge the awaiting-seller refund failed and verify the original reservation, stopped unknown order and reopened case. |
+
+Rerun the same command to resume. To start a fresh sample, remove that scenario's `finished/SCENARIO` and `step/SCENARIO/...` entries from `state.json` while the driver is stopped. The new run uses fresh order and command keys. Each mismatch override applies only to its order and changes the simulated query response. The cashier still collects the original order amount.
+
 ## 本机卖方预存
 
 先按上面的步骤建栈、执行迁移，取得演示驱动实际开立的卖方账户 UUIDv7。已有本机栈可保留状态，停机后用原管理员连接依次执行 `provision`、`build`、`migrate`。预存阶段默认关闭，只在本机进程版提供。

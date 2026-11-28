@@ -61,13 +61,18 @@ func (d *driver) riskHold() time.Duration {
 
 func (d *driver) approveChannelRisk(variant, channel, effectiveAt string) {
 	label := channelKey(variant, "risk")
+	policy := d.approveRiskVersion(label, d.key(label), channel, effectiveAt, 0, 60)
+	d.put(channelKey(variant, "effective/risk"), str(policy, "effective_at"))
+}
+
+func (d *driver) approveRiskVersion(label, version, channel, effectiveAt string, expected, extension int64) object {
 	approved := d.browser("risk").approve(label, "payment", "/risk-policies/requests", "/risk-policies", object{"change": object{
-		"risk_policy_version": d.key(label), "channel_account_id": channel, "hold_duration_seconds": int64(d.riskHold() / time.Second),
-		"exceptional_extension_seconds": 60, "dispute_handling_timeout_seconds": 120, "effective_at": effectiveAt, "expected_control_version": 0,
+		"risk_policy_version": version, "channel_account_id": channel, "hold_duration_seconds": int64(d.riskHold() / time.Second),
+		"exceptional_extension_seconds": extension, "dispute_handling_timeout_seconds": 120, "effective_at": effectiveAt, "expected_control_version": expected,
 	}})
 	policy := obj(approved["risk_policy"])
 	d.evidence("hold_duration_seconds", num(policy, "hold_duration_seconds"))
-	d.put(channelKey(variant, "effective/risk"), str(policy, "effective_at"))
+	return policy
 }
 
 type channelSpec struct {

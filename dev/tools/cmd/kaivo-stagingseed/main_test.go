@@ -257,6 +257,20 @@ func TestBootstrapAndReplay(t *testing.T) {
 		"GET /api/v1/platform/ledger/adjustments/:id/evidence/:file_no":        "ledger.adjustment.read",
 		"POST /api/v1/platform/ledger/adjustments/requests":                    "ledger.adjustment.submit",
 		"POST /api/v1/platform/ledger/adjustments/approvals/:id/assertions":    "ledger.adjustment.approve",
+
+		"GET /api/v1/platform/orders/:order_id/risk-extensions":                                    "payment.risk_extension.read",
+		"POST /api/v1/platform/orders/:order_id/risk-extension-requests":                           "payment.risk_extension.submit",
+		"GET /api/v1/platform/risk-extensions":                                                     "payment.risk_extension.read",
+		"POST /api/v1/platform/risk-extensions/approvals/:id/assertions":                           "payment.risk_extension.approve",
+		"POST /api/v1/platform/risk-extensions/:id/rejection":                                      "payment.risk_extension.approve",
+		"POST /api/v1/platform/risk-extensions/:id/withdrawal":                                     "payment.risk_extension.submit",
+		"GET /api/v1/platform/amount-mismatches":                                                   "payment.amount_mismatch.read",
+		"GET /api/v1/platform/orders/:order_id/amount-mismatch":                                    "payment.amount_mismatch.read",
+		"POST /api/v1/platform/orders/:order_id/amount-mismatch-recoveries":                        "payment.amount_mismatch.submit",
+		"POST /api/v1/platform/amount-mismatch-recoveries/approvals/:id/assertions":                "payment.amount_mismatch.approve",
+		"POST /api/v1/seller/accounts/:seller_account_id/orders/:order_id/risk-extension-requests": "payment.risk_extension.request",
+		"GET /api/v1/seller/accounts/:seller_account_id/risk-extensions":                           "payment.order.read",
+		"POST /api/v1/seller/accounts/:seller_account_id/risk-extensions/:id/withdrawal":           "payment.risk_extension.request",
 	}
 	checkRoutes := func(rows []map[string]any, total int) {
 		t.Helper()
@@ -284,8 +298,8 @@ func TestBootstrapAndReplay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	checkRoutes(decoded[[]map[string]any](t, string(portal)), 175)
-	checkRoutes(decoded[[]map[string]any](t, raw(t, c, iamInputs, "routes.json")), 187)
+	checkRoutes(decoded[[]map[string]any](t, string(portal)), 188)
+	checkRoutes(decoded[[]map[string]any](t, raw(t, c, iamInputs, "routes.json")), 200)
 	calls, err := os.ReadFile(os.Getenv("SEED_TEST_CALLS"))
 	if err != nil || !slices.Equal(strings.Fields(string(calls)), []string{business, ledger, recon, sim}) {
 		t.Fatal("wrong kubectl namespaces")

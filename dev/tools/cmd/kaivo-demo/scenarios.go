@@ -620,6 +620,13 @@ func (d *driver) dispute() {
 }
 
 var scenarios = map[string]func(*driver){
+	riskExtensionPlatform:       recoveryScenario((*driver).runRiskExtensionPlatform),
+	riskExtensionSellerRejected: recoveryScenario((*driver).runRiskExtensionSellerRejected),
+	riskExtensionSuperseded:     recoveryScenario((*driver).runRiskExtensionSuperseded),
+	mismatchReverify:            recoveryScenario((*driver).runMismatchReverify),
+	mismatchRefund:              recoveryScenario((*driver).runMismatchRefund),
+	mismatchRefundFailed:        recoveryScenario((*driver).runMismatchRefundFailed),
+
 	ledgerAdjustment:     (*driver).runLedgerAdjustment,
 	ledgerApprovalsInbox: (*driver).runLedgerApprovalsInbox,
 	ledgerReadOnlyExit:   (*driver).runLedgerReadOnlyExit,

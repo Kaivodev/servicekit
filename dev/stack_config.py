@@ -465,9 +465,10 @@ def ensure_report_key(root, key=None):
 def demo_settings(root, svc, compose):
     public = Path("/run/kaivo/public") if compose else root / "certs/public"
     if svc == "reconciliation":
-        return {"AIPAY_RECONCILIATION_REFUND_OBJECTION_WINDOW_MIN": "10s"}
+        return {"AIPAY_RECONCILIATION_REFUND_OBJECTION_WINDOW_MIN": "10s" if compose else "0s"}
     if svc == "payment":
-        return {"AIPAY_PAYMENT_REFUND_OBJECTION_WINDOW": "10s", "AIPAY_PAYMENT_REFUND_NOTICES_ENABLED": "true",
+        return {"AIPAY_PAYMENT_REFUND_OBJECTION_WINDOW": "10s" if compose else "0s",
+                "AIPAY_PAYMENT_REFUND_NOTICES_ENABLED": "true", "AIPAY_PAYMENT_RISK_EXTENSION_NOTICES_ENABLED": "true",
                 "AIPAY_PAYMENT_EVENTS": "on", "AIPAY_LEDGER_RPC_ADDRESS": address("ledger", compose),
                 "AIPAY_LEDGER_RPC_SERVER_NAME": "ledger",
                 "AIPAY_LEDGER_EVENT_KEYS_FILE": str(public / "ledger.jwks")}

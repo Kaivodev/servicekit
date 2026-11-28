@@ -246,12 +246,12 @@ class Configuration(unittest.TestCase):
                 self.assertFalse(root.exists())
                 self.assertFalse(root.parent.exists())
 
-    def test_portal_env_files_match_original_defaults(self):
-        # Digests from 8231ab9 cover every filename and byte, including key order.
+    def test_portal_env_files_match_demo_defaults(self):
+        # Digests cover every filename and byte, including key order.
         # Fix the volatile env inputs and substitute the temporary state path.
         for compose, expected in (
-            (False, "ee6dc0f427794a689598eb81f2dcf8e3bfa192a4ea387a4207e51bb4f0f82fa6"),
-            (True, "3e42c3fadb3e303b1c81244e5f722889271d74b63394af1b60314997433e5524"),
+            (False, "ef7dd9eaeed38964586d6c42a62ab2dbf9cf88ac14172150eae08335b53fce31"),
+            (True, "0c8258a621d262815fd589f4bc86a702bee0fda5fc4eab0478d1ebb1d0c14905"),
         ):
             with self.subTest(compose=compose), tempfile.TemporaryDirectory() as tmp, \
                  patch.dict(os.environ, {}, clear=True), patch.object(cfg, "generate_inputs"), \
@@ -424,9 +424,11 @@ class Configuration(unittest.TestCase):
     def assert_demo_settings(self, envs, root, compose):
         public = Path("/run/kaivo/public") if compose else root / "certs/public"
         inputs = Path("/run/kaivo/inputs") if compose else root / "inputs/ledger"
-        self.assertEqual(envs["payment"]["AIPAY_PAYMENT_REFUND_OBJECTION_WINDOW"], "10s")
+        window = "10s" if compose else "0s"
+        self.assertEqual(envs["payment"]["AIPAY_PAYMENT_REFUND_OBJECTION_WINDOW"], window)
+        self.assertEqual(envs["payment"]["AIPAY_PAYMENT_RISK_EXTENSION_NOTICES_ENABLED"], "true")
         self.assertEqual(envs["payment"]["AIPAY_PAYMENT_REFUND_NOTICES_ENABLED"], "true")
-        self.assertEqual(envs["reconciliation"]["AIPAY_RECONCILIATION_REFUND_OBJECTION_WINDOW_MIN"], "10s")
+        self.assertEqual(envs["reconciliation"]["AIPAY_RECONCILIATION_REFUND_OBJECTION_WINDOW_MIN"], window)
         self.assertEqual(envs["payment"]["AIPAY_PAYMENT_EVENTS"], "on")
         self.assertEqual(envs["payment"]["AIPAY_LEDGER_EVENT_KEYS_FILE"], str(public / "ledger.jwks"))
         self.assertEqual(envs["payment"]["AIPAY_LEDGER_RPC_ADDRESS"], "ledger:9102" if compose else "127.0.0.1:9102")

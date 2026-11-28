@@ -120,7 +120,9 @@ func (t tradeRun) approveSellerEvidence(s reviewSubject) object {
 		current[field] == s.id && matchesProposal(obj(op["refunded_amount"]), obj(current["fiat_amount"])), "wrong seller refund approval")
 	if s.kind == "refund" {
 		if d.scope != "settle-refunds" {
-			require(num(op, "objection_window_seconds") == 10, "demo refund requires the configured 10-second objection window")
+			window, err := time.ParseDuration(d.env("payment")["AIPAY_PAYMENT_REFUND_OBJECTION_WINDOW"])
+			check(err)
+			require(time.Duration(num(op, "objection_window_seconds"))*time.Second == window, "signed objection window differs from payment configuration")
 		}
 		require(str(op, "out_refund_no") == current["out_refund_no"], "refund number differs from approval")
 		d.evidence("out_refund_no", current["out_refund_no"])
